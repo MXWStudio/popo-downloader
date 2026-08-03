@@ -1,0 +1,17 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime and temporary files
+*.log
+*.tmp
+*.temp
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Extracted upstream checkout; the pinned source archive is tracked instead.
+vendor/gopeed/v1.9.3/source/

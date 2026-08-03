@@ -1,0 +1,10 @@
+{
+  "name": "Gopeed",
+  "version": "v1.9.3",
+  "license": "GPL-3.0",
+  "sourceCommit": "a5cd53f94c18ac65add684b1113fa5f0b47cc4da",
+  "projectUrl": "https://github.com/GopeedLab/gopeed",
+  "binaryUrl": "https://github.com/GopeedLab/gopeed/releases/download/v1.9.3/Gopeed-v1.9.3-windows-amd64-portable.zip",
+  "sourceUrl": "https://github.com/GopeedLab/gopeed/tree/v1.9.3",
+  "binarySha256": "02b3b2f0ce4b0e0008edc835802ad6f4b241eb863f312b0bdd77b2b2afc9e012"
+}

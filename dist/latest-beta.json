@@ -1,0 +1,12 @@
+{
+    "schemaVersion":  1,
+    "channel":  "beta",
+    "version":  "0.6.0-beta.3",
+    "chromeVersion":  "0.6.0.3",
+    "publishedAt":  "2026-08-01T00:00:00+08:00",
+    "artifact":  "POPO-Stable-Downloader-0.6.0-beta.3-win-x64.zip",
+    "url":  "",
+    "sha256":  "c809134feef90995d29b725205f52173fbbd322e86b6498139152a2799ddb43f",
+    "size":  37779171,
+    "notes":  "Green beta: double-click EXE, then load the prepared unpacked extension once. Includes fixed extension ID, verified Gopeed v1.9.3, native helper, and concurrency 5."
+}

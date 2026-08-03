@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>POPO 稳定下载助手</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">POPO STABLE DOWNLOADER</p>
+          <h1>稳定下载助手</h1>
+        </div>
+        <span id="modeBadge" class="badge">等待操作</span>
+      </header>
+
+      <section id="idleCard" class="instruction">
+        <span class="download-mark">⇩</span>
+        <div>
+          <strong>在 POPO 网页中选择文件夹</strong>
+          <p>点击文件夹右侧、三个点左边的蓝色下载按钮。</p>
+        </div>
+      </section>
+
+      <section id="taskCard" class="task-card" hidden>
+        <span class="caption">当前文件夹</span>
+        <h2 id="folderName">—</h2>
+        <div class="progress-row">
+          <span id="phaseLabel">正在准备</span>
+          <strong id="progressLabel">0 / 0</strong>
+        </div>
+        <div class="progress"><i id="progressBar"></i></div>
+        <p id="lastMessage">正在读取文件清单…</p>
+        <div class="metrics">
+          <div><strong id="metricFiles">0</strong><span>全部文件</span></div>
+          <div><strong id="metricSuccess">0</strong><span>成功</span></div>
+          <div><strong id="metricFailed">0</strong><span>失败</span></div>
+        </div>
+      </section>
+
+      <section class="engine-card">
+        <div class="engine-heading">
+          <strong>Gopeed 下载引擎</strong>
+          <span id="gopeedStatus" class="engine-status" data-state="checking">检测中</span>
+        </div>
+        <p id="gopeedDetail">正在检查本机 Gopeed…</p>
+        <details>
+          <summary>下载位置与连接</summary>
+          <div class="folder-picker-setting">
+            <span>保存根目录</span>
+            <output id="gopeedDownloadDirOverride">使用 Gopeed 默认下载目录</output>
+            <div class="folder-picker-actions">
+              <button id="chooseDownloadDirectoryButton" type="button">选择文件夹</button>
+              <button id="clearDownloadDirectoryButton" type="button">恢复默认</button>
+            </div>
+          </div>
+          <label>
+            API 地址
+            <input id="gopeedEndpoint" type="url" value="http://127.0.0.1:9999" spellcheck="false">
+          </label>
+          <label>
+            API Token（未设置可留空）
+            <input id="gopeedToken" type="password" autocomplete="off">
+          </label>
+          <button id="saveGopeedButton" type="button">保存并检测</button>
+        </details>
+      </section>
+
+      <section class="actions">
+        <button id="pauseButton">暂停</button>
+        <button id="resumeButton">继续</button>
+        <button id="cancelButton" class="danger">取消</button>
+        <button id="retryButton">重试失败项</button>
+      </section>
+
+      <section id="failureList" class="failure-list" hidden>
+        <strong>失败明细</strong>
+        <ul id="failureItems"></ul>
+      </section>
+      <p class="note">文件将保存到上方根目录下的“POPO稳定下载/所选文件夹”。</p>
+      <p id="errorBox" class="error" hidden></p>
+      <footer>版本 0.6.0-beta.3 · 绿色安装版 · 并发 5</footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
