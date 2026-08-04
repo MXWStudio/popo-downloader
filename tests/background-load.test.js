@@ -20,6 +20,7 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
   global.importScripts = (...files) => {
     if (files.includes("core.js")) global.PopoCore = require("../core.js");
     if (files.includes("gopeed.js")) global.PopoGopeed = require("../gopeed.js");
+    if (files.includes("queue.js")) global.PopoQueue = require("../queue.js");
   };
   global.chrome = {
     alarms: {
@@ -46,6 +47,7 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
   delete global.importScripts;
   delete global.PopoCore;
   delete global.PopoGopeed;
+  delete global.PopoQueue;
   delete require.cache[backgroundPath];
 });
 
@@ -71,6 +73,7 @@ test("固定端口不可用时自动启动内置 Gopeed 并保存发现的端口
         }
       };
     }
+    if (files.includes("queue.js")) global.PopoQueue = require("../queue.js");
   };
   global.chrome = {
     alarms: { create() {}, onAlarm: eventStub() },
@@ -111,11 +114,12 @@ test("固定端口不可用时自动启动内置 Gopeed 并保存发现的端口
   assert.deepEqual(nativeRequest, { action: "ensure_gopeed" });
   assert.deepEqual(requestedEndpoints, ["http://127.0.0.1:9999", "http://127.0.0.1:32123"]);
   assert.equal(stored.popoSettings.gopeedEndpoint, "http://127.0.0.1:32123");
-  assert.equal(stored.popoState.settings.gopeedEndpoint, "http://127.0.0.1:32123");
+  assert.equal(stored.popoState, undefined);
 
   delete global.chrome;
   delete global.importScripts;
   delete global.PopoCore;
   delete global.PopoGopeed;
+  delete global.PopoQueue;
   delete require.cache[backgroundPath];
 });

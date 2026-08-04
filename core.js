@@ -69,6 +69,30 @@
     return { entry: null, matchedBy: "", ambiguous: matchingName.length > 1 };
   }
 
+  function inferVirtualListItemCount({ indices, knownSizes, paddingBottom, explicitEmpty } = {}) {
+    if (explicitEmpty) return 0;
+    const numericIndices = (indices || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value >= 0);
+    if (!numericIndices.length) return null;
+
+    const maxIndex = Math.max(...numericIndices);
+    const sizes = (knownSizes || [])
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const bottomPixels = Number.parseFloat(paddingBottom);
+    if (!sizes.length || !Number.isFinite(bottomPixels) || bottomPixels <= 0) {
+      return maxIndex + 1;
+    }
+
+    sizes.sort((left, right) => left - right);
+    const knownSize = sizes[Math.floor(sizes.length / 2)];
+    const remaining = bottomPixels / knownSize;
+    const roundedRemaining = Math.round(remaining);
+    if (Math.abs(remaining - roundedRemaining) > 0.08) return null;
+    return maxIndex + 1 + roundedRemaining;
+  }
+
   function normalizeFormats(value) {
     return splitTokens(value).map((format) => format.replace(/^\*\./, "").replace(/^\./, ""));
   }
@@ -134,6 +158,25 @@
     return "";
   }
 
+  function extractTeamSpaceId(body) {
+    const payload = body && typeof body === "object" && !Array.isArray(body) &&
+      Object.prototype.hasOwnProperty.call(body, "data")
+      ? body.data
+      : body;
+    if (typeof payload === "string" || typeof payload === "number") {
+      return String(payload).trim();
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+    for (const key of ["teamSpaceId", "id", "value"]) {
+      const value = payload[key];
+      if (typeof value === "string" || typeof value === "number") {
+        const normalized = String(value).trim();
+        if (normalized) return normalized;
+      }
+    }
+    return "";
+  }
+
   function csvEscape(value) {
     const text = String(value == null ? "" : value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -168,8 +211,10 @@
   const api = {
     FAILURE,
     buildDownloadFilename,
+    extractTeamSpaceId,
     extensionOf,
     findFirstHttpUrl: (value) => findFirstHttpUrl(value, 0),
+    inferVirtualListItemCount,
     isSystemMetadataFile,
     looksLikeFileTitle,
     makeCsv,

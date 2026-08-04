@@ -1,0 +1,1 @@
+1366bf37bdac8ff1477f9f8179c85d27ba2749a0968c4f87b6adbe2701cd1f0a  POPO-Stable-Downloader-0.7.0-beta.8-win-x64.zip

@@ -5,8 +5,10 @@ const assert = require("node:assert/strict");
 const {
   FAILURE,
   buildDownloadFilename,
+  extractTeamSpaceId,
   extensionOf,
   findFirstHttpUrl,
+  inferVirtualListItemCount,
   isSystemMetadataFile,
   looksLikeFileTitle,
   makeCsv,
@@ -15,6 +17,21 @@ const {
   sanitizePathSegment,
   selectVirtualListMatch
 } = require("../core.js");
+
+test("虚拟列表不滚动也能根据底部占位准确还原项目总数", () => {
+  assert.equal(inferVirtualListItemCount({
+    indices: Array.from({ length: 12 }, (_, index) => String(index)),
+    knownSizes: Array(12).fill("48"),
+    paddingBottom: "1056px"
+  }), 34);
+  assert.equal(inferVirtualListItemCount({
+    indices: ["0", "1", "2", "3", "4", "5", "6"],
+    knownSizes: Array(7).fill("48"),
+    paddingBottom: "0px"
+  }), 7);
+  assert.equal(inferVirtualListItemCount({ explicitEmpty: true }), 0);
+  assert.equal(inferVirtualListItemCount({ indices: [], knownSizes: [] }), null);
+});
 
 test("文件格式和关键词筛选可组合", () => {
   const settings = {
@@ -26,6 +43,20 @@ test("文件格式和关键词筛选可组合", () => {
   assert.equal(matchesFilters("夏日派对-低清.mp4", settings), false);
   assert.equal(matchesFilters("夏日派对.png", settings), false);
   assert.equal(matchesFilters("无关内容.mp4", settings), false);
+});
+
+test("没有筛选条件时各种格式和无扩展名文件都可下载", () => {
+  const settings = { formats: "", includeKeywords: "", excludeKeywords: "" };
+  for (const filename of [
+    "视频.mp4",
+    "设计源文件.psd",
+    "压缩包.7z",
+    "表格.xlsx",
+    "说明文档.pdf",
+    "无扩展名文件"
+  ]) {
+    assert.equal(matchesFilters(filename, settings), true, filename);
+  }
 });
 
 test("扩展名读取忽略大小写", () => {
@@ -98,6 +129,12 @@ test("从嵌套接口响应中提取优先下载地址", () => {
     }
   }), "https://example.com/file.mp4");
   assert.equal(findFirstHttpUrl({ data: { value: "not-a-url" } }), "");
+});
+
+test("团队空间短码接口响应可提取真实 ID", () => {
+  assert.equal(extractTeamSpaceId({ code: 0, data: "987654321" }), "987654321");
+  assert.equal(extractTeamSpaceId({ data: { teamSpaceId: 12345 } }), "12345");
+  assert.equal(extractTeamSpaceId({ code: 500, data: null }), "");
 });
 
 test("CSV 正确转义逗号、引号和换行", () => {

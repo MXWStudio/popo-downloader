@@ -1,0 +1,35 @@
+<svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .tile { fill: #fff; }
+    .edge { stroke: #111; stroke-opacity: .2; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #202630; }
+      .edge { stroke: #fff; stroke-opacity: .28; }
+    }
+  </style>
+  <rect class="tile" width="30" height="30" rx="4"/>
+  <rect class="edge" x=".25" y=".25" width="29.5" height="29.5" rx="3.75" stroke-width=".5"/>
+  <mask id="a" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="5" y="5" width="20" height="20">
+    <path fill-rule="evenodd" clip-rule="evenodd" d="M15.12 5C20.657 5 25 9.464 25 15c0 5.48-4.42 9.911-9.88 10-2.173.017-4.231-.585-5.993-1.868a1.537 1.537 0 0 0-.955-.344c-.469 0-.887.216-1.161.553-.392.439-.762.9-1.047 1.418A.504.504 0 0 1 5.5 25a.487.487 0 0 1-.5-.5 7.719 7.719 0 0 1 1.241-4.006c.336-.569.946-.957 1.65-.982.771-.014 1.205.416 1.747.905 1.495 1.762 3.66 2.636 5.964 2.655 4.346 0 7.952-3.608 7.952-7.952 0-4.343-3.608-7.952-7.71-2.854 0-5.314 1.577-6.693 3.85a1.453 1.453 0 0 1-1.257.749 1.425 1.425 0 0 1-1.425-1.425c0-.34.133-.616.308-.896C8.366 6.78 11.695 5.02 15.12 5Z" fill="#48D5FF"/>
+  </mask>
+  <g mask="url(#a)">
+    <circle cx="15" cy="15" r="14.222" fill="#48D5FF"/>
+    <ellipse cx="15" cy="22.431" rx="14.222" ry="7.431" fill="url(#b)"/>
+    <ellipse cx="21.263" cy="18.056" rx="7.958" ry="7.806" fill="url(#c)"/>
+    <ellipse cx="8.944" cy="10.347" rx="6.417" ry="6.292" fill="url(#d)"/>
+  </g>
+  <defs>
+    <linearGradient id="b" x1="17.649" y1="24.361" x2="21.951" y2="15.908" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF528E"/>
+      <stop offset="1" stop-color="#FF528E" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="d" x1="8.944" y1="10.361" x2="13.696" y2="6.891" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#479DFF"/>
+      <stop offset="1" stop-color="#479DFF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="c" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="rotate(144.412 8.009 13.685) scale(7.32683 7.47734)">
+      <stop stop-color="#479DFF"/>
+      <stop offset="1" stop-color="#479DFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+</svg>

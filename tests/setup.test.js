@@ -33,5 +33,7 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(setupSource, /--install-root/);
   assert.match(setupSource, /--skip-register/);
   assert.match(buildSource, /POPO-Setup\.exe/);
+  assert.match(buildSource, /'queue\.js'/);
+  assert.match(buildSource, /Join-Path \$repoRoot 'assets'/);
   assert.doesNotMatch(buildSource, /Copy-Item[^\n]+START-HERE\.cmd/);
 });

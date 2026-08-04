@@ -200,6 +200,20 @@
     });
   }
 
+  async function startOrReplaceTask(settings, existingTaskId, task, options = {}) {
+    if (existingTaskId) {
+      try {
+        await patchTask(settings, existingTaskId, task, options);
+        await continueTask(settings, existingTaskId, options);
+        return { taskId: existingTaskId, replacedMissingTask: false };
+      } catch (error) {
+        if (error?.code !== 2001) throw error;
+      }
+    }
+    const taskId = await createTask(settings, task, options);
+    return { taskId, replacedMissingTask: Boolean(existingTaskId) };
+  }
+
   function deleteTask(settings, taskId, options = {}) {
     return request(settings, `/api/v1/tasks/${encodeURIComponent(taskId)}?force=true`, {
       ...options,
@@ -223,6 +237,7 @@
     pauseTask,
     request,
     requestHeaders,
+    startOrReplaceTask,
     splitDownloadTarget
   };
 });

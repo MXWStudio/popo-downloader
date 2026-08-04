@@ -82,6 +82,7 @@ $extensionFiles = @(
   'background.js',
   'content.js',
   'core.js',
+  'queue.js',
   'gopeed.js',
   'page-api.js',
   'popup.css',
@@ -91,6 +92,7 @@ $extensionFiles = @(
 foreach ($file in $extensionFiles) {
   Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $extensionRoot $file)
 }
+Copy-Item -LiteralPath (Join-Path $repoRoot 'assets') -Destination $extensionRoot -Recurse -Force
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\FolderPickerHost.cs') -Destination $nativeHostRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\install.ps1') -Destination $nativeHostRoot
@@ -125,12 +127,12 @@ $channelManifest = [ordered]@{
   channel = 'beta'
   version = $versionName
   chromeVersion = [string]$manifest.version
-  publishedAt = '2026-08-01T00:00:00+08:00'
+  publishedAt = [DateTimeOffset]::Now.ToString('o')
   artifact = [System.IO.Path]::GetFileName($zipPath)
   url = ''
   sha256 = $hash
   size = $size
-  notes = 'Green beta: double-click EXE, then load the prepared unpacked extension once. Includes fixed extension ID, verified Gopeed v1.9.3, native helper, and concurrency 5.'
+  notes = 'Green beta downloading all user file formats recursively, preventing popup connection checks from overwriting progress, auto-recovering interrupted preparation, with verified Gopeed v1.9.3 and concurrency 5.'
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(

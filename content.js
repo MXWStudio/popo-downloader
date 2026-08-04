@@ -12,11 +12,28 @@
   const API_RESPONSE_SOURCE = "popo-stable-downloader-page";
   const BUTTON_CLASS = "popo-stable-download-button";
   const STYLE_ID = "popo-stable-download-style";
-  const MODAL_ID = "popo-stable-download-modal";
+  const PROJECT_COUNT_ID = "popo-stable-project-count";
   const STATUS_ID = "popo-stable-download-status";
+  const QUEUE_PANEL_ID = "popo-stable-download-queue";
   const WORKER_FRAME_ID = "popo-stable-download-worker-frame";
+  const EXTENSION_NODE_SELECTOR = [
+    `#${STYLE_ID}`,
+    `#${PROJECT_COUNT_ID}`,
+    `#${STATUS_ID}`,
+    `#${QUEUE_PANEL_ID}`,
+    `#${WORKER_FRAME_ID}`,
+    `.${BUTTON_CLASS}`
+  ].join(",");
   const IS_TOP_FRAME = window.top === window;
-  const { selectVirtualListMatch } = globalThis.PopoCore;
+  const { inferVirtualListItemCount, selectVirtualListMatch } = globalThis.PopoCore;
+  const { isJobActive, makeFolderJobKey } = globalThis.PopoQueue;
+  let latestQueueState = null;
+  let queueRefreshTimer = null;
+  let projectCountUrl = "";
+  let projectCountCandidate = null;
+  let projectCountCandidateRounds = 0;
+  let projectCountCandidateSince = 0;
+  let workerRecoveryRequestedAt = 0;
 
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,112 +103,154 @@
     return top;
   }
 
+  function setTextIfChanged(element, value) {
+    const nextValue = String(value ?? "");
+    if (element.textContent !== nextValue) element.textContent = nextValue;
+  }
+
+  function extensionElementForNode(node) {
+    if (!node) return null;
+    if (node.nodeType === 1) return node;
+    return node.parentElement || null;
+  }
+
+  function isExtensionOwnedNode(node) {
+    const element = extensionElementForNode(node);
+    if (!element) return false;
+    return element.matches?.(EXTENSION_NODE_SELECTOR) ||
+      Boolean(element.closest?.(EXTENSION_NODE_SELECTOR));
+  }
+
+  function mutationNeedsFolderButtonInstall(mutation) {
+    if (isExtensionOwnedNode(mutation.target)) return false;
+    const changedNodes = [...mutation.addedNodes, ...mutation.removedNodes];
+    return changedNodes.length === 0 || !changedNodes.every(isExtensionOwnedNode);
+  }
+
   function ensureInjectedStyles() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
     style.id = STYLE_ID;
+    const popoLogoUrl = chrome.runtime.getURL("assets/popo-logo.svg");
     style.textContent = `
       .${BUTTON_CLASS} {
         box-sizing: border-box !important;
+        position: relative !important;
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
         flex: 0 0 28px !important;
         width: 28px !important;
         height: 28px !important;
+        overflow: visible !important;
         margin: 0 3px !important;
         padding: 0 !important;
-        border: 1px solid #76aaf4 !important;
+        border: 1px solid #b9cce5 !important;
         border-radius: 6px !important;
         color: #1268e8 !important;
-        background: #f4f8ff !important;
+        background-color: #fff !important;
+        background-position: center !important;
+        background-repeat: no-repeat !important;
+        background-size: 24px 24px !important;
         font: 700 17px/1 "Segoe UI", sans-serif !important;
         cursor: pointer !important;
-        box-shadow: none !important;
+        box-shadow: 0 1px 3px rgba(24, 61, 106, .1) !important;
+        color-scheme: light;
+      }
+      .${BUTTON_CLASS}[data-state="idle"] {
+        background-image: url("${popoLogoUrl}") !important;
+      }
+      .${BUTTON_CLASS}[data-state="idle"]::after {
+        box-sizing: border-box !important;
+        position: absolute !important;
+        right: -2px !important;
+        bottom: -2px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 12px !important;
+        height: 12px !important;
+        border: 1.5px solid #fff !important;
+        border-radius: 999px !important;
+        color: #fff !important;
+        background: #1268e8 !important;
+        content: "↓" !important;
+        font: 700 9px/1 "Segoe UI", sans-serif !important;
+      }
+      .${BUTTON_CLASS}:not([data-state="idle"]) {
+        background-image: none !important;
       }
       .${BUTTON_CLASS}:hover {
-        color: #fff !important;
         border-color: #1268e8 !important;
-        background: #1268e8 !important;
+        background-color: #eaf3ff !important;
+        box-shadow: 0 2px 7px rgba(18, 104, 232, .22) !important;
       }
       .${BUTTON_CLASS}[data-state="scanning"],
       .${BUTTON_CLASS}:disabled {
         cursor: wait !important;
         opacity: .65 !important;
       }
-      #${MODAL_ID} {
+      @media (prefers-color-scheme: dark) {
+        .${BUTTON_CLASS} {
+          color: #89bdff !important;
+          border-color: #4d5a6b !important;
+          background-color: #222a35 !important;
+          box-shadow: 0 1px 4px rgba(0, 0, 0, .28) !important;
+          color-scheme: dark;
+        }
+        .${BUTTON_CLASS}[data-state="idle"]::after {
+          border-color: #222a35 !important;
+          background: #4d9aff !important;
+        }
+        .${BUTTON_CLASS}:hover {
+          border-color: #67aaff !important;
+          background-color: #29384c !important;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, .38) !important;
+        }
+      }
+      :is(html, body).dark .${BUTTON_CLASS},
+      :is(html, body)[data-theme="dark"] .${BUTTON_CLASS},
+      :is(html, body)[data-color-mode="dark"] .${BUTTON_CLASS} {
+        color: #89bdff !important;
+        border-color: #4d5a6b !important;
+        background-color: #222a35 !important;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, .28) !important;
+        color-scheme: dark;
+      }
+      :is(html, body).dark .${BUTTON_CLASS}[data-state="idle"]::after,
+      :is(html, body)[data-theme="dark"] .${BUTTON_CLASS}[data-state="idle"]::after,
+      :is(html, body)[data-color-mode="dark"] .${BUTTON_CLASS}[data-state="idle"]::after {
+        border-color: #222a35 !important;
+        background: #4d9aff !important;
+      }
+      #${PROJECT_COUNT_ID} {
         all: initial;
-        position: fixed;
-        inset: 0;
-        z-index: 2147483647;
-        display: flex;
+        box-sizing: border-box;
+        display: inline-flex;
         align-items: center;
         justify-content: center;
-        background: rgba(14, 25, 39, .42);
-        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-      }
-      #${MODAL_ID} * { box-sizing: border-box; }
-      #${MODAL_ID} .popo-stable-dialog {
-        width: min(420px, calc(100vw - 40px));
-        padding: 24px;
-        border: 1px solid #dbe4ef;
-        border-radius: 14px;
-        color: #17212b;
+        flex: 0 0 auto;
+        min-width: 72px;
+        height: 32px;
+        margin-left: 10px;
+        margin-right: auto;
+        padding: 0 10px;
+        border: 1px solid #e0e6ee;
+        border-radius: 6px;
+        color: #59697a;
         background: #fff;
-        box-shadow: 0 18px 60px rgba(16, 40, 72, .24);
-      }
-      #${MODAL_ID} h2 {
-        margin: 0 0 10px;
-        font-size: 20px;
-        line-height: 1.35;
-      }
-      #${MODAL_ID} p {
-        margin: 7px 0;
-        color: #526170;
-        font-size: 14px;
-        line-height: 1.55;
-      }
-      #${MODAL_ID} .popo-stable-folder {
-        overflow: hidden;
-        margin: 14px 0;
-        padding: 10px 12px;
-        border-radius: 8px;
-        color: #263444;
-        background: #f3f7fc;
-        font-weight: 650;
-        text-overflow: ellipsis;
+        font: 500 13px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
         white-space: nowrap;
       }
-      #${MODAL_ID} .popo-stable-permission-warning {
-        margin: 12px 0;
-        padding: 10px 12px;
-        border: 1px solid #f0c36c;
-        border-radius: 8px;
-        color: #6d4700;
-        background: #fff8e7;
-        font-weight: 650;
+      #${PROJECT_COUNT_ID}[data-state="loading"] {
+        color: #7b8795;
       }
-      #${MODAL_ID} .popo-stable-actions {
-        display: flex;
-        justify-content: flex-end;
-        gap: 9px;
-        margin-top: 18px;
-      }
-      #${MODAL_ID} button {
-        min-width: 88px;
-        height: 38px;
-        padding: 0 16px;
-        border: 1px solid #d6dee8;
-        border-radius: 8px;
-        color: #354152;
-        background: #fff;
-        font: 650 14px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
-        cursor: pointer;
-      }
-      #${MODAL_ID} button[data-primary="true"] {
-        color: #fff;
-        border-color: #1268e8;
-        background: #1268e8;
+      :is(html, body).dark #${PROJECT_COUNT_ID},
+      :is(html, body)[data-theme="dark"] #${PROJECT_COUNT_ID},
+      :is(html, body)[data-color-mode="dark"] #${PROJECT_COUNT_ID} {
+        color: #b6c2d0;
+        border-color: #3b4655;
+        background: #202832;
       }
       #${STATUS_ID} {
         all: initial;
@@ -221,6 +280,168 @@
         font-size: 12px;
         line-height: 1.45;
       }
+      #${QUEUE_PANEL_ID} {
+        all: initial;
+        position: fixed;
+        left: 20px;
+        bottom: 20px;
+        z-index: 2147483645;
+        width: min(380px, calc(100vw - 40px));
+        max-height: min(62vh, 560px);
+        overflow: hidden;
+        border: 1px solid #cfe0f7;
+        border-radius: 12px;
+        color: #223247;
+        background: rgba(255, 255, 255, .98);
+        box-shadow: 0 12px 38px rgba(24, 61, 106, .2);
+        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #${QUEUE_PANEL_ID}[hidden] { display: none !important; }
+      #${QUEUE_PANEL_ID} * { box-sizing: border-box; }
+      #${QUEUE_PANEL_ID} .popo-queue-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 11px 13px;
+        border-bottom: 1px solid #e1e9f2;
+        background: #f5f9ff;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-header strong { font-size: 13px; }
+      #${QUEUE_PANEL_ID} .popo-queue-header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-header span { color: #607086; font-size: 12px; }
+      #${QUEUE_PANEL_ID} .popo-queue-toggle {
+        min-width: 0;
+        height: 26px;
+        padding: 0 8px;
+        border: 1px solid #b9cce4;
+        border-radius: 6px;
+        color: #1268e8;
+        background: #fff;
+        font: 600 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+        cursor: pointer;
+      }
+      #${QUEUE_PANEL_ID}[data-collapsed="true"] {
+        width: min(320px, calc(100vw - 40px));
+      }
+      #${QUEUE_PANEL_ID}[data-collapsed="true"] .popo-queue-header {
+        border-bottom: 0;
+      }
+      #${QUEUE_PANEL_ID}[data-collapsed="true"] .popo-queue-list {
+        display: none;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-list {
+        max-height: min(52vh, 470px);
+        overflow: auto;
+        padding: 6px 10px 9px;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-job {
+        padding: 9px 3px;
+        border-bottom: 1px solid #edf1f6;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-job:last-child { border-bottom: 0; }
+      #${QUEUE_PANEL_ID} .popo-queue-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-name {
+        overflow: hidden;
+        color: #1d2d42;
+        font-size: 13px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-state {
+        flex: none;
+        color: #1268e8;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-detail {
+        margin-top: 5px;
+        color: #607086;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-progress {
+        overflow: hidden;
+        height: 6px;
+        margin-top: 7px;
+        border-radius: 999px;
+        background: #dfe8f3;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-progress i {
+        display: block;
+        width: 0;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #1268e8, #0aa17a);
+        transition: width .2s ease;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-progress[data-indeterminate="true"] i {
+        width: 38%;
+        animation: popo-queue-progress-slide 1.2s ease-in-out infinite alternate;
+      }
+      @keyframes popo-queue-progress-slide {
+        from { transform: translateX(-25%); }
+        to { transform: translateX(190%); }
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 7px;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-cancel {
+        min-width: 0;
+        height: 26px;
+        padding: 0 9px;
+        border: 1px solid #e3a5a5;
+        border-radius: 6px;
+        color: #a32626;
+        background: #fff7f7;
+        font: 600 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+        cursor: pointer;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-cancel:disabled {
+        cursor: wait;
+        opacity: .6;
+      }
+      @media (prefers-color-scheme: dark) {
+        #${PROJECT_COUNT_ID} {
+          color: #b6c2d0;
+          border-color: #3b4655;
+          background: #202832;
+        }
+        #${STATUS_ID},
+        #${QUEUE_PANEL_ID} {
+          color: #e9eff8;
+          border-color: #38485b;
+          background: rgba(25, 32, 42, .98);
+          box-shadow: 0 12px 38px rgba(0, 0, 0, .42);
+        }
+        #${STATUS_ID} span,
+        #${QUEUE_PANEL_ID} .popo-queue-header span,
+        #${QUEUE_PANEL_ID} .popo-queue-detail { color: #a4b0c0; }
+        #${QUEUE_PANEL_ID} .popo-queue-header {
+          border-bottom-color: #33404f;
+          background: #202a38;
+        }
+        #${QUEUE_PANEL_ID} .popo-queue-job { border-bottom-color: #2c3642; }
+        #${QUEUE_PANEL_ID} .popo-queue-name { color: #edf3fb; }
+        #${QUEUE_PANEL_ID} .popo-queue-state { color: #67aaff; }
+        #${QUEUE_PANEL_ID} .popo-queue-cancel {
+          color: #ffaaaa;
+          border-color: #7c4a50;
+          background: #382328;
+        }
+      }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -230,9 +451,128 @@
       if (!folderName || button.dataset.folderName === folderName) {
         button.disabled = false;
         button.dataset.state = "idle";
-        button.textContent = "⇩";
+        setTextIfChanged(button, "");
       }
     }
+  }
+
+  function matchingQueueJob(item) {
+    if (!latestQueueState || !item) return null;
+    const key = makeFolderJobKey({
+      parentUrl: location.href,
+      folderItemIndex: item.itemIndex,
+      folderName: item.name
+    });
+    return (latestQueueState.jobs || []).find((job) => job.key === key && isJobActive(job.status)) || null;
+  }
+
+  function applyQueueStateToButton(button, item) {
+    const job = matchingQueueJob(item);
+    if (!job) {
+      button.disabled = false;
+      button.dataset.state = "idle";
+      setTextIfChanged(button, "");
+      button.title = "稳定下载此文件夹";
+      delete button.dataset.jobId;
+      return;
+    }
+    button.disabled = false;
+    button.dataset.state = job.status;
+    button.dataset.jobId = job.id;
+    setTextIfChanged(button, job.status === "queued" ? "✓" : "…");
+    button.title = job.status === "queued"
+      ? "已添加下载，点击可查看排队状态"
+      : "该文件夹正在处理中，点击可查看状态";
+  }
+
+  function syncFolderButtonsWithQueue() {
+    for (const button of document.querySelectorAll(`.${BUTTON_CLASS}`)) {
+      const row = button.closest(SELECTORS.row);
+      const item = row ? parseRow(row) : null;
+      if (item?.type === "folder") applyQueueStateToButton(button, item);
+    }
+  }
+
+  function projectCountPlacement() {
+    const label = Array.from(document.querySelectorAll("span"))
+      .find((element) => normalizeText(element.textContent) === "所有类型");
+    const leftControl = label?.parentElement;
+    const host = leftControl?.parentElement;
+    if (!host || !leftControl || !host.contains(leftControl)) return null;
+    return { host, leftControl };
+  }
+
+  function currentVirtualListItemCount() {
+    if (hasExplicitEmptyState()) return 0;
+    const scroller = currentDirectoryScroller();
+    if (!scroller) return null;
+    const rows = Array.from(scroller.querySelectorAll(SELECTORS.row));
+    const itemList = scroller.querySelector('[data-test-id="virtuoso-item-list"]');
+    if (!rows.length || !itemList) return null;
+    return inferVirtualListItemCount({
+      indices: rows.map((row) => row.getAttribute("data-item-index") || row.getAttribute("data-index")),
+      knownSizes: rows.map((row) => row.getAttribute("data-known-size")),
+      paddingBottom: getComputedStyle(itemList).paddingBottom,
+      explicitEmpty: false
+    });
+  }
+
+  function installProjectCount() {
+    if (!IS_TOP_FRAME) return;
+    if (!/\/pageDetail\/[a-z0-9]+/i.test(location.href)) {
+      document.getElementById(PROJECT_COUNT_ID)?.remove();
+      projectCountUrl = "";
+      projectCountCandidate = null;
+      projectCountCandidateRounds = 0;
+      projectCountCandidateSince = 0;
+      return;
+    }
+    const placement = projectCountPlacement();
+    if (!placement) return;
+    ensureInjectedStyles();
+    let output = document.getElementById(PROJECT_COUNT_ID);
+    if (!output) {
+      output = document.createElement("span");
+      output.id = PROJECT_COUNT_ID;
+      output.setAttribute("aria-live", "polite");
+    }
+    if (output.parentElement !== placement.host || output.previousSibling !== placement.leftControl) {
+      placement.host.insertBefore(output, placement.leftControl.nextSibling);
+    }
+
+    if (projectCountUrl !== location.href) {
+      projectCountUrl = location.href;
+      projectCountCandidate = null;
+      projectCountCandidateRounds = 0;
+      projectCountCandidateSince = 0;
+      output.dataset.state = "loading";
+      setTextIfChanged(output, "正在统计…");
+      output.title = "正在统计当前目录第一层项目数";
+      return;
+    }
+
+    const count = currentVirtualListItemCount();
+    if (!Number.isInteger(count) || count < 0) {
+      output.dataset.state = "loading";
+      setTextIfChanged(output, "正在统计…");
+      output.title = "正在统计当前目录第一层项目数";
+      return;
+    }
+    if (projectCountCandidate === count) projectCountCandidateRounds += 1;
+    else {
+      projectCountCandidate = count;
+      projectCountCandidateRounds = 1;
+      projectCountCandidateSince = Date.now();
+    }
+    if (projectCountCandidateRounds < 2 || Date.now() - projectCountCandidateSince < 250) {
+      output.dataset.state = "loading";
+      setTextIfChanged(output, "正在统计…");
+      output.title = "正在确认当前目录项目数";
+      return;
+    }
+    output.dataset.state = "ready";
+    setTextIfChanged(output, `${count} 个项目`);
+    output.title = `当前目录第一层：${count} 个项目（文件 + 文件夹）`;
   }
 
   function showStatus(folderName, message) {
@@ -252,91 +592,202 @@
     document.getElementById(STATUS_ID)?.remove();
   }
 
-  function removeConfirmation() {
-    document.getElementById(MODAL_ID)?.remove();
+  const queueStatusLabels = {
+    queued: "排队中",
+    waiting_worker: "准备中",
+    scanning: "统计中",
+    awaiting_confirmation: "准备自动下载",
+    starting: "连接下载引擎",
+    downloading: "下载中",
+    paused: "已暂停",
+    draining: "取消剩余，完成已开始文件",
+    draining_paused: "取消剩余，已开始文件暂停",
+    complete: "已完成",
+    cancelled: "已取消",
+    failed: "任务失败"
+  };
+
+  function queueJobDetail(job) {
+    const counts = job.counts || {};
+    const currentLevel = Number.isInteger(job.projectCount)
+      ? `当前层 ${job.projectCount} 个项目 · `
+      : "";
+    if (job.status === "queued") {
+      return job.queuePosition ? `排队第 ${job.queuePosition} 位 · 等待统计项目数量` : "等待统计项目数量";
+    }
+    if (["waiting_worker", "scanning"].includes(job.status)) {
+      return `${currentLevel}递归已发现 ${counts.discoveredFiles || 0} 个文件 · ${counts.folders || 0} 个文件夹`;
+    }
+    const finished = (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
+    const total = Number(counts.files) || 0;
+    const percent = total ? Math.max(0, Math.min(100, Math.round(finished * 100 / total))) : 0;
+    return `${currentLevel}递归可下载 ${total} 个文件 · ${counts.folders || 0} 个文件夹 · 已处理 ${finished} / ${total}（${percent}%）`;
   }
 
-  function showFolderConfirmation({
-    folderName,
-    fileCount,
-    folderCount,
-    scanFailureCount,
-    scanFailureDetail
-  }) {
-    ensureInjectedStyles();
-    removeConfirmation();
-    const overlay = document.createElement("div");
-    overlay.id = MODAL_ID;
-    const dialog = document.createElement("section");
-    dialog.className = "popo-stable-dialog";
-    const heading = document.createElement("h2");
-    heading.textContent = fileCount > 0 ? `发现 ${fileCount} 个文件，确认下载？` : "没有发现可下载文件";
-    const description = document.createElement("p");
-    description.textContent = fileCount > 0
-      ? `将逐个下载全部文件，不使用 POPO 服务器打包。包含 ${folderCount || 0} 个子文件夹。`
-      : "该文件夹可能为空，或目录读取失败。";
-    const folder = document.createElement("div");
-    folder.className = "popo-stable-folder";
-    folder.textContent = folderName;
-    dialog.append(heading, description, folder);
+  function queueJobProgress(job) {
+    if (["queued", "waiting_worker", "scanning"].includes(job.status)) return null;
+    const counts = job.counts || {};
+    const total = Number(counts.files) || 0;
+    if (!total) return null;
+    const finished = (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
+    return Math.max(0, Math.min(100, Math.round(finished * 100 / total)));
+  }
 
-    const engineNote = document.createElement("p");
-    engineNote.className = "popo-stable-permission-warning";
-    engineNote.textContent = "文件将交给本机 Gopeed 下载；下载期间请保持 Gopeed 运行。";
-    dialog.appendChild(engineNote);
-
-    if (scanFailureCount > 0) {
-      const warning = document.createElement("p");
-      warning.textContent = `注意：有 ${scanFailureCount} 个目录读取失败，确认后只下载已经成功读取的文件。`;
-      dialog.appendChild(warning);
-      if (scanFailureDetail) {
-        const detail = document.createElement("p");
-        detail.textContent = `失败详情：${String(scanFailureDetail).replace(/^Error:\s*/, "")}`;
-        dialog.appendChild(detail);
-      }
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "popo-stable-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.textContent = fileCount > 0 ? "取消" : "关闭";
-    cancel.addEventListener("click", async () => {
-      removeConfirmation();
-      hideStatus();
-      resetFolderButtons(folderName);
-      try {
-        await chrome.runtime.sendMessage({ type: "CANCEL_FOLDER_TASK" });
-      } catch {
-        // The background may already have reset after an empty scan.
-      }
+  function ensureQueuePanel() {
+    let panel = document.getElementById(QUEUE_PANEL_ID);
+    if (panel) return panel;
+    panel = document.createElement("aside");
+    panel.id = QUEUE_PANEL_ID;
+    const header = document.createElement("div");
+    header.className = "popo-queue-header";
+    const heading = document.createElement("strong");
+    heading.textContent = "下载任务";
+    const headerActions = document.createElement("div");
+    headerActions.className = "popo-queue-header-actions";
+    const summary = document.createElement("span");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "popo-queue-toggle";
+    toggle.textContent = "展开";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const collapsed = panel.dataset.collapsed !== "false";
+      panel.dataset.collapsed = collapsed ? "false" : "true";
+      toggle.textContent = collapsed ? "收起" : "展开";
+      toggle.setAttribute("aria-expanded", String(collapsed));
     });
-    actions.appendChild(cancel);
+    headerActions.append(summary, toggle);
+    header.append(heading, headerActions);
+    const list = document.createElement("div");
+    list.className = "popo-queue-list";
+    panel.append(header, list);
+    panel.dataset.collapsed = "true";
+    document.documentElement.appendChild(panel);
+    return panel;
+  }
 
-    if (fileCount > 0) {
-      const confirm = document.createElement("button");
-      confirm.type = "button";
-      confirm.dataset.primary = "true";
-      confirm.textContent = "确认下载";
-      confirm.addEventListener("click", async () => {
-        confirm.disabled = true;
-        cancel.disabled = true;
-        try {
-          const response = await chrome.runtime.sendMessage({ type: "CONFIRM_FOLDER_DOWNLOAD" });
-          if (!response?.ok) throw new Error(response?.error || "无法启动下载");
-          removeConfirmation();
-          showStatus(folderName, `开始下载 0 / ${fileCount}`);
-        } catch (error) {
-          confirm.disabled = false;
-          cancel.disabled = false;
-          showStatus(folderName, String(error).replace(/^Error:\s*/, ""));
+  function renderQueuePanel(state) {
+    if (!IS_TOP_FRAME) return;
+    latestQueueState = state;
+    ensureInjectedStyles();
+    const panel = ensureQueuePanel();
+    const jobs = state.jobs || [];
+    const liveJobs = jobs.filter((job) => isJobActive(job.status));
+    panel.hidden = liveJobs.length === 0;
+    if (!liveJobs.length) return;
+
+    const queuedCount = liveJobs.filter((job) => job.status === "queued").length;
+    const runningCount = liveJobs.length - queuedCount;
+    panel.querySelector(".popo-queue-header span").textContent =
+      `${liveJobs.length} 个进行中 · ${runningCount} 个处理 · ${queuedCount} 个排队`;
+    const list = panel.querySelector(".popo-queue-list");
+    list.replaceChildren(...liveJobs.map((job) => {
+      const card = document.createElement("section");
+      card.className = "popo-queue-job";
+      card.dataset.jobId = job.id;
+      const titleRow = document.createElement("div");
+      titleRow.className = "popo-queue-title-row";
+      const name = document.createElement("span");
+      name.className = "popo-queue-name";
+      name.textContent = job.displayName || job.folderName || "未命名文件夹";
+      name.title = name.textContent;
+      const status = document.createElement("span");
+      status.className = "popo-queue-state";
+      status.textContent = queueStatusLabels[job.status] || job.status;
+      titleRow.append(name, status);
+      const detail = document.createElement("div");
+      detail.className = "popo-queue-detail";
+      detail.textContent = queueJobDetail(job);
+      card.append(titleRow, detail);
+
+      const percent = queueJobProgress(job);
+      const progress = document.createElement("div");
+      progress.className = "popo-queue-progress";
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", `${name.textContent} 下载进度`);
+      const progressValue = document.createElement("i");
+      if (percent == null) {
+        progress.dataset.indeterminate = "true";
+        progress.removeAttribute("aria-valuenow");
+      } else {
+        progress.setAttribute("aria-valuemin", "0");
+        progress.setAttribute("aria-valuemax", "100");
+        progress.setAttribute("aria-valuenow", String(percent));
+        progressValue.style.width = `${percent}%`;
+      }
+      progress.appendChild(progressValue);
+      card.appendChild(progress);
+
+      if (isJobActive(job.status) && !job.cancelRequested) {
+        const actions = document.createElement("div");
+        actions.className = "popo-queue-actions";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "popo-queue-cancel";
+        cancel.textContent = "取消未开始文件";
+        cancel.addEventListener("click", async () => {
+          cancel.disabled = true;
+          try {
+            const response = await chrome.runtime.sendMessage({ type: "CANCEL_JOB", jobId: job.id });
+            if (!response?.ok) throw new Error(response?.error || "取消失败");
+            showStatus(job.folderName, "未开始文件已取消；已经开始的下载会保留");
+            await refreshQueueState();
+          } catch (error) {
+            cancel.disabled = false;
+            showStatus(job.folderName, String(error).replace(/^Error:\s*/, ""));
+          }
+        });
+        actions.appendChild(cancel);
+        card.appendChild(actions);
+      }
+      return card;
+    }));
+    syncFolderButtonsWithQueue();
+  }
+
+  async function refreshQueueState() {
+    if (!IS_TOP_FRAME) return;
+    installProjectCount();
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "GET_STATE" });
+      if (response?.ok) {
+        renderQueuePanel(response.state);
+        const state = response.state || {};
+        const job = (state.jobs || []).find((candidate) => candidate.id === state.activeJobId);
+        const needsWorkerRecovery = job && state.triggerMode === "folder_button" &&
+          state.workerFrameId == null &&
+          ["waiting_worker", "scanning", "awaiting_confirmation", "starting", "downloading", "paused", "draining", "draining_paused"].includes(state.mode);
+        if (needsWorkerRecovery && Date.now() - workerRecoveryRequestedAt > 5000) {
+          void restoreSourcePageSession();
         }
-      });
-      actions.appendChild(confirm);
+      }
+    } catch {
+      // Extension reloads can briefly interrupt the content-script connection.
     }
-    dialog.appendChild(actions);
-    overlay.appendChild(dialog);
-    document.documentElement.appendChild(overlay);
+  }
+
+  function startQueueStatePolling() {
+    if (!IS_TOP_FRAME || queueRefreshTimer) return;
+    void refreshQueueState();
+    queueRefreshTimer = setInterval(refreshQueueState, 1000);
+  }
+
+  async function restoreSourcePageSession() {
+    if (!IS_TOP_FRAME) return;
+    workerRecoveryRequestedAt = Date.now();
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "SOURCE_PAGE_READY",
+        url: location.href
+      });
+      if (!response?.ok) return;
+      if (response.needsWorker) {
+        createHiddenWorkerFrame(response.workerUrl || location.href, true);
+      }
+      if (response.state) renderQueuePanel(response.state);
+    } catch {
+      // Extension reloads can briefly interrupt the background connection.
+    }
   }
 
   async function handleStableDownloadClick(button, folderItem) {
@@ -344,7 +795,7 @@
     button.disabled = true;
     button.dataset.state = "scanning";
     button.textContent = "…";
-    showStatus(folderName, "正在读取这个文件夹的全部文件…");
+    showStatus(folderName, "正在添加下载…");
     try {
       const response = await chrome.runtime.sendMessage({
         type: "START_FOLDER_SCAN",
@@ -353,16 +804,31 @@
         parentUrl: location.href
       });
       if (!response?.ok) throw new Error(response?.error || "无法开始扫描");
-      createHiddenWorkerFrame(location.href);
+      button.disabled = false;
+      button.dataset.state = response.job?.status || "queued";
+      button.textContent = response.job?.status === "queued" ? "✓" : "…";
+      if (response.needsWorker) createHiddenWorkerFrame(location.href);
+      const position = response.queuePosition || 0;
+      const message = response.duplicate
+        ? position > 0
+          ? `已添加下载，排队中（第 ${position} 位）`
+          : "该文件夹已经在处理中"
+        : position > 0
+          ? `已添加下载，排队中（第 ${position} 位）`
+          : "已添加下载，正在检查文件数量";
+      showStatus(folderName, message);
+      await refreshQueueState();
     } catch (error) {
       resetFolderButtons(folderName);
       showStatus(folderName, String(error).replace(/^Error:\s*/, ""));
     }
   }
 
-  function createHiddenWorkerFrame(url) {
+  function createHiddenWorkerFrame(url, force = false) {
     if (!IS_TOP_FRAME) return;
-    document.getElementById(WORKER_FRAME_ID)?.remove();
+    const existing = document.getElementById(WORKER_FRAME_ID);
+    if (existing && !force) return existing;
+    existing?.remove();
     const frame = document.createElement("iframe");
     frame.id = WORKER_FRAME_ID;
     frame.src = url;
@@ -380,6 +846,7 @@
       "z-index:-1"
     ].join(";");
     document.documentElement.appendChild(frame);
+    return frame;
   }
 
   function removeHiddenWorkerFrame() {
@@ -402,7 +869,8 @@
         button = document.createElement("button");
         button.type = "button";
         button.className = BUTTON_CLASS;
-        button.textContent = "⇩";
+        button.dataset.state = "idle";
+        setTextIfChanged(button, "");
         button.title = "稳定下载此文件夹";
         button.setAttribute("aria-label", "稳定下载此文件夹");
         button.addEventListener("mousedown", (event) => event.stopPropagation());
@@ -422,6 +890,7 @@
         actions.insertBefore(button, actions.lastElementChild);
       }
       button.dataset.folderName = item.name;
+      applyQueueStateToButton(button, item);
     }
   }
 
@@ -432,13 +901,16 @@
     queueMicrotask(() => {
       buttonInstallQueued = false;
       installFolderButtons();
+      installProjectCount();
     });
   }
 
   function startFolderButtonObserver() {
     if (!document.documentElement) return;
     scheduleFolderButtonInstall();
-    const observer = new MutationObserver(scheduleFolderButtonInstall);
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.some(mutationNeedsFolderButtonInstall)) scheduleFolderButtonInstall();
+    });
     observer.observe(document.documentElement, {
       childList: true,
       characterData: true,
@@ -703,12 +1175,12 @@
     };
   }
 
-  function requestDirectDownload(teamSpaceId, pageId, timeoutMs) {
+  function requestPageApi(path, queryParams, timeoutMs) {
     return new Promise((resolve, reject) => {
       const requestId = crypto.randomUUID();
       const timeout = setTimeout(() => {
         window.removeEventListener("message", onMessage);
-        reject(new Error("单文件下载接口超时"));
+        reject(new Error("POPO 接口请求超时"));
       }, timeoutMs);
       const onMessage = (event) => {
         if (event.source !== window || event.data?.source !== API_RESPONSE_SOURCE ||
@@ -718,13 +1190,29 @@
         resolve(event.data);
       };
       window.addEventListener("message", onMessage);
-      const query = new URLSearchParams({ teamSpaceId, pageId });
+      const query = new URLSearchParams(queryParams);
       window.postMessage({
         source: API_REQUEST_SOURCE,
         requestId,
-        path: `/api/bs-team-space/web/v1/page/download?${query.toString()}`
+        path: `${path}?${query.toString()}`
       }, location.origin);
     });
+  }
+
+  function requestDirectDownload(teamSpaceId, pageId, timeoutMs) {
+    return requestPageApi(
+      "/api/bs-team-space/web/v1/page/download",
+      { teamSpaceId, pageId },
+      timeoutMs
+    );
+  }
+
+  function resolveTeamSpaceId(teamSpaceKey, timeoutMs) {
+    return requestPageApi(
+      "/api/bs-team-space/web/v1/teamSpace/id",
+      { teamSpaceKey },
+      timeoutMs
+    );
   }
 
   function cleanPageState() {
@@ -758,6 +1246,11 @@
             ok: true,
             result: await requestDirectDownload(message.teamSpaceId, message.pageId, message.timeoutMs)
           };
+        case "RESOLVE_TEAM_SPACE_ID":
+          return {
+            ok: true,
+            result: await resolveTeamSpaceId(message.teamSpaceKey, message.timeoutMs)
+          };
         case "CLEAN_STATE":
           return { ok: true, result: cleanPageState() };
         case "NAVIGATE_WORKER":
@@ -770,8 +1263,9 @@
         case "REMOVE_WORKER_FRAME":
           removeHiddenWorkerFrame();
           return { ok: true };
-        case "SHOW_FOLDER_CONFIRMATION":
-          showFolderConfirmation(message);
+        case "ENSURE_WORKER_FRAME":
+          if (!IS_TOP_FRAME) return { ok: false, error: "只能在顶层页面创建隐藏工作区" };
+          createHiddenWorkerFrame(message.url || location.href, Boolean(message.force));
           return { ok: true };
         case "FOLDER_TASK_STATUS":
           showStatus(message.folderName, message.message);
@@ -784,12 +1278,10 @@
           resetFolderButtons(message.folderName);
           return { ok: true };
         case "FOLDER_TASK_CANCELLED":
-          removeConfirmation();
           hideStatus();
           resetFolderButtons(message.folderName);
           return { ok: true };
         case "FOLDER_TASK_ERROR":
-          removeConfirmation();
           showStatus(message.folderName, message.message || "任务失败");
           resetFolderButtons(message.folderName);
           return { ok: true };
@@ -802,6 +1294,8 @@
 
   if (IS_TOP_FRAME) {
     startFolderButtonObserver();
+    startQueueStatePolling();
+    void restoreSourcePageSession();
   } else {
     void chrome.runtime.sendMessage({
       type: "REGISTER_WORKER_FRAME",

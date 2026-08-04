@@ -3,15 +3,25 @@
 
   const REQUEST_SOURCE = "popo-stable-downloader-isolated";
   const RESPONSE_SOURCE = "popo-stable-downloader-page";
-  const ALLOWED_PATH = "/api/bs-team-space/web/v1/page/download";
+  const ALLOWED_PATHS = new Set([
+    "/api/bs-team-space/web/v1/page/download",
+    "/api/bs-team-space/web/v1/teamSpace/id"
+  ]);
 
   window.addEventListener("message", async (event) => {
     if (event.source !== window || event.data?.source !== REQUEST_SOURCE) return;
     const { requestId, path } = event.data;
-    if (typeof requestId !== "string" || typeof path !== "string" || !path.startsWith(ALLOWED_PATH)) return;
+    if (typeof requestId !== "string" || typeof path !== "string") return;
+    let requestUrl;
+    try {
+      requestUrl = new URL(path, window.location.origin);
+    } catch {
+      return;
+    }
+    if (requestUrl.origin !== window.location.origin || !ALLOWED_PATHS.has(requestUrl.pathname)) return;
 
     try {
-      const response = await window.fetch(path, {
+      const response = await window.fetch(`${requestUrl.pathname}${requestUrl.search}`, {
         credentials: "include",
         headers: { Accept: "application/json" },
         method: "GET"

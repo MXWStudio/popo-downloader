@@ -9,6 +9,7 @@ const {
   normalizeDownloadDirectory,
   normalizeEndpoint,
   request,
+  startOrReplaceTask,
   splitDownloadTarget
 } = require("../gopeed.js");
 
@@ -117,4 +118,35 @@ test("创建下载调用 Gopeed tasks 接口并返回任务 ID", async () => {
   assert.equal(captured.url, "http://127.0.0.1:9999/api/v1/tasks");
   assert.equal(captured.options.method, "POST");
   assert.equal(JSON.parse(captured.options.body).opts.extra.connections, 1);
+});
+
+test("刷新地址时 Gopeed 原任务不存在会自动新建任务", async () => {
+  const calls = [];
+  const result = await startOrReplaceTask({
+    gopeedEndpoint: "http://127.0.0.1:9999",
+    gopeedToken: ""
+  }, "missing-task", {
+    url: "https://example.com/refreshed.mp4",
+    name: "video.mp4",
+    path: "D:\\Downloads",
+    connections: 1
+  }, {
+    fetchImpl: async (url, options) => {
+      calls.push({ url, method: options.method });
+      if (options.method === "PATCH") {
+        return {
+          ok: true,
+          status: 200,
+          async json() { return { code: 2001, msg: "task not found", data: null }; }
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { code: 0, data: "replacement-task" }; }
+      };
+    }
+  });
+  assert.deepEqual(result, { taskId: "replacement-task", replacedMissingTask: true });
+  assert.deepEqual(calls.map((entry) => entry.method), ["PATCH", "POST"]);
 });

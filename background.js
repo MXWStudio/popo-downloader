@@ -1,33 +1,45 @@
-importScripts("core.js", "gopeed.js");
+importScripts("core.js", "gopeed.js", "queue.js");
 
 "use strict";
 
 const {
   FAILURE,
   buildDownloadFilename,
+  extractTeamSpaceId,
   findFirstHttpUrl,
   isSystemMetadataFile,
   looksLikeFileTitle,
-  matchesFilters,
   previewTitleMatchesFile
 } = PopoCore;
 const {
   classifyTaskStatus: classifyGopeedTaskStatus,
   continueTask: continueGopeedTask,
-  createTask: createGopeedTask,
   deleteTask: deleteGopeedTask,
   getConfig: getGopeedConfig,
   getTask: getGopeedTask,
   normalizeDownloadDirectory: normalizeGopeedDownloadDirectory,
   normalizeEndpoint: normalizeGopeedEndpoint,
-  patchTask: patchGopeedTask,
   pauseTask: pauseGopeedTask,
+  startOrReplaceTask: startOrReplaceGopeedTask,
   splitDownloadTarget
 } = PopoGopeed;
+const {
+  applyCancelPolicy,
+  clientVisibleJobs,
+  findDuplicateJob,
+  isJobTerminal,
+  makeFolderJobKey,
+  queuePosition,
+  summarizeItems
+} = PopoQueue;
 const PUMP_ALARM = "popo-stable-downloader-pump";
 const WATCHDOG_ALARM = "popo-stable-downloader-watchdog";
 const FOLDER_PICKER_HOST = "com.popo.stable_downloader.folder_picker";
 const TERMINAL_STATUSES = new Set(["success", "failed", "cancelled", "skipped"]);
+const ITEM_CHUNK_SIZE = 200;
+const ITEM_STORAGE_PREFIX = "popoItems";
+const MAX_RETAINED_TERMINAL_JOBS = 20;
+const WORKER_UNAVAILABLE_CODE = "POPO_WORKER_UNAVAILABLE";
 const workerFrameWaiters = new Map();
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -56,7 +68,10 @@ const DEFAULT_SETTINGS = Object.freeze({
 
 function newState() {
   return {
-    version: 3,
+    version: 4,
+    runToken: createId("run"),
+    jobs: [],
+    activeJobId: null,
     mode: "idle",
     phase: "idle",
     settings: structuredClone(DEFAULT_SETTINGS),
@@ -67,12 +82,14 @@ function newState() {
     workerReadyUrl: "",
     workerDeadline: 0,
     rootUrl: "",
+    teamSpaceKey: "",
     teamSpaceId: "",
     workTabId: null,
     scanQueue: [],
     resolveQueue: [],
     scanFailures: [],
     scannedFolderCount: 0,
+    rootProjectCount: null,
     items: [],
     preparingItemId: null,
     activeTransfers: [],
@@ -88,14 +105,102 @@ function newState() {
   };
 }
 
-async function getStored() {
+function createId(prefix) {
+  const random = globalThis.crypto?.randomUUID?.() ||
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${random}`;
+}
+
+function rotateRunToken(state) {
+  state.runToken = createId("run");
+  return state.runToken;
+}
+
+function itemChunkKey(jobId, index) {
+  return `${ITEM_STORAGE_PREFIX}:${jobId}:${index}`;
+}
+
+function hashText(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function migrateStoredState(storedState, settings) {
+  if (storedState?.version === 4) {
+    const teamSpaceKey = storedState.teamSpaceKey || storedState.teamSpaceId || "";
+    return {
+      ...newState(),
+      ...storedState,
+      settings,
+      teamSpaceKey,
+      teamSpaceId: storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "",
+      jobs: Array.isArray(storedState.jobs) ? storedState.jobs : []
+    };
+  }
+  if (storedState?.version !== 3) return newState();
+
+  const state = {
+    ...newState(),
+    ...storedState,
+    version: 4,
+    runToken: createId("run"),
+    settings,
+    jobs: [],
+    activeJobId: null
+  };
+  state.teamSpaceKey = storedState.teamSpaceKey || storedState.teamSpaceId || "";
+  state.teamSpaceId = storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "";
+  if (storedState.mode !== "idle") {
+    const id = createId("job");
+    state.activeJobId = id;
+    state.jobs = [{
+      id,
+      key: makeFolderJobKey({
+        parentUrl: storedState.rootUrl,
+        folderItemIndex: "legacy",
+        folderName: storedState.selectedFolderName || "升级前任务"
+      }),
+      sourceTabId: storedState.sourceTabId ?? null,
+      folderName: storedState.selectedFolderName || "升级前任务",
+      folderItemIndex: "legacy",
+      parentUrl: storedState.rootUrl || "",
+      status: storedState.mode,
+      cancelRequested: false,
+      createdAt: storedState.startedAt || new Date().toISOString(),
+      startedAt: storedState.startedAt || "",
+      completedAt: storedState.completedAt || "",
+      counts: summarizeItems(
+        storedState.items || [],
+        storedState.scannedFolderCount,
+        storedState.scanFailures?.length
+      ),
+      projectCount: null,
+      lastMessage: storedState.lastMessage || "升级前任务已恢复"
+    }];
+  }
+  return state;
+}
+
+async function getStored({ loadItems = true } = {}) {
   const data = await chrome.storage.local.get(["popoState", "popoSettings"]);
   const settings = mergeSettings(data.popoSettings || {});
-  const state = data.popoState?.version === 3
-    ? { ...newState(), ...data.popoState, settings }
-    : newState();
+  const state = migrateStoredState(data.popoState, settings);
   state.settings = settings;
   state.activeTransfers = Array.isArray(state.activeTransfers) ? state.activeTransfers : [];
+  state.items = Array.isArray(state.items) ? state.items : [];
+  state._itemsLoaded = loadItems;
+  if (loadItems && data.popoState?.version === 4 && state.itemStorageJobId && state.itemChunkCount > 0) {
+    const keys = Array.from(
+      { length: state.itemChunkCount },
+      (_, index) => itemChunkKey(state.itemStorageJobId, index)
+    );
+    const chunks = await chrome.storage.local.get(keys);
+    state.items = keys.flatMap((key) => Array.isArray(chunks[key]) ? chunks[key] : []);
+  }
   return { state, settings };
 }
 
@@ -103,6 +208,13 @@ function mergeSettings(input) {
   return {
     ...structuredClone(DEFAULT_SETTINGS),
     ...input,
+    // 文件夹按钮始终下载完整目录。覆盖旧版本遗留的筛选和目录选项，
+    // 避免升级后继续只下载曾经选中过的格式或关键词。
+    recursive: true,
+    formats: "",
+    includeKeywords: "",
+    excludeKeywords: "",
+    preserveStructure: true,
     // 并发数是扩展的固定稳定策略；覆盖旧版本保存在 storage 中的值。
     concurrency: 5,
     gopeedConnections: 1,
@@ -121,9 +233,167 @@ function pushLog(state, level, message, details) {
   state.lastMessage = message;
 }
 
-async function saveState(state) {
+function activeJob(state) {
+  return (state.jobs || []).find((job) => job.id === state.activeJobId) || null;
+}
+
+function syncActiveJobSummary(state) {
+  const job = activeJob(state);
+  if (!job) return;
+  job.status = state.mode;
+  job.startedAt ||= state.startedAt || new Date().toISOString();
+  job.completedAt = state.completedAt || "";
+  job.lastMessage = state.lastMessage || job.lastMessage || "";
+  job.cancelRequested = Boolean(job.cancelRequested);
+  if (state._itemsLoaded !== false) {
+    job.counts = summarizeItems(
+      state.items,
+      state.scannedFolderCount,
+      state.scanFailures?.length
+    );
+    job.failurePreview = (state.items || [])
+      .filter((item) => item.status === "failed")
+      .slice(0, 6)
+      .map((item) => ({ name: item.name, stage: item.failureStage, error: item.error }));
+    job.failureRetryKeys = [...new Set((state.items || [])
+      .filter((item) => item.status === "failed")
+      .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+  }
+  if (Number.isInteger(state.rootProjectCount) && state.rootProjectCount >= 0) {
+    job.projectCount = state.rootProjectCount;
+  }
+}
+
+function pruneTerminalJobs(state) {
+  const activeJobs = (state.jobs || []).filter((job) => !isJobTerminal(job.status));
+  const terminalJobs = (state.jobs || [])
+    .filter((job) => isJobTerminal(job.status))
+    .sort((left, right) => String(right.completedAt).localeCompare(String(left.completedAt)))
+    .slice(0, MAX_RETAINED_TERMINAL_JOBS);
+  state.jobs = [...activeJobs, ...terminalJobs].sort(
+    (left, right) => String(left.createdAt).localeCompare(String(right.createdAt))
+  );
+}
+
+function publicState(state) {
+  const snapshot = structuredClone(state);
+  delete snapshot.items;
+  delete snapshot.itemChunkHashes;
+  delete snapshot._itemsLoaded;
+  snapshot.jobs = clientVisibleJobs(snapshot.jobs || []).map((job) => ({
+    ...job,
+    queuePosition: queuePosition(state.jobs, job.id)
+  }));
+  return snapshot;
+}
+
+function processedJobCount(job) {
+  const counts = job?.counts || {};
+  return (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
+}
+
+function jobProgressPercent(job) {
+  const total = Number(job?.counts?.files) || 0;
+  if (!total) return null;
+  return Math.max(0, Math.min(100, Math.round(processedJobCount(job) * 100 / total)));
+}
+
+async function updateActionIndicator(state) {
+  if (!chrome.action?.setBadgeText) return;
+  const jobs = state.jobs || [];
+  const liveJobs = jobs.filter((job) => !isJobTerminal(job.status));
+  const job = activeJob(state) || liveJobs[0] || null;
+  let text = "";
+  let color = "#1268e8";
+  let title = "POPO 稳定下载助手";
+
+  if (job) {
+    const percent = jobProgressPercent(job);
+    const total = Number(job.counts?.files) || 0;
+    const processed = processedJobCount(job);
+    const queued = liveJobs.filter((candidate) => candidate.status === "queued").length;
+    text = percent == null ? (liveJobs.length > 9 ? "9+" : String(liveJobs.length)) : `${percent}%`;
+    title = percent == null
+      ? `${job.folderName || "下载任务"}：${job.lastMessage || "正在准备"}；${queued} 个排队`
+      : `${job.folderName || "下载任务"}：${processed}/${total}（${percent}%）；失败 ${job.counts?.failed || 0}；排队 ${queued}`;
+  } else {
+    const latest = [...jobs].reverse().find((candidate) => isJobTerminal(candidate.status));
+    if ((latest?.counts?.failed || 0) > 0) {
+      text = "!";
+      color = "#c73838";
+      title = `${latest.folderName || "下载任务"}已结束：成功 ${latest.counts?.success || 0}，失败 ${latest.counts?.failed || 0}`;
+    }
+  }
+
+  await Promise.allSettled([
+    chrome.action.setBadgeText({ text }),
+    chrome.action.setBadgeBackgroundColor?.({ color }),
+    chrome.action.setTitle?.({ title })
+  ].filter(Boolean));
+}
+
+let storageWriteChain = Promise.resolve();
+let controlMutationChain = Promise.resolve();
+
+function withControlMutation(action) {
+  const operation = controlMutationChain.then(action);
+  controlMutationChain = operation.catch(() => {});
+  return operation;
+}
+
+function saveState(state, force = false) {
+  const write = storageWriteChain.then(() => saveStateUnlocked(state, force));
+  storageWriteChain = write.catch(() => {});
+  return write;
+}
+
+async function saveStateUnlocked(state, force = false) {
+  syncActiveJobSummary(state);
+  pruneTerminalJobs(state);
   state.updatedAt = new Date().toISOString();
-  await chrome.storage.local.set({ popoState: state });
+  const existing = await chrome.storage.local.get(["popoState"]);
+  const storedState = existing.popoState;
+  if (!force && storedState?.version === 4 && storedState.runToken &&
+      storedState.runToken !== state.runToken) {
+    return false;
+  }
+
+  if (state._itemsLoaded !== false) {
+    const chunks = [];
+    for (let index = 0; index < state.items.length; index += ITEM_CHUNK_SIZE) {
+      chunks.push(state.items.slice(index, index + ITEM_CHUNK_SIZE));
+    }
+    const hashes = chunks.map((chunk) => hashText(JSON.stringify(chunk)));
+    const updates = {};
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (state.itemStorageJobId !== state.activeJobId || state.itemChunkHashes?.[index] !== hashes[index]) {
+        updates[itemChunkKey(state.activeJobId || "idle", index)] = chunks[index];
+      }
+    }
+    if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+
+    const staleKeys = [];
+    if (state.itemStorageJobId && state.itemStorageJobId !== state.activeJobId) {
+      for (let index = 0; index < (state.itemChunkCount || 0); index += 1) {
+        staleKeys.push(itemChunkKey(state.itemStorageJobId, index));
+      }
+    } else if (state.itemStorageJobId === state.activeJobId && (state.itemChunkCount || 0) > chunks.length) {
+      for (let index = chunks.length; index < state.itemChunkCount; index += 1) {
+        staleKeys.push(itemChunkKey(state.itemStorageJobId, index));
+      }
+    }
+    if (staleKeys.length && chrome.storage.local.remove) await chrome.storage.local.remove(staleKeys);
+    state.itemStorageJobId = state.activeJobId || "";
+    state.itemChunkCount = chunks.length;
+    state.itemChunkHashes = hashes;
+  }
+
+  const metadata = structuredClone(state);
+  delete metadata.items;
+  delete metadata._itemsLoaded;
+  await chrome.storage.local.set({ popoState: metadata });
+  await updateActionIndicator(state);
+  return true;
 }
 
 async function notifySource(state, message) {
@@ -337,6 +607,7 @@ async function closeWorkTab(state) {
     } catch {}
     state.workerFrameId = null;
     state.workerReadyUrl = "";
+    state.workerSourceTabId = null;
     state.workTabId = null;
     return;
   }
@@ -354,12 +625,30 @@ function workerFrameKey(tabId, frameId) {
   return `${tabId}:${frameId}`;
 }
 
+function workerUnavailableError(message, cause = null) {
+  const error = new Error(message || "POPO 页面正在刷新，等待后台工作区恢复");
+  error.code = WORKER_UNAVAILABLE_CODE;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function isWorkerUnavailableError(error) {
+  return error?.code === WORKER_UNAVAILABLE_CODE;
+}
+
+function rejectWorkerFrameWaitersForTab(tabId, message) {
+  for (const [key, waiter] of workerFrameWaiters) {
+    if (!key.startsWith(`${tabId}:`)) continue;
+    waiter.reject(workerUnavailableError(message));
+  }
+}
+
 function waitForWorkerFrame(tabId, frameId, targetUrl, timeoutMs) {
   const key = workerFrameKey(tabId, frameId);
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       workerFrameWaiters.delete(key);
-      reject(new Error(`隐藏工作区加载超时：${targetUrl}`));
+      reject(workerUnavailableError(`隐藏工作区加载超时，等待页面恢复：${targetUrl}`));
     }, timeoutMs);
     workerFrameWaiters.set(key, {
       targetUrl,
@@ -367,6 +656,11 @@ function waitForWorkerFrame(tabId, frameId, targetUrl, timeoutMs) {
         clearTimeout(timeout);
         workerFrameWaiters.delete(key);
         resolve(url);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        workerFrameWaiters.delete(key);
+        reject(error);
       }
     });
   });
@@ -377,21 +671,99 @@ async function registerWorkerFrame(sender, url) {
   const frameId = sender.frameId;
   if (tabId == null || frameId == null || frameId === 0) return null;
   const { state } = await getStored();
-  if (state.triggerMode !== "folder_button" || state.sourceTabId !== tabId) return null;
+  const job = activeJob(state);
+  if (!job || state.triggerMode !== "folder_button" || job.sourceTabId !== tabId) return null;
   state.workerFrameId = frameId;
   state.workerReadyUrl = url;
+  state.workerSourceTabId = tabId;
   state.workerDeadline = 0;
   if (state.mode === "waiting_worker") {
     state.mode = "scanning";
     state.phase = "resolving_selection";
     pushLog(state, "info", "隐藏工作区已就绪");
-    schedulePump(100);
   }
   await saveState(state);
 
   const waiter = workerFrameWaiters.get(workerFrameKey(tabId, frameId));
   if (waiter && (!waiter.targetUrl || waiter.targetUrl === url)) waiter.resolve(url);
+  if (["scanning", "downloading", "draining"].includes(state.mode)) schedulePump(500);
   return state;
+}
+
+async function registerSourcePage(sender, url) {
+  const tabId = sender.tab?.id;
+  if (tabId == null || sender.frameId !== 0) return { needsWorker: false };
+  const { state } = await getStored();
+  await repairQueueState(state);
+  const job = activeJob(state);
+  if (!job || state.triggerMode !== "folder_button") {
+    return { needsWorker: false, state: publicState(state) };
+  }
+  if (job.sourceTabId !== tabId) {
+    const previousTab = job.sourceTabId == null ? null : await getTab(job.sourceTabId);
+    const previousStillHostsPopo = Boolean(previousTab &&
+      /^https:\/\/docs\.popo\.netease\.com\/team\/pc\/[^/]+\/pageDetail\/[a-z0-9]+/i.test(previousTab.url || ""));
+    const candidateMatch = String(url || "").match(
+      /^https:\/\/docs\.popo\.netease\.com\/team\/pc\/([^/]+)\/pageDetail\/[a-z0-9]+/i
+    );
+    const expectedTeamSpaceKey = state.teamSpaceKey ||
+      String(job.parentUrl || "").match(/\/team\/pc\/([^/]+)\/pageDetail\//i)?.[1] || "";
+    if (previousStillHostsPopo || !candidateMatch || candidateMatch[1] !== expectedTeamSpaceKey) {
+      return { needsWorker: false, state: publicState(state) };
+    }
+    job.sourceTabId = tabId;
+    state.sourceTabId = tabId;
+    state.workerSourceTabId = tabId;
+    pushLog(state, "warn", "原 POPO 页面已关闭，已在重新打开的同一团队空间页面恢复任务");
+  }
+
+  const hadWorker = state.workerFrameId != null;
+  rejectWorkerFrameWaitersForTab(tabId, "POPO 页面已刷新，正在重建隐藏工作区");
+  state.workerFrameId = null;
+  state.workerReadyUrl = "";
+  state.workerSourceTabId = tabId;
+  state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
+
+  if (state.preparingItemId) {
+    const item = state.items.find((candidate) => candidate.id === state.preparingItemId);
+    if (item && !TERMINAL_STATUSES.has(item.status)) {
+      item.status = "pending";
+      item.stage = "页面刷新，等待自动接续";
+      item.failureStage = "";
+      item.error = "";
+      item.attempts = Math.max(0, (item.attempts || 0) - 1);
+    }
+    state.preparingItemId = null;
+    state.activeItemId = state.activeTransfers?.[0]?.itemId ?? null;
+  }
+
+  if (hadWorker) {
+    pushLog(
+      state,
+      "warn",
+      "检测到 POPO 页面刷新；已开始的 Gopeed 下载继续，未开始文件将在工作区恢复后接续"
+    );
+  }
+  rotateRunToken(state);
+  await saveState(state, true);
+  if (state.mode === "awaiting_confirmation") {
+    await startScannedDownload(state, { automatic: true });
+  }
+
+  return {
+    needsWorker: [
+      "waiting_worker",
+      "scanning",
+      "awaiting_confirmation",
+      "starting",
+      "downloading",
+      "paused",
+      "draining",
+      "draining_paused"
+    ].includes(state.mode),
+    workerUrl: state.rootUrl || job.parentUrl || url,
+    state: publicState(state)
+  };
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
@@ -439,7 +811,10 @@ async function waitForContent(tabId, timeoutMs) {
 }
 
 async function loadWorkUrl(state, url, timeoutMs, forceReload = true) {
-  if (state.triggerMode === "folder_button" && state.sourceTabId != null && state.workerFrameId != null) {
+  if (state.triggerMode === "folder_button") {
+    if (state.sourceTabId == null || state.workerFrameId == null) {
+      throw workerUnavailableError("POPO 页面后台工作区尚未恢复");
+    }
     const ready = waitForWorkerFrame(state.sourceTabId, state.workerFrameId, url, timeoutMs);
     try {
       await chrome.tabs.sendMessage(
@@ -450,7 +825,13 @@ async function loadWorkUrl(state, url, timeoutMs, forceReload = true) {
     } catch {
       // Navigation can close the message port before the response is delivered.
     }
-    await ready;
+    try {
+      await ready;
+    } catch (error) {
+      throw isWorkerUnavailableError(error)
+        ? error
+        : workerUnavailableError("POPO 页面后台工作区加载中断", error);
+    }
     state.workerReadyUrl = url;
     return { id: state.sourceTabId, url, status: "complete" };
   }
@@ -467,16 +848,24 @@ async function loadWorkUrl(state, url, timeoutMs, forceReload = true) {
 }
 
 async function sendToWork(state, message, timeoutMs, label) {
-  if (state.triggerMode === "folder_button" && state.sourceTabId != null && state.workerFrameId != null) {
-    const response = await withTimeout(
-      chrome.tabs.sendMessage(
-        state.sourceTabId,
-        message,
-        { frameId: state.workerFrameId }
-      ),
-      timeoutMs,
-      label
-    );
+  if (state.triggerMode === "folder_button") {
+    if (state.sourceTabId == null || state.workerFrameId == null) {
+      throw workerUnavailableError("POPO 页面后台工作区尚未恢复");
+    }
+    let response;
+    try {
+      response = await withTimeout(
+        chrome.tabs.sendMessage(
+          state.sourceTabId,
+          message,
+          { frameId: state.workerFrameId }
+        ),
+        timeoutMs,
+        label
+      );
+    } catch (error) {
+      throw workerUnavailableError(`POPO 页面刷新导致“${label}”暂时中断`, error);
+    }
     if (!response?.ok) throw new Error(response?.error || `${label}失败`);
     return response.result;
   }
@@ -500,15 +889,18 @@ async function getWorkUrl(state) {
 
 async function waitForWorkUrlChange(state, beforeUrl, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
+  let workerInterruption = null;
   while (Date.now() < deadline) {
     try {
       const url = await getWorkUrl(state);
       if (url && url !== beforeUrl && /\/pageDetail\/[a-z0-9]+/i.test(url)) return url;
-    } catch {
+    } catch (error) {
+      if (isWorkerUnavailableError(error)) workerInterruption = error;
       // The content script is briefly unavailable while the frame navigates.
     }
     await new Promise((resolve) => setTimeout(resolve, 180));
   }
+  if (workerInterruption) throw workerInterruption;
   throw new Error("点击后页面地址未变化");
 }
 
@@ -518,9 +910,200 @@ function schedulePump(delayMs = 500) {
 
 let pumpLocked = false;
 
+function clearEngineFields(state) {
+  state.scanQueue = [];
+  state.resolveQueue = [];
+  state.scanFailures = [];
+  state.scannedFolderCount = 0;
+  state.rootProjectCount = null;
+  state.items = [];
+  state.preparingItemId = null;
+  state.activeTransfers = [];
+  state.activeItemId = null;
+  state.rootUrl = "";
+  state.teamSpaceKey = "";
+  state.teamSpaceId = "";
+  state.startedAt = "";
+  state.completedAt = "";
+}
+
+function prepareJobForExecution(state, job, reuseWorker) {
+  clearEngineFields(state);
+  state.activeJobId = job.id;
+  state.triggerMode = "folder_button";
+  state.sourceTabId = job.sourceTabId;
+  state.selectedFolderName = job.folderName;
+  job.projectCount = null;
+  state.rootUrl = job.parentUrl;
+  const url = new URL(job.parentUrl);
+  const match = url.pathname.match(/\/team\/pc\/([^/]+)\/pageDetail\/([a-z0-9]+)/i);
+  state.teamSpaceKey = match?.[1] || "";
+  state.teamSpaceId = "";
+  state.resolveQueue = [{
+    key: job.key,
+    parentUrl: job.parentUrl,
+    parentPath: [],
+    name: job.folderName,
+    itemIndex: job.folderItemIndex
+  }];
+  state.startedAt = new Date().toISOString();
+  state.completedAt = "";
+  state.settings = mergeSettings({
+    ...state.settings,
+    recursive: true,
+    formats: "",
+    includeKeywords: "",
+    excludeKeywords: "",
+    preserveStructure: true
+  });
+  if (reuseWorker) {
+    state.mode = "scanning";
+    state.phase = "resolving_selection";
+    state.workerDeadline = 0;
+  } else {
+    state.mode = "waiting_worker";
+    state.phase = "waiting_worker";
+    state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
+  }
+  job.status = state.mode;
+  job.startedAt ||= state.startedAt;
+  job.lastMessage = reuseWorker ? "开始读取文件夹" : "正在准备隐藏工作区";
+  pushLog(state, "info", `任务开始：${job.folderName}`);
+}
+
+async function removeWorkerFrameFromTab(tabId) {
+  if (tabId == null) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "REMOVE_WORKER_FRAME" }, { frameId: 0 });
+  } catch {}
+}
+
+async function requestWorkerFrameForActiveJob(state) {
+  const job = activeJob(state);
+  if (!job || state.triggerMode !== "folder_button" || job.sourceTabId == null) return;
+  try {
+    await chrome.tabs.sendMessage(job.sourceTabId, {
+      type: "ENSURE_WORKER_FRAME",
+      url: job.parentUrl,
+      force: true
+    }, { frameId: 0 });
+  } catch {}
+}
+
+async function waitForWorkerReconnect(state, message) {
+  state.workerFrameId = null;
+  state.workerReadyUrl = "";
+  state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
+  state.phase = "waiting_worker";
+  if (state.lastMessage !== message) pushLog(state, "warn", message);
+  await saveState(state);
+  await requestWorkerFrameForActiveJob(state);
+  schedulePump(1500);
+}
+
+function transitionToNextQueuedJob(state) {
+  const previousSourceTabId = state.workerSourceTabId ?? state.sourceTabId;
+  const next = (state.jobs || []).find((job) => job.status === "queued");
+  if (!next) {
+    state.workerFrameId = null;
+    state.workerReadyUrl = "";
+    state.workerSourceTabId = null;
+    state.workerDeadline = 0;
+    state.activeJobId = null;
+    state.mode = "idle";
+    state.phase = "idle";
+    state.triggerMode = "folder_button";
+    state.sourceTabId = null;
+    state.selectedFolderName = "";
+    clearEngineFields(state);
+    state.lastMessage = "下载队列已处理完成";
+    return { next: null, removeTabId: previousSourceTabId, requestWorker: false, schedule: false };
+  }
+
+  const reuseWorker = state.workerFrameId != null && previousSourceTabId === next.sourceTabId;
+  if (!reuseWorker) {
+    state.workerFrameId = null;
+    state.workerReadyUrl = "";
+    state.workerSourceTabId = null;
+  }
+  prepareJobForExecution(state, next, reuseWorker);
+  return {
+    next,
+    removeTabId: reuseWorker ? null : previousSourceTabId,
+    requestWorker: !reuseWorker,
+    schedule: reuseWorker
+  };
+}
+
+async function runQueueTransitionEffects(state, effects) {
+  if (effects.removeTabId != null) await removeWorkerFrameFromTab(effects.removeTabId);
+  if (effects.requestWorker) await requestWorkerFrameForActiveJob(state);
+  if (effects.schedule) schedulePump(100);
+}
+
+function queueStateNeedsRepair(state) {
+  const job = activeJob(state);
+  if (job?.cancelRequested) return true;
+  if (job && isJobTerminal(job.status)) return true;
+  if (!job && (state.activeJobId || state.mode !== "idle")) return true;
+  return !job && (state.jobs || []).some((candidate) => candidate.status === "queued");
+}
+
+async function repairQueueState(state) {
+  if (!queueStateNeedsRepair(state)) return false;
+  const job = activeJob(state);
+  if (job?.cancelRequested && !isJobTerminal(job.status)) {
+    state.mode = "cancelled";
+    state.phase = "cancelled";
+    state.completedAt = new Date().toISOString();
+    pushLog(state, "info", "已结束取消任务；已经交给 Gopeed 的文件保持不变");
+    syncActiveJobSummary(state);
+    job.status = "cancelled";
+    job.completedAt = state.completedAt;
+    job.lastMessage = "任务已取消；已经开始的下载保留在 Gopeed 中";
+  }
+  state.activeJobId = null;
+  const effects = transitionToNextQueuedJob(state);
+  rotateRunToken(state);
+  await saveState(state, true);
+  await runQueueTransitionEffects(state, effects);
+  return true;
+}
+
+async function finalizeActiveJob(state, status, message, notification = null, force = false) {
+  const job = activeJob(state);
+  if (!job) return null;
+  state.mode = status;
+  state.phase = status;
+  state.completedAt = new Date().toISOString();
+  pushLog(state, status === "failed" ? "error" : "info", message);
+  syncActiveJobSummary(state);
+  job.status = status;
+  job.completedAt = state.completedAt;
+  job.lastMessage = message;
+  const source = {
+    sourceTabId: state.sourceTabId,
+    folderName: state.selectedFolderName
+  };
+  state.activeJobId = null;
+  const effects = transitionToNextQueuedJob(state);
+  const saved = await saveState(state, force);
+  if (!saved) return null;
+  if (notification) await notifySource({ ...state, ...source }, notification);
+  await runQueueTransitionEffects(state, effects);
+  return effects.next;
+}
+
 async function processScanStep(state) {
   const settings = state.settings;
   state.phase = "scanning";
+  if (state.triggerMode === "folder_button" && state.workerFrameId == null) {
+    await waitForWorkerReconnect(
+      state,
+      "等待 POPO 页面恢复；已扫描结果和下载队列均已保留"
+    );
+    return;
+  }
 
   if (state.scanQueue.length) {
     const entry = state.scanQueue[0];
@@ -538,6 +1121,15 @@ async function processScanStep(state) {
       }, settings.timeouts.scanList + 5000, "扫描目录");
 
       const directoryPath = entry.path.length ? entry.path : [result.directoryName];
+      if (
+        state.triggerMode === "folder_button" &&
+        directoryPath.length === 1 &&
+        directoryPath[0] === state.selectedFolderName
+      ) {
+        state.rootProjectCount = result.items.length;
+        const job = activeJob(state);
+        if (job) job.projectCount = result.items.length;
+      }
       for (const scanned of result.items) {
         if (scanned.type === "folder") {
           state.scannedFolderCount += 1;
@@ -558,7 +1150,10 @@ async function processScanStep(state) {
         const key = `${entry.url}\u0000${scanned.itemIndex}\u0000${scanned.name}`;
         if (state.items.some((item) => item.id === key)) continue;
         const systemMetadata = isSystemMetadataFile(scanned.name);
-        const selected = !systemMetadata && matchesFilters(scanned.name, settings);
+        const retryKeys = activeJob(state)?.retryKeys;
+        const retrySelected = !retryKeys?.length || retryKeys.includes(`${entry.url}\u0000${scanned.name}`);
+        // 用户选择的是整个文件夹：除系统元数据外，不按扩展名或关键词跳过文件。
+        const selected = !systemMetadata && retrySelected;
         state.items.push({
           id: key,
           name: scanned.name,
@@ -573,6 +1168,8 @@ async function processScanStep(state) {
             ? ""
             : systemMetadata
               ? "系统元数据文件已自动忽略"
+              : !retrySelected
+                ? "不属于本次失败重试"
               : "未通过筛选条件",
           attempts: 0,
           gopeedTaskId: null,
@@ -590,6 +1187,13 @@ async function processScanStep(state) {
         JSON.stringify(result.diagnostics || {})
       );
     } catch (error) {
+      if (isWorkerUnavailableError(error)) {
+        await waitForWorkerReconnect(
+          state,
+          "POPO 页面刷新中；当前目录稍后自动继续，不计为扫描失败"
+        );
+        return;
+      }
       state.scanFailures.push({
         url: entry.url,
         path: entry.path,
@@ -636,6 +1240,13 @@ async function processScanStep(state) {
       });
       state.resolveQueue.shift();
     } catch (error) {
+      if (isWorkerUnavailableError(error)) {
+        await waitForWorkerReconnect(
+          state,
+          "POPO 页面刷新中；当前子文件夹稍后自动继续，不计为扫描失败"
+        );
+        return;
+      }
       state.scanFailures.push({
         url: folder.parentUrl,
         path: [...folder.parentPath, folder.name],
@@ -651,7 +1262,7 @@ async function processScanStep(state) {
     return;
   }
 
-  state.mode = state.triggerMode === "folder_button" ? "awaiting_confirmation" : "scan_complete";
+  state.mode = "scan_complete";
   state.phase = "ready";
   state.completedAt = new Date().toISOString();
   if (!settings.recursive && state.items.length === 0 && state.scannedFolderCount > 0) {
@@ -668,15 +1279,10 @@ async function processScanStep(state) {
     );
   }
   if (state.triggerMode !== "folder_button") await closeWorkTab(state);
-  await saveState(state);
+  const saved = await saveState(state);
+  if (!saved) return;
   if (state.triggerMode === "folder_button") {
-    await notifySource(state, {
-      type: "SHOW_FOLDER_CONFIRMATION",
-      fileCount: state.items.filter((item) => item.selected).length,
-      folderCount: state.scannedFolderCount,
-      scanFailureCount: state.scanFailures.length,
-      scanFailureDetail: state.scanFailures[0]?.error || ""
-    });
+    await startScannedDownload(state, { automatic: true });
   }
 }
 
@@ -706,7 +1312,13 @@ function markAttemptFailure(state, item, stage, error, retryTaskId = null) {
   if (retryTaskId) item.retryTaskId = retryTaskId;
   removeActiveTransfer(state, item.id);
 
-  if (item.attempts <= state.settings.maxRetries) {
+  if (activeJob(state)?.cancelRequested) {
+    item.status = "failed";
+    item.stage = "已开始文件下载失败";
+    item.completedAt = new Date().toISOString();
+    item.retryTaskId = null;
+    pushLog(state, "error", `${item.name}：${stage}（任务已取消剩余文件，不再重试）`, detail);
+  } else if (item.attempts <= state.settings.maxRetries) {
     item.status = "pending";
     item.stage = `等待重试（${item.attempts}/${state.settings.maxRetries + 1}）`;
     pushLog(state, "warn", `${item.name}：${stage}，将重新加载父目录后重试`, detail);
@@ -771,18 +1383,22 @@ async function beginDownload(state, item, url) {
   const definition = gopeedTaskDefinition(state, item, url);
   item.stage = item.retryTaskId ? "更新下载地址" : "建立 Gopeed 任务";
   await saveState(state);
-  let taskId = item.retryTaskId;
-  if (taskId) {
-    await patchGopeedTask(state.settings, taskId, definition, {
-      timeoutMs: state.settings.timeouts.downloadStart
-    });
-    await continueGopeedTask(state.settings, taskId, {
-      timeoutMs: state.settings.timeouts.downloadStart
-    });
-  } else {
-    taskId = await createGopeedTask(state.settings, definition, {
-      timeoutMs: state.settings.timeouts.downloadStart
-    });
+  const previousTaskId = item.retryTaskId;
+  const started = await startOrReplaceGopeedTask(
+    state.settings,
+    previousTaskId,
+    definition,
+    { timeoutMs: state.settings.timeouts.downloadStart }
+  );
+  const taskId = started.taskId;
+  if (started.replacedMissingTask) {
+    item.retryTaskId = null;
+    pushLog(
+      state,
+      "warn",
+      `Gopeed 原任务已不存在，已重新建立：${item.name}`,
+      `oldTaskId=${previousTaskId}; newTaskId=${taskId}`
+    );
   }
   if (!taskId) throw new Error("Gopeed 没有返回任务 ID");
 
@@ -813,6 +1429,60 @@ async function beginDownload(state, item, url) {
   pushLog(fresh, "info", `Gopeed 任务已建立：${item.name}`, `taskId=${taskId}`);
   await saveState(fresh);
   schedulePump(500);
+}
+
+function pageApiErrorDetail(response) {
+  const body = response?.body;
+  const status = Number(response?.status) || 0;
+  const code = body && typeof body === "object" ? body.code ?? body.status : null;
+  const message = body && typeof body === "object"
+    ? body.msg || body.message || response?.error || ""
+    : response?.error || "";
+  return [
+    status ? `HTTP ${status}` : "",
+    code != null ? `code ${code}` : "",
+    message ? String(message).slice(0, 180) : ""
+  ].filter(Boolean).join("，") || "接口未返回可识别数据";
+}
+
+async function ensureTeamSpaceId(state) {
+  if (state.teamSpaceId) return state.teamSpaceId;
+  const teamSpaceKey = state.teamSpaceKey ||
+    new URL(state.rootUrl).pathname.match(/\/team\/pc\/([^/]+)/i)?.[1] || "";
+  if (!teamSpaceKey) throw new Error("没有识别到 POPO 团队空间标识");
+  const response = await sendToWork(state, {
+    type: "RESOLVE_TEAM_SPACE_ID",
+    teamSpaceKey,
+    timeoutMs: state.settings.timeouts.downloadStart
+  }, state.settings.timeouts.downloadStart + 3000, "解析团队空间 ID");
+  const teamSpaceId = response?.ok ? extractTeamSpaceId(response.body) : "";
+  if (!teamSpaceId) {
+    throw new Error(`无法把 POPO 团队空间短码解析为真实 ID：${pageApiErrorDetail(response)}`);
+  }
+  state.teamSpaceKey = teamSpaceKey;
+  state.teamSpaceId = teamSpaceId;
+  await saveState(state);
+  return teamSpaceId;
+}
+
+async function requestDirectDownloadUrl(state, pageId) {
+  const teamSpaceId = await ensureTeamSpaceId(state);
+  let lastResponse = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    lastResponse = await sendToWork(state, {
+      type: "REQUEST_DIRECT_DOWNLOAD",
+      teamSpaceId,
+      pageId,
+      timeoutMs: state.settings.timeouts.downloadStart
+    }, state.settings.timeouts.downloadStart + 3000, "请求单文件下载地址");
+    const directUrl = lastResponse?.ok ? findFirstHttpUrl(lastResponse.body) : "";
+    if (directUrl) return directUrl;
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 400));
+  }
+  throw Object.assign(
+    new Error(`POPO 单文件地址接口连续 3 次未返回下载地址：${pageApiErrorDetail(lastResponse)}`),
+    { failureStage: FAILURE.DOWNLOAD_NOT_ESTABLISHED }
+  );
 }
 
 async function syncGopeedTransfers(state) {
@@ -854,8 +1524,8 @@ async function syncGopeedTransfers(state) {
       } else if (status === "paused") {
         item.status = "paused";
         item.stage = "已在 Gopeed 暂停";
-        state.mode = "paused";
-        state.phase = "paused";
+        state.mode = activeJob(state)?.cancelRequested ? "draining_paused" : "paused";
+        state.phase = state.mode;
         pushLog(state, "info", `Gopeed 任务已暂停：${item.name}`);
       } else if (status === "unknown") {
         transfer.pollFailures = (transfer.pollFailures || 0) + 1;
@@ -915,11 +1585,55 @@ async function processDownloadStep(state) {
       return;
     }
   }
+  if (state.mode === "draining_paused") {
+    await saveState(state);
+    return;
+  }
+  if (state.mode === "draining") {
+    if (state.activeTransfers.length) {
+      state.phase = "draining";
+      await saveState(state);
+      schedulePump(1000);
+      return;
+    }
+    await finalizeActiveJob(
+      state,
+      "cancelled",
+      "未开始文件已取消；已开始文件已处理完成",
+      { type: "FOLDER_TASK_CANCELLED", preservedTransfers: true }
+    );
+    return;
+  }
   if (state.mode !== "downloading") {
     await saveState(state);
     return;
   }
-  if (state.preparingItemId) return;
+  if (state.preparingItemId) {
+    // A preparation promise only lives for the current pump invocation. If a
+    // later pump sees the persisted marker, the previous invocation ended or
+    // the service worker was interrupted before it could clear the marker.
+    const interruptedItem = state.items.find((entry) => entry.id === state.preparingItemId);
+    if (interruptedItem && !TERMINAL_STATUSES.has(interruptedItem.status)) {
+      interruptedItem.status = "pending";
+      interruptedItem.stage = "准备步骤曾中断，正在自动接续";
+      interruptedItem.failureStage = "";
+      interruptedItem.error = "";
+      interruptedItem.attempts = Math.max(0, (interruptedItem.attempts || 0) - 1);
+      pushLog(state, "warn", `检测到准备步骤中断，自动重新处理：${interruptedItem.name}`);
+    }
+    state.preparingItemId = null;
+    state.activeItemId = state.activeTransfers[0]?.itemId ?? null;
+    await saveState(state);
+    schedulePump(100);
+    return;
+  }
+  if (state.triggerMode === "folder_button" && state.workerFrameId == null && selectedPendingItem(state)) {
+    await waitForWorkerReconnect(
+      state,
+      "等待 POPO 页面恢复；已开始的 Gopeed 下载继续，未开始文件保持排队"
+    );
+    return;
+  }
   if (state.activeTransfers.length >= state.settings.concurrency) {
     await saveState(state);
     schedulePump(1000);
@@ -932,19 +1646,14 @@ async function processDownloadStep(state) {
       schedulePump(1000);
       return;
     }
-    state.mode = "complete";
-    state.phase = "complete";
-    state.completedAt = new Date().toISOString();
-    pushLog(state, "info", `下载结束：成功 ${state.items.filter((entry) => entry.status === "success").length}，失败 ${state.items.filter((entry) => entry.status === "failed").length}`);
-    await closeWorkTab(state);
-    await saveState(state);
-    if (state.triggerMode === "folder_button") {
-      await notifySource(state, {
-        type: "FOLDER_TASK_FINISHED",
-        successCount: state.items.filter((entry) => entry.status === "success").length,
-        failedCount: state.items.filter((entry) => entry.status === "failed").length
-      });
-    }
+    const successCount = state.items.filter((entry) => entry.status === "success").length;
+    const failedCount = state.items.filter((entry) => entry.status === "failed").length;
+    await finalizeActiveJob(
+      state,
+      "complete",
+      `下载结束：成功 ${successCount}，失败 ${failedCount}`,
+      { type: "FOLDER_TASK_FINISHED", successCount, failedCount }
+    );
     return;
   }
 
@@ -1004,13 +1713,7 @@ async function processDownloadStep(state) {
 
     let directUrl = preview.mediaUrl;
     if (!directUrl && preview.pageId) {
-      const apiResponse = await sendToWork(state, {
-        type: "REQUEST_DIRECT_DOWNLOAD",
-        teamSpaceId: state.teamSpaceId,
-        pageId: preview.pageId,
-        timeoutMs: state.settings.timeouts.downloadStart
-      }, state.settings.timeouts.downloadStart + 3000, "请求单文件下载地址");
-      if (apiResponse?.ok) directUrl = findFirstHttpUrl(apiResponse.body);
+      directUrl = await requestDirectDownloadUrl(state, preview.pageId);
     }
 
     if (directUrl) {
@@ -1022,6 +1725,20 @@ async function processDownloadStep(state) {
       { failureStage: FAILURE.DOWNLOAD_NOT_ESTABLISHED }
     );
   } catch (error) {
+    if (isWorkerUnavailableError(error)) {
+      item.status = "pending";
+      item.stage = "页面刷新，等待自动接续";
+      item.failureStage = "";
+      item.error = "";
+      item.attempts = Math.max(0, item.attempts - 1);
+      item.workerInterruptions = (item.workerInterruptions || 0) + 1;
+      removeActiveTransfer(state, item.id);
+      await waitForWorkerReconnect(
+        state,
+        `POPO 页面刷新中：${item.name} 稍后自动继续，本次不计失败`
+      );
+      return;
+    }
     const failureStage = error.failureStage ||
       (item.stage === "加载父目录" ? FAILURE.DIRECTORY_LOAD_FAILED :
         item.stage === "定位文件" ? FAILURE.FILE_NOT_FOUND :
@@ -1039,13 +1756,16 @@ async function pump() {
   pumpLocked = true;
   try {
     const { state } = await getStored();
+    if (await repairQueueState(state)) return;
     if (state.mode === "scanning") await processScanStep(state);
-    else if (state.mode === "downloading") await processDownloadStep(state);
+    else if (["downloading", "draining", "draining_paused"].includes(state.mode)) {
+      await processDownloadStep(state);
+    }
   } catch (error) {
     const { state } = await getStored();
     pushLog(state, "error", "后台任务发生未捕获错误", String(error));
     await saveState(state);
-    if (state.mode === "scanning" || state.mode === "downloading") schedulePump(1000);
+    if (["scanning", "downloading", "draining"].includes(state.mode)) schedulePump(1000);
   } finally {
     pumpLocked = false;
   }
@@ -1069,7 +1789,8 @@ async function startScan(message) {
   state.mode = "scanning";
   state.phase = "starting";
   state.rootUrl = url.href;
-  state.teamSpaceId = match[1];
+  state.teamSpaceKey = match[1];
+  state.teamSpaceId = "";
   state.scanQueue = [{ url: url.href, path: [] }];
   state.startedAt = new Date().toISOString();
   pushLog(state, "info", "扫描任务已创建；用户当前标签页不会被切换");
@@ -1087,57 +1808,98 @@ async function startFolderScan(message, sourceTabId) {
   const folderItemIndex = String(message.folderItemIndex ?? "").trim();
   if (!folderItemIndex) throw new Error("没有识别到被点击文件夹的行标识，请刷新 POPO 页面后重试");
 
-  const previous = (await getStored()).state;
-  if (["waiting_worker", "scanning", "downloading", "paused", "awaiting_confirmation"].includes(previous.mode)) {
-    throw new Error(`已有任务正在处理“${previous.selectedFolderName || "其他文件夹"}”，请先取消`);
+  const state = (await getStored()).state;
+  if (state.activeJobId == null && state.mode !== "idle" && state.triggerMode !== "folder_button") {
+    throw new Error("另一个扫描任务正在运行，请稍后再试");
   }
-  await closeWorkTab(previous);
-
-  const url = new URL(message.parentUrl);
-  const match = url.pathname.match(/\/team\/pc\/([^/]+)\/pageDetail\/([a-z0-9]+)/i);
-  const state = newState();
-  state.settings = mergeSettings({
-    ...previous.settings,
-    recursive: true,
-    formats: "",
-    includeKeywords: "",
-    excludeKeywords: "",
-    preserveStructure: true
+  const key = makeFolderJobKey({
+    parentUrl: message.parentUrl,
+    folderItemIndex,
+    folderName
   });
-  state.triggerMode = "folder_button";
-  state.sourceTabId = sourceTabId;
-  state.selectedFolderName = folderName;
-  state.mode = "waiting_worker";
-  state.phase = "waiting_worker";
-  state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
-  state.rootUrl = url.href;
-  state.teamSpaceId = match[1];
-  state.resolveQueue = [{
-    key: `${url.href}\u0000${folderItemIndex}\u0000${folderName}`,
-    parentUrl: url.href,
-    parentPath: [],
-    name: folderName,
-    itemIndex: folderItemIndex
-  }];
-  state.startedAt = new Date().toISOString();
-  pushLog(state, "info", `用户选择稳定下载：${folderName}`);
-  await saveState(state);
-  return state;
+  const duplicate = findDuplicateJob(state.jobs, key);
+  if (duplicate) {
+    return {
+      state,
+      job: duplicate,
+      duplicate: true,
+      queuePosition: queuePosition(state.jobs, duplicate.id),
+      needsWorker: false
+    };
+  }
+
+  const job = {
+    id: createId("job"),
+    key,
+    sourceTabId,
+    folderName,
+    folderItemIndex,
+    parentUrl: new URL(message.parentUrl).href,
+    status: "queued",
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    startedAt: "",
+    completedAt: "",
+    counts: summarizeItems([], 0, 0),
+    projectCount: null,
+    lastMessage: "已添加下载，排队中"
+  };
+  state.jobs = [...(state.jobs || []), job];
+  let needsWorker = false;
+  if (!state.activeJobId) {
+    prepareJobForExecution(state, job, false);
+    needsWorker = true;
+  }
+  rotateRunToken(state);
+  await saveState(state, true);
+  return {
+    state,
+    job,
+    duplicate: false,
+    queuePosition: queuePosition(state.jobs, job.id),
+    needsWorker
+  };
 }
 
-async function startDownload() {
-  const { state } = await getStored();
+async function startScannedDownload(state, { automatic = false } = {}) {
   if (!["scan_complete", "awaiting_confirmation", "complete"].includes(state.mode)) {
     throw new Error("请先完成文件数量检查");
   }
   const pending = state.items.filter((item) => item.selected && !["success", "cancelled"].includes(item.status));
-  if (!pending.length) throw new Error("没有符合筛选条件的待下载文件");
+  if (!pending.length) {
+    const message = state.scanFailures.length
+      ? `没有可下载文件；${state.scanFailures.length} 个目录读取失败`
+      : `当前目录没有可下载文件（${state.rootProjectCount ?? 0} 个项目）`;
+    if (!automatic || state.triggerMode !== "folder_button") throw new Error(message);
+    await finalizeActiveJob(
+      state,
+      state.scanFailures.length ? "failed" : "complete",
+      message,
+      {
+        type: state.scanFailures.length ? "FOLDER_TASK_ERROR" : "FOLDER_TASK_FINISHED",
+        message,
+        successCount: 0,
+        failedCount: state.scanFailures.length
+      }
+    );
+    return state;
+  }
+  if (activeJob(state)?.cancelRequested) throw new Error("该任务已经取消未开始文件");
+  state.mode = "starting";
+  state.phase = "waiting_gopeed";
+  rotateRunToken(state);
+  await saveState(state, true);
   const connection = await checkGopeedConnection(state.settings, state);
   if (!connection.connected) {
+    const message = `Gopeed 未连接：${connection.error}。请重新运行测试包中的 START-HERE.cmd 后再试。`;
+    if (automatic && state.triggerMode === "folder_button") {
+      await finalizeActiveJob(state, "failed", message, { type: "FOLDER_TASK_ERROR", message });
+      return state;
+    }
+    state.mode = "scan_complete";
+    state.phase = "ready";
     await saveState(state);
-    throw new Error(
-      `Gopeed 未连接：${connection.error}。请重新运行测试包中的 START-HERE.cmd 后再试。`
-    );
+    throw new Error(message);
   }
   for (const item of pending) {
     if (item.status === "failed") continue;
@@ -1155,9 +1917,15 @@ async function startDownload() {
     `开始下载 ${pending.filter((item) => item.status === "pending").length} 个文件；Gopeed 任务并发 ${state.settings.concurrency}`,
     `downloadDir=${connection.downloadDir}`
   );
-  await saveState(state);
+  const saved = await saveState(state);
+  if (!saved) throw new Error("任务状态已经变化，未启动新的下载");
   schedulePump(100);
   return state;
+}
+
+async function startDownload() {
+  const { state } = await getStored();
+  return startScannedDownload(state);
 }
 
 async function pauseTask() {
@@ -1165,6 +1933,8 @@ async function pauseTask() {
   if (state.mode !== "downloading") return state;
   state.mode = "paused";
   state.phase = "paused";
+  rotateRunToken(state);
+  await saveState(state, true);
   for (const transfer of state.activeTransfers || []) {
     const item = state.items.find((candidate) => candidate.id === transfer.itemId);
     try {
@@ -1185,9 +1955,12 @@ async function pauseTask() {
 
 async function resumeTask() {
   const { state } = await getStored();
-  if (state.mode !== "paused") return state;
-  state.mode = "downloading";
+  if (!["paused", "draining_paused"].includes(state.mode)) return state;
+  const cancelRequested = Boolean(activeJob(state)?.cancelRequested);
+  state.mode = cancelRequested ? "draining" : "downloading";
   state.phase = "resuming";
+  rotateRunToken(state);
+  await saveState(state, true);
   for (const transfer of [...(state.activeTransfers || [])]) {
     const item = state.items.find((candidate) => candidate.id === transfer.itemId);
     try { await continueGopeedTask(state.settings, transfer.taskId); } catch (error) {
@@ -1207,69 +1980,98 @@ async function resumeTask() {
 
 async function cancelTask() {
   const { state } = await getStored();
-  for (const transfer of state.activeTransfers || []) {
-    try {
-      await deleteGopeedTask(state.settings, transfer.taskId, { timeoutMs: 8000 });
-    } catch (error) {
-      pushLog(state, "warn", `取消 Gopeed 任务失败：${transfer.taskId}`, String(error));
-    }
+  return cancelJob(state.activeJobId);
+}
+
+async function cancelJob(jobId) {
+  const { state } = await getStored();
+  const job = (state.jobs || []).find((candidate) => candidate.id === jobId);
+  if (!job) throw new Error("没有找到要取消的下载任务");
+  if (isJobTerminal(job.status)) return state;
+
+  if (state.activeJobId !== job.id) {
+    job.status = "cancelled";
+    job.cancelRequested = true;
+    job.completedAt = new Date().toISOString();
+    job.lastMessage = "排队任务已取消，未创建任何下载";
+    rotateRunToken(state);
+    await saveState(state, true);
+    return state;
   }
-  for (const item of state.items) {
-    if (!TERMINAL_STATUSES.has(item.status)) {
-      item.status = "cancelled";
-      item.stage = "已取消";
-      item.failureStage = FAILURE.CANCELLED;
-      item.completedAt = new Date().toISOString();
-    }
-  }
-  state.mode = "cancelled";
-  state.phase = "cancelled";
+
+  job.cancelRequested = true;
+  rotateRunToken(state);
+  const cancellation = applyCancelPolicy(state.items, state.activeTransfers);
   state.preparingItemId = null;
-  state.activeTransfers = [];
-  state.activeItemId = null;
   state.scanQueue = [];
   state.resolveQueue = [];
-  state.completedAt = new Date().toISOString();
-  pushLog(state, "warn", "任务已取消");
-  await closeWorkTab(state);
-  await saveState(state);
-  await notifySource(state, { type: "FOLDER_TASK_CANCELLED" });
+  pushLog(
+    state,
+    "warn",
+    `已取消 ${cancellation.cancelledCount} 个未开始文件；保留 ${cancellation.preservedCount} 个已开始文件`
+  );
+  await finalizeActiveJob(
+    state,
+    "cancelled",
+    cancellation.preservedCount
+      ? `任务已取消；${cancellation.preservedCount} 个已经开始的下载保留在 Gopeed 中`
+      : "任务已取消，没有停止任何已开始下载",
+    { type: "FOLDER_TASK_CANCELLED", preservedTransfers: cancellation.preservedCount > 0 },
+    true
+  );
   return state;
 }
 
 async function retryFailed() {
+  const { state } = await getStored({ loadItems: false });
+  const job = [...(state.jobs || [])]
+    .reverse()
+    .find((candidate) => (candidate.counts?.failed || 0) > 0 && candidate.failureRetryKeys?.length);
+  if (!job) throw new Error("没有失败文件可重试");
+  return retryJob(job.id);
+}
+
+async function retryJob(jobId) {
   const { state } = await getStored();
-  const connection = await checkGopeedConnection(state.settings, state);
-  if (!connection.connected) {
-    await saveState(state);
-    throw new Error(`Gopeed 未连接：${connection.error}`);
-  }
-  let count = 0;
-  for (const item of state.items) {
-    if (item.status === "failed") {
-      item.status = "pending";
-      item.stage = "等待人工重试";
-      item.attempts = 0;
-      count += 1;
-    }
-  }
-  if (!count) throw new Error("没有失败文件可重试");
-  state.mode = "downloading";
-  state.phase = "retrying";
-  state.preparingItemId = null;
-  state.activeTransfers = [];
-  state.activeItemId = null;
-  pushLog(state, "info", `重新尝试 ${count} 个失败文件`);
-  await saveState(state);
-  schedulePump(100);
+  const source = (state.jobs || []).find((candidate) => candidate.id === jobId);
+  if (!source?.failureRetryKeys?.length) throw new Error("这个任务没有可重试的失败文件");
+  const existing = (state.jobs || []).find(
+    (candidate) => candidate.retryOfJobId === source.id && !isJobTerminal(candidate.status)
+  );
+  if (existing) return state;
+  const job = {
+    id: createId("job"),
+    key: source.key,
+    sourceTabId: source.sourceTabId,
+    folderName: source.folderName,
+    displayName: `${source.folderName}（重试失败项）`,
+    folderItemIndex: source.folderItemIndex,
+    parentUrl: source.parentUrl,
+    retryOfJobId: source.id,
+    retryKeys: source.failureRetryKeys,
+    status: "queued",
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    startedAt: "",
+    completedAt: "",
+    counts: summarizeItems([], 0, 0),
+    lastMessage: `等待重新扫描并重试 ${source.failureRetryKeys.length} 个失败文件`
+  };
+  state.jobs.push(job);
+  if (!state.activeJobId) prepareJobForExecution(state, job, false);
+  rotateRunToken(state);
+  await saveState(state, true);
+  if (state.activeJobId === job.id) await requestWorkerFrameForActiveJob(state);
   return state;
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   const data = await chrome.storage.local.get(["popoSettings", "popoState"]);
-  if (!data.popoSettings) await chrome.storage.local.set({ popoSettings: structuredClone(DEFAULT_SETTINGS) });
+  // 更新时一并清除旧版本保存过的文件格式和关键词筛选。
+  await chrome.storage.local.set({ popoSettings: mergeSettings(data.popoSettings || {}) });
   if (!data.popoState) await chrome.storage.local.set({ popoState: newState() });
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  schedulePump(1000);
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -1284,23 +2086,20 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 async function runWatchdog() {
   const { state } = await getStored();
+  if (await repairQueueState(state)) return;
   if (state.mode === "waiting_worker" && state.workerDeadline && Date.now() > state.workerDeadline) {
-    state.mode = "cancelled";
-    state.phase = "cancelled";
-    pushLog(
+    await finalizeActiveJob(
       state,
-      "error",
-      "POPO 阻止了隐藏工作区加载；任务已停止，没有创建可见标签页"
+      "failed",
+      "POPO 阻止了隐藏工作区加载；任务已停止，没有创建可见标签页",
+      {
+        type: "FOLDER_TASK_ERROR",
+        message: "隐藏工作区未能加载，任务已停止；没有创建可见标签页"
+      }
     );
-    await closeWorkTab(state);
-    await saveState(state);
-    await notifySource(state, {
-      type: "FOLDER_TASK_ERROR",
-      message: "隐藏工作区未能加载，任务已停止；没有创建可见标签页"
-    });
     return;
   }
-  if (state.mode !== "downloading") return;
+  if (!["downloading", "draining"].includes(state.mode)) return;
   let changed = false;
   for (const transfer of [...(state.activeTransfers || [])]) {
     const item = state.items.find((candidate) => candidate.id === transfer.itemId);
@@ -1324,24 +2123,47 @@ async function runWatchdog() {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const { state } = await getStored();
-  if (state.workTabId !== tabId) return;
-  state.workTabId = null;
-  if (state.mode === "scanning" || state.mode === "downloading") {
+  let changed = false;
+  if (state.workTabId === tabId) {
+    state.workTabId = null;
+    changed = true;
     pushLog(state, "warn", "后台工作标签页被关闭，将在下一步自动重建");
-    await saveState(state);
-    schedulePump(500);
   }
+  if (state.triggerMode === "folder_button" && state.sourceTabId === tabId && activeJob(state)) {
+    rejectWorkerFrameWaitersForTab(tabId, "POPO 页面已关闭");
+    const job = activeJob(state);
+    if (job) job.sourceTabId = null;
+    state.sourceTabId = null;
+    state.workerSourceTabId = null;
+    state.workerFrameId = null;
+    state.workerReadyUrl = "";
+    state.workerDeadline = 0;
+    changed = true;
+    pushLog(state, "warn", "POPO 页面已关闭；已开始的 Gopeed 下载继续，未开始文件等待重新打开原页面");
+  }
+  if (!changed) return;
+  rotateRunToken(state);
+  await saveState(state, true);
+  if (["scanning", "downloading", "draining"].includes(state.mode)) schedulePump(500);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
       case "GET_STATE":
-        return { ok: true, ...(await getStored()) };
+      {
+        let { state, settings } = await getStored({ loadItems: false });
+        if (queueStateNeedsRepair(state)) {
+          ({ state, settings } = await getStored());
+          await repairQueueState(state);
+        }
+        return { ok: true, state: publicState(state), settings };
+      }
       case "CHECK_GOPEED": {
-        const { state, settings } = await getStored();
-        const connection = await checkGopeedConnection(settings, state);
-        await saveState(state);
+        const { settings } = await getStored({ loadItems: false });
+        // 弹窗会定时检查连接；这里必须保持只读，不能用稍早读到的状态
+        // 覆盖正在建立或完成的下载任务。
+        const connection = await checkGopeedConnection(settings);
         return { ok: true, connection, settings: connection.settings || settings };
       }
       case "SAVE_GOPEED_SETTINGS": {
@@ -1360,23 +2182,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "START_SCAN":
         return { ok: true, state: await startScan(message) };
       case "START_FOLDER_SCAN":
-        return { ok: true, state: await startFolderScan(message, sender.tab?.id ?? null) };
+      {
+        const result = await withControlMutation(
+          () => startFolderScan(message, sender.tab?.id ?? null)
+        );
+        return {
+          ok: true,
+          state: publicState(result.state),
+          job: result.job,
+          duplicate: result.duplicate,
+          queuePosition: result.queuePosition,
+          needsWorker: result.needsWorker
+        };
+      }
+      case "SOURCE_PAGE_READY": {
+        const result = await withControlMutation(
+          () => registerSourcePage(sender, message.url)
+        );
+        return { ok: true, ...result };
+      }
       case "REGISTER_WORKER_FRAME":
         return { ok: true, state: await registerWorkerFrame(sender, message.url) };
-      case "CONFIRM_FOLDER_DOWNLOAD":
-        return { ok: true, state: await startDownload() };
-      case "CANCEL_FOLDER_TASK":
-        return { ok: true, state: await cancelTask() };
-      case "START_DOWNLOAD":
-        return { ok: true, state: await startDownload() };
-      case "PAUSE":
-        return { ok: true, state: await pauseTask() };
-      case "RESUME":
-        return { ok: true, state: await resumeTask() };
-      case "CANCEL":
-        return { ok: true, state: await cancelTask() };
-      case "RETRY_FAILED":
-        return { ok: true, state: await retryFailed() };
+      case "CANCEL_FOLDER_TASK": {
+        const state = await withControlMutation(() => cancelTask());
+        return { ok: true, state: publicState(state) };
+      }
+      case "CANCEL_JOB": {
+        const state = await withControlMutation(() => cancelJob(message.jobId));
+        return { ok: true, state: publicState(state) };
+      }
+      case "START_DOWNLOAD": {
+        const state = await startDownload();
+        return { ok: true, state: publicState(state) };
+      }
+      case "PAUSE": {
+        const state = await pauseTask();
+        return { ok: true, state: publicState(state) };
+      }
+      case "RESUME": {
+        const state = await resumeTask();
+        return { ok: true, state: publicState(state) };
+      }
+      case "CANCEL": {
+        const state = await withControlMutation(() => cancelTask());
+        return { ok: true, state: publicState(state) };
+      }
+      case "RETRY_FAILED": {
+        const state = await withControlMutation(() => retryFailed());
+        return { ok: true, state: publicState(state) };
+      }
+      case "RETRY_JOB": {
+        const state = await withControlMutation(() => retryJob(message.jobId));
+        return { ok: true, state: publicState(state) };
+      }
       case "RESET": {
         const previous = (await getStored()).state;
         await closeWorkTab(previous);

@@ -1,15 +1,22 @@
 {
   "manifest_version": 3,
   "name": "POPO 稳定下载助手",
-  "version": "0.6.0.3",
-  "version_name": "0.6.0-beta.3",
+  "version": "0.7.0.8",
+  "version_name": "0.7.0-beta.8",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtBXlDaqglvDENelYuSGDfKU3bcTfqvWQPuP+4YQOu2jcn4gVNqIUdQFNzuIYNcwDXmKgeBNxgBlf0QhFlfawzgmYlk9T/6g79wk9wQzkRqXFHJootkakTCqII1didENRnLopO/XTgZ+Z6SOuTY7trB8Rpt/fv4Vc7qqz7k2BZOfAABbTln7eBWPrwwiQZtnFZLEJXITTTv4FH5U3iLhAtTcS/ZfvdrAJQgS+rqEDFTMkau14vr3SzeeOeMofOzaLZedQtMwgBaYuXzd5LtC90futDKMHkgdVfZBN9RuP4vUF9BKZT1twkVAdsufKB1XJL2PiswLQ7Oq/lncv4IVCywIDAQAB",
   "description": "扫描 POPO 团队空间文件夹，并以可暂停、可重试、可核对的队列逐个下载文件。",
   "minimum_chrome_version": "114",
+  "icons": {
+    "16": "assets/popo-logo-16.png",
+    "32": "assets/popo-logo-32.png",
+    "48": "assets/popo-logo-48.png",
+    "128": "assets/popo-logo-128.png"
+  },
   "permissions": [
     "alarms",
     "nativeMessaging",
     "storage",
+    "unlimitedStorage",
     "tabs"
   ],
   "host_permissions": [
@@ -22,6 +29,10 @@
   },
   "action": {
     "default_title": "POPO 稳定下载助手",
+    "default_icon": {
+      "16": "assets/popo-logo-16.png",
+      "32": "assets/popo-logo-32.png"
+    },
     "default_popup": "popup.html"
   },
   "content_scripts": [
@@ -42,10 +53,21 @@
       ],
       "js": [
         "core.js",
+        "queue.js",
         "content.js"
       ],
       "all_frames": true,
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/popo-logo.svg"
+      ],
+      "matches": [
+        "https://docs.popo.netease.com/*"
+      ]
     }
   ]
 }
