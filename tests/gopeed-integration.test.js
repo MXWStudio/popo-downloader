@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+global.PopoRuntime = require("../runtime/popo-runtime.cjs");
 const {
   classifyTaskStatus,
   continueTask,
@@ -13,6 +14,10 @@ const {
   patchTask,
   pauseTask
 } = require("../gopeed.js");
+
+test.after(() => {
+  delete global.PopoRuntime;
+});
 
 function readJson(request) {
   return new Promise((resolve, reject) => {

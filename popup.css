@@ -76,6 +76,7 @@ body {
   font: 13px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif;
 }
 
+#popup-root { min-height: 100%; }
 main { padding: 18px; }
 p, h1, h2 { margin: 0; }
 
@@ -135,6 +136,16 @@ h2 {
   font-weight: 700;
 }
 
+.badge[data-state="需要处理"] {
+  color: var(--red-ink);
+  background: var(--red-soft);
+}
+
+.badge[data-state="已暂停"] {
+  color: var(--neutral-ink);
+  background: var(--neutral-soft);
+}
+
 .instruction {
   display: flex;
   align-items: center;
@@ -189,9 +200,26 @@ h2 {
   margin-top: 7px;
 }
 
+.popup-task-section + .popup-task-section {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.popup-task-section h2 {
+  margin: 5px 0 2px;
+  color: var(--summary-copy);
+  font-size: 10px;
+  letter-spacing: .2px;
+}
+
 .popup-queue-item {
   padding: 9px 0;
   border-top: 1px solid var(--line-soft);
+}
+
+.popup-task-section .popup-queue-item:first-of-type {
+  border-top: 0;
 }
 
 .popup-queue-name {
@@ -244,14 +272,37 @@ h2 {
 
 .popup-queue-actions {
   justify-content: flex-end;
+  flex-wrap: wrap;
   margin-top: 6px;
 }
 
 .popup-queue-actions button {
   min-height: 28px;
   padding: 0 8px;
-  color: var(--red);
   font-size: 10px;
+}
+
+.popup-queue-actions button.primary { color: var(--blue-dark); }
+.popup-queue-actions button.remove { color: var(--muted); }
+.popup-queue-actions button.danger { color: var(--red); }
+
+.popup-remove-confirmation {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.popup-remove-note {
+  margin: 0;
+  color: var(--summary-copy);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.popup-remove-confirmation .popup-queue-actions {
+  margin-top: 6px;
 }
 
 .caption { color: var(--muted); font-size: 10px; }
@@ -304,10 +355,56 @@ h2 {
 
 .engine-card {
   margin-top: 12px;
-  padding: 11px 12px;
+  padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--surface-soft);
+}
+
+.engine-alert {
+  padding: 2px 1px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.engine-alert p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.engine-settings {
+  margin-top: 0;
+}
+
+.engine-alert + .engine-settings {
+  margin-top: 8px;
+}
+
+.engine-settings > summary {
+  font-weight: 650;
+}
+
+.engine-settings-body {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.recent-completed {
+  margin-top: 11px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.recent-completed > summary {
+  font-weight: 650;
+}
+
+.recent-completed .popup-queue-list {
+  max-height: 220px;
 }
 
 .engine-heading {
@@ -348,13 +445,6 @@ summary {
   font-size: 11px;
 }
 
-label {
-  display: block;
-  margin-top: 8px;
-  color: var(--field-copy);
-  font-size: 10px;
-}
-
 .folder-picker-setting {
   margin-top: 8px;
   color: var(--field-copy);
@@ -388,24 +478,6 @@ label {
   min-height: 32px;
 }
 
-input {
-  display: block;
-  width: 100%;
-  height: 32px;
-  margin-top: 3px;
-  padding: 0 8px;
-  border: 1px solid var(--control-line);
-  border-radius: 7px;
-  color: var(--ink);
-  background: var(--surface);
-  font: inherit;
-}
-
-#saveGopeedButton {
-  width: 100%;
-  margin-top: 8px;
-}
-
 .actions {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -429,29 +501,6 @@ button {
 button:hover:not(:disabled) { border-color: var(--blue); background: var(--blue-hover); }
 button:disabled { cursor: not-allowed; opacity: .4; }
 button.danger { color: var(--red); }
-
-.failure-list {
-  margin-top: 12px;
-  padding: 10px;
-  border-radius: 8px;
-  color: var(--red-ink);
-  background: var(--red-soft);
-  font-size: 10px;
-}
-
-.failure-list ul {
-  margin: 6px 0 0;
-  padding-left: 17px;
-}
-
-.failure-list li + li { margin-top: 5px; }
-
-.note {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 10px;
-  text-align: center;
-}
 
 .permission-note {
   margin-top: 12px;

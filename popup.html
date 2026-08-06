@@ -7,76 +7,7 @@
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
-    <main>
-      <header>
-        <div class="brand">
-          <img class="brand-logo" src="assets/popo-logo.svg" alt="" width="36" height="36">
-          <div>
-            <p class="eyebrow">POPO STABLE DOWNLOADER</p>
-            <h1>稳定下载助手</h1>
-          </div>
-        </div>
-        <span id="modeBadge" class="badge">等待操作</span>
-      </header>
-
-      <section id="idleCard" class="instruction">
-        <span class="download-mark">⇩</span>
-        <div>
-          <strong>在 POPO 网页中选择文件夹</strong>
-          <p>点击文件夹右侧、三个点左边的蓝色下载按钮。</p>
-        </div>
-      </section>
-
-      <section id="taskCard" class="task-card" hidden>
-        <div class="queue-heading">
-          <strong>下载任务队列</strong>
-          <span id="queueSummary">0 个任务</span>
-        </div>
-        <div id="popupQueueList" class="popup-queue-list"></div>
-      </section>
-
-      <section class="engine-card">
-        <div class="engine-heading">
-          <strong>Gopeed 下载引擎</strong>
-          <span id="gopeedStatus" class="engine-status" data-state="checking">检测中</span>
-        </div>
-        <p id="gopeedDetail">正在检查本机 Gopeed…</p>
-        <details>
-          <summary>下载位置与连接</summary>
-          <div class="folder-picker-setting">
-            <span>保存根目录</span>
-            <output id="gopeedDownloadDirOverride">使用 Gopeed 默认下载目录</output>
-            <div class="folder-picker-actions">
-              <button id="chooseDownloadDirectoryButton" type="button">选择文件夹</button>
-              <button id="clearDownloadDirectoryButton" type="button">恢复默认</button>
-            </div>
-          </div>
-          <label>
-            API 地址
-            <input id="gopeedEndpoint" type="url" value="http://127.0.0.1:9999" spellcheck="false">
-          </label>
-          <label>
-            API Token（未设置可留空）
-            <input id="gopeedToken" type="password" autocomplete="off">
-          </label>
-          <button id="saveGopeedButton" type="button">保存并检测</button>
-        </details>
-      </section>
-
-      <section class="actions">
-        <button id="pauseButton">暂停</button>
-        <button id="resumeButton">继续</button>
-        <button id="cancelButton" class="danger">取消当前未开始</button>
-      </section>
-
-      <section id="failureList" class="failure-list" hidden>
-        <strong>失败明细</strong>
-        <ul id="failureItems"></ul>
-      </section>
-      <p class="note">文件将保存到上方根目录下的“POPO稳定下载/所选文件夹”。</p>
-      <p id="errorBox" class="error" hidden></p>
-      <footer>版本 0.7.0-beta.6 · 绿色安装版 · 并发 5</footer>
-    </main>
-    <script src="popup.js"></script>
+    <div id="popup-root"></div>
+    <script src="runtime/popup.js"></script>
   </body>
 </html>

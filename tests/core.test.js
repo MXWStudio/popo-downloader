@@ -15,8 +15,83 @@ const {
   matchesFilters,
   previewTitleMatchesFile,
   sanitizePathSegment,
-  selectVirtualListMatch
+  selectVirtualListMatch,
+  validateRuntimeMessage
 } = require("../core.js");
+
+test("后台命令在分发前规范化字段并丢弃无关数据", () => {
+  assert.deepEqual(validateRuntimeMessage({
+    type: "START_FOLDER_SCAN",
+    folderName: " 母文件 A ",
+    folderItemIndex: 42,
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1#preview",
+    ignored: "不会进入后台"
+  }), {
+    type: "START_FOLDER_SCAN",
+    folderName: "母文件 A",
+    folderItemIndex: "42",
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1#preview"
+  });
+  assert.deepEqual(validateRuntimeMessage({ type: "GET_STATE", ignored: { large: true } }), {
+    type: "GET_STATE"
+  });
+  assert.deepEqual(validateRuntimeMessage({ type: "DISMISS_JOB", jobId: "job-a" }), {
+    type: "DISMISS_JOB",
+    jobId: "job-a"
+  });
+});
+
+test("后台命令拒绝越界字段、未知设置和非 POPO 页面", () => {
+  assert.throws(() => validateRuntimeMessage(null), /message/);
+  assert.throws(() => validateRuntimeMessage({ type: "CANCEL_JOB", jobId: "" }), /jobId/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "RESTORE_CANCELLED_JOB",
+    jobId: "job-a",
+    sourceTabId: "7"
+  }), /sourceTabId/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "START_FOLDER_SCAN",
+    folderName: "母文件 A",
+    folderItemIndex: Number.NaN,
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1"
+  }), /folderItemIndex/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "START_FOLDER_SCAN",
+    folderName: "母文件 A",
+    folderItemIndex: "1",
+    parentUrl: "https://example.com/team/pc/team1/pageDetail/root1"
+  }), /parentUrl/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "SAVE_SETTINGS",
+    settings: { unexpected: true }
+  }), /settings/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "SAVE_GOPEED_SETTINGS",
+    gopeedToken: "x".repeat(4097)
+  }), /gopeedToken/);
+});
+
+test("旧版设置命令只保留已知且范围有效的配置", () => {
+  assert.deepEqual(validateRuntimeMessage({
+    type: "SAVE_SETTINGS",
+    settings: {
+      recursive: true,
+      concurrency: 5,
+      gopeedConnections: 1,
+      downloadRoot: " POPO稳定下载 ",
+      timeouts: { directoryLoad: 45000, transfer: 1800000 }
+    }
+  }), {
+    type: "SAVE_SETTINGS",
+    settings: {
+      downloadRoot: "POPO稳定下载",
+      recursive: true,
+      concurrency: 5,
+      gopeedConnections: 1,
+      timeouts: { directoryLoad: 45000, transfer: 1800000 }
+    }
+  });
+});
 
 test("虚拟列表不滚动也能根据底部占位准确还原项目总数", () => {
   assert.equal(inferVirtualListItemCount({

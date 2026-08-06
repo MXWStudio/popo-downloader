@@ -1,4 +1,4 @@
-importScripts("core.js", "gopeed.js", "queue.js");
+importScripts("runtime/popo-runtime.js", "core.js", "gopeed.js", "queue.js");
 
 "use strict";
 
@@ -9,17 +9,23 @@ const {
   findFirstHttpUrl,
   isSystemMetadataFile,
   looksLikeFileTitle,
-  previewTitleMatchesFile
+  previewTitleMatchesFile,
+  validateRuntimeMessage
 } = PopoCore;
 const {
+  buildTaskIdentityLabels: buildGopeedTaskIdentityLabels,
   classifyTaskStatus: classifyGopeedTaskStatus,
   continueTask: continueGopeedTask,
   deleteTask: deleteGopeedTask,
   getConfig: getGopeedConfig,
   getTask: getGopeedTask,
+  listTasks: listGopeedTasks,
   normalizeDownloadDirectory: normalizeGopeedDownloadDirectory,
   normalizeEndpoint: normalizeGopeedEndpoint,
+  normalizeTargetKey: normalizeGopeedTargetKey,
   pauseTask: pauseGopeedTask,
+  reusableTaskTargetKeys,
+  selectTaskByIdentity: selectGopeedTaskByIdentity,
   startOrReplaceTask: startOrReplaceGopeedTask,
   splitDownloadTarget
 } = PopoGopeed;
@@ -30,7 +36,8 @@ const {
   isJobTerminal,
   makeFolderJobKey,
   queuePosition,
-  summarizeItems
+  summarizeItems,
+  transitionJobStatus
 } = PopoQueue;
 const PUMP_ALARM = "popo-stable-downloader-pump";
 const WATCHDOG_ALARM = "popo-stable-downloader-watchdog";
@@ -40,7 +47,49 @@ const ITEM_CHUNK_SIZE = 200;
 const ITEM_STORAGE_PREFIX = "popoItems";
 const MAX_RETAINED_TERMINAL_JOBS = 20;
 const WORKER_UNAVAILABLE_CODE = "POPO_WORKER_UNAVAILABLE";
+const POPUP_UI_PORT_NAME = "popo-popup-ui";
 const workerFrameWaiters = new Map();
+const popupUiPorts = new Set();
+const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
+const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
+const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
+
+function enforceRuntimeCommandContract(command) {
+  if (typeof runtimeContracts?.parseRuntimeCommand !== "function") return command;
+  try {
+    return runtimeContracts.parseRuntimeCommand(command);
+  } catch (error) {
+    const detail = typeof runtimeContracts.contractErrorMessage === "function"
+      ? runtimeContracts.contractErrorMessage(error)
+      : String(error);
+    throw new Error(`后台命令未通过运行时契约检查：${detail}`);
+  }
+}
+
+function sanitizeStoredJobs(jobs) {
+  if (typeof runtimeContracts?.sanitizeStoredJobs !== "function") {
+    return { jobs: Array.isArray(jobs) ? jobs : [], rejected: 0 };
+  }
+  return runtimeContracts.sanitizeStoredJobs(jobs);
+}
+
+function indexedDbTaskStoreAvailable() {
+  return typeof runtimeTaskStore?.isAvailable === "function" && runtimeTaskStore.isAvailable();
+}
+
+async function restrictLocalStorageAccess() {
+  const localStorage = chrome.storage?.local;
+  if (typeof localStorage?.setAccessLevel !== "function") return false;
+  try {
+    await localStorage.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+    return true;
+  } catch (error) {
+    console.warn("无法限制扩展本地状态访问", error);
+    return false;
+  }
+}
+
+void restrictLocalStorageAccess();
 
 const DEFAULT_SETTINGS = Object.freeze({
   recursive: true,
@@ -65,6 +114,79 @@ const DEFAULT_SETTINGS = Object.freeze({
     transfer: 1800000
   }
 });
+
+function newRuntimeHealth() {
+  return {
+    schemaVersion: 2,
+    serviceWorkerStartedAt: SERVICE_WORKER_STARTED_AT,
+    lastEventAt: "",
+    lastEventCode: "",
+    eventCounts: {},
+    reconciliation: {
+      lastCheckedAt: "",
+      lastOutcome: "never",
+      recoveredCount: 0,
+      missCount: 0,
+      errorCount: 0,
+      ambiguousCount: 0,
+      consecutiveErrors: 0,
+      lastError: ""
+    },
+    storage: {
+      backend: "unknown",
+      lastMigrationAt: "",
+      readFailureCount: 0,
+      writeFallbackCount: 0,
+      lastError: ""
+    }
+  };
+}
+
+function normalizeRuntimeHealth(value) {
+  const defaults = newRuntimeHealth();
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const sourceCounts = source.eventCounts && typeof source.eventCounts === "object"
+    ? source.eventCounts
+    : {};
+  const eventCounts = Object.fromEntries(Object.entries(sourceCounts)
+    .filter(([code, count]) => /^[A-Z0-9_]{1,64}$/.test(code) && Number.isFinite(Number(count)))
+    .slice(0, 100)
+    .map(([code, count]) => [code, Math.max(0, Number(count) || 0)]));
+  const reconciliation = source.reconciliation &&
+    typeof source.reconciliation === "object" &&
+    !Array.isArray(source.reconciliation)
+    ? source.reconciliation
+    : {};
+  const storage = source.storage && typeof source.storage === "object" && !Array.isArray(source.storage)
+    ? source.storage
+    : {};
+  const count = (key) => Math.max(0, Number(reconciliation[key]) || 0);
+  return {
+    ...defaults,
+    lastEventAt: String(source.lastEventAt || ""),
+    lastEventCode: String(source.lastEventCode || ""),
+    eventCounts,
+    reconciliation: {
+      ...defaults.reconciliation,
+      lastCheckedAt: String(reconciliation.lastCheckedAt || ""),
+      lastOutcome: String(reconciliation.lastOutcome || "never"),
+      recoveredCount: count("recoveredCount"),
+      missCount: count("missCount"),
+      errorCount: count("errorCount"),
+      ambiguousCount: count("ambiguousCount"),
+      consecutiveErrors: count("consecutiveErrors"),
+      lastError: String(reconciliation.lastError || "").slice(0, 500)
+    },
+    storage: {
+      ...defaults.storage,
+      backend: String(storage.backend || "unknown").slice(0, 32),
+      lastMigrationAt: String(storage.lastMigrationAt || ""),
+      readFailureCount: Math.max(0, Number(storage.readFailureCount) || 0),
+      writeFallbackCount: Math.max(0, Number(storage.writeFallbackCount) || 0),
+      lastError: String(storage.lastError || "").slice(0, 500)
+    }
+  };
+}
 
 function newState() {
   return {
@@ -101,6 +223,9 @@ function newState() {
     completedAt: "",
     updatedAt: new Date().toISOString(),
     lastMessage: "请在 POPO 文件夹页面开始扫描",
+    runtimeHealth: newRuntimeHealth(),
+    itemStorageBackend: "",
+    itemStorageGeneration: "",
     logs: []
   };
 }
@@ -129,17 +254,33 @@ function hashText(value) {
   return (hash >>> 0).toString(16);
 }
 
+function hashItemChunk(items) {
+  if (typeof runtimeTaskStore?.hashItemChunk === "function") {
+    return runtimeTaskStore.hashItemChunk(items);
+  }
+  return hashText(JSON.stringify(items));
+}
+
 function migrateStoredState(storedState, settings) {
   if (storedState?.version === 4) {
     const teamSpaceKey = storedState.teamSpaceKey || storedState.teamSpaceId || "";
-    return {
+    const checkedJobs = sanitizeStoredJobs(storedState.jobs);
+    const migrated = {
       ...newState(),
       ...storedState,
       settings,
       teamSpaceKey,
       teamSpaceId: storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "",
-      jobs: Array.isArray(storedState.jobs) ? storedState.jobs : []
+      jobs: checkedJobs.jobs,
+      runtimeHealth: normalizeRuntimeHealth(storedState.runtimeHealth)
     };
+    if (checkedJobs.rejected > 0) {
+      migrated.runtimeHealth.lastEventAt = new Date().toISOString();
+      migrated.runtimeHealth.lastEventCode = "STORED_JOB_REJECTED";
+      migrated.runtimeHealth.eventCounts.STORED_JOB_REJECTED =
+        (migrated.runtimeHealth.eventCounts.STORED_JOB_REJECTED || 0) + checkedJobs.rejected;
+    }
+    return migrated;
   }
   if (storedState?.version !== 3) return newState();
 
@@ -194,14 +335,121 @@ async function getStored({ loadItems = true } = {}) {
   state.items = Array.isArray(state.items) ? state.items : [];
   state._itemsLoaded = loadItems;
   if (loadItems && data.popoState?.version === 4 && state.itemStorageJobId && state.itemChunkCount > 0) {
-    const keys = Array.from(
-      { length: state.itemChunkCount },
-      (_, index) => itemChunkKey(state.itemStorageJobId, index)
-    );
-    const chunks = await chrome.storage.local.get(keys);
-    state.items = keys.flatMap((key) => Array.isArray(chunks[key]) ? chunks[key] : []);
+    if (state.itemStorageBackend === "indexeddb") {
+      if (!indexedDbTaskStoreAvailable() || !state.itemStorageGeneration) {
+        recordItemStorageFailure(state, "read", "IndexedDB 任务存储当前不可用");
+        throw new Error("无法读取大任务文件状态：IndexedDB 当前不可用");
+      }
+      try {
+        state.items = await runtimeTaskStore.readItemChunks({
+          jobId: state.itemStorageJobId,
+          generation: state.itemStorageGeneration,
+          chunkCount: state.itemChunkCount,
+          hashes: state.itemChunkHashes
+        });
+        state.runtimeHealth.storage.backend = "indexeddb";
+        state.runtimeHealth.storage.lastError = "";
+      } catch (error) {
+        recordItemStorageFailure(state, "read", error);
+        throw new Error(`无法读取大任务文件状态：${String(error)}`);
+      }
+    } else {
+      const legacy = await readLegacyItemChunks(state.itemStorageJobId, state.itemChunkCount);
+      if (!legacy.complete) {
+        recordItemStorageFailure(state, "read", "旧版任务分块缺失");
+        throw new Error("无法读取旧版任务文件状态：本地分块缺失");
+      }
+      state.items = legacy.items;
+      if (indexedDbTaskStoreAvailable()) {
+        try {
+          await migrateLegacyItemsToIndexedDb(state, legacy.keys);
+        } catch (error) {
+          recordItemStorageFailure(state, "write", error);
+          state.runtimeHealth.storage.backend = "chrome-storage-fallback";
+        }
+      }
+    }
   }
   return { state, settings };
+}
+
+function splitItemChunks(items) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += ITEM_CHUNK_SIZE) {
+    chunks.push(items.slice(index, index + ITEM_CHUNK_SIZE));
+  }
+  return chunks;
+}
+
+async function readLegacyItemChunks(jobId, chunkCount) {
+  const keys = Array.from({ length: chunkCount }, (_, index) => itemChunkKey(jobId, index));
+  const stored = await chrome.storage.local.get(keys);
+  const complete = keys.every((key) => Array.isArray(stored[key]));
+  return {
+    keys,
+    complete,
+    items: complete ? keys.flatMap((key) => stored[key]) : []
+  };
+}
+
+function recordItemStorageFailure(state, operation, error) {
+  state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+  const detail = String(error?.message || error || "未知存储错误").slice(0, 500);
+  state.runtimeHealth.storage.lastError = detail;
+  if (operation === "read") state.runtimeHealth.storage.readFailureCount += 1;
+  else state.runtimeHealth.storage.writeFallbackCount += 1;
+  pushRuntimeEvent(
+    state,
+    operation === "read" ? "INDEXEDDB_READ_FAILED" : "INDEXEDDB_WRITE_FALLBACK",
+    "warn",
+    operation === "read" ? "IndexedDB 任务状态读取失败" : "IndexedDB 写入失败，已准备回退",
+    detail,
+    { operation }
+  );
+}
+
+async function writeItemsToIndexedDb(state, chunks, hashes, { migration = false } = {}) {
+  const jobId = String(state.activeJobId || state.itemStorageJobId || "");
+  if (!jobId) throw new Error("IndexedDB 写入缺少活动任务 ID");
+  const generation = runtimeTaskStore.createGeneration(jobId, hashes);
+  await runtimeTaskStore.writeItemChunks({ jobId, generation, chunks, hashes });
+  state.itemStorageBackend = "indexeddb";
+  state.itemStorageGeneration = generation;
+  state.itemStorageJobId = jobId;
+  state.itemChunkCount = chunks.length;
+  state.itemChunkHashes = hashes;
+  state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+  state.runtimeHealth.storage.backend = "indexeddb";
+  state.runtimeHealth.storage.lastError = "";
+  if (migration) {
+    state.runtimeHealth.storage.lastMigrationAt = new Date().toISOString();
+    pushRuntimeEvent(
+      state,
+      "INDEXEDDB_ITEMS_MIGRATED",
+      "info",
+      "旧版任务文件状态已迁移到 IndexedDB",
+      "",
+      { jobId, chunkCount: chunks.length }
+    );
+  }
+  return generation;
+}
+
+async function migrateLegacyItemsToIndexedDb(state, legacyKeys = []) {
+  const chunks = splitItemChunks(state.items || []);
+  const hashes = chunks.map(hashItemChunk);
+  await writeItemsToIndexedDb(state, chunks, hashes, { migration: true });
+  const metadata = structuredClone(state);
+  delete metadata.items;
+  delete metadata._itemsLoaded;
+  await chrome.storage.local.set({ popoState: metadata });
+  if (legacyKeys.length && chrome.storage.local.remove) {
+    try {
+      await chrome.storage.local.remove(legacyKeys);
+    } catch (error) {
+      console.warn("IndexedDB 迁移已提交，但旧版任务分块暂未清理", error);
+    }
+  }
 }
 
 function mergeSettings(input) {
@@ -225,22 +473,58 @@ function mergeSettings(input) {
   };
 }
 
-function pushLog(state, level, message, details) {
+function sanitizeRuntimeContext(context) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return undefined;
+  const entries = Object.entries(context).slice(0, 12).flatMap(([key, value]) => {
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) return [];
+    if (typeof value === "string") return [[key, value.slice(0, 200)]];
+    if (typeof value === "number" && Number.isFinite(value)) return [[key, value]];
+    if (typeof value === "boolean") return [[key, value]];
+    return [];
+  });
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+function pushLog(state, level, message, details, event = null) {
+  const at = new Date().toISOString();
+  const code = /^[A-Z0-9_]{1,64}$/.test(String(event?.code || ""))
+    ? String(event.code)
+    : "";
+  const context = sanitizeRuntimeContext(event?.context);
+  const entry = { at, level, message, details: details || "" };
+  if (code) entry.code = code;
+  if (context) entry.context = context;
   state.logs = [
     ...(state.logs || []),
-    { at: new Date().toISOString(), level, message, details: details || "" }
+    entry
   ].slice(-300);
   state.lastMessage = message;
+  if (code) {
+    state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+    state.runtimeHealth.lastEventAt = at;
+    state.runtimeHealth.lastEventCode = code;
+    state.runtimeHealth.eventCounts[code] =
+      (state.runtimeHealth.eventCounts[code] || 0) + 1;
+  }
+}
+
+function pushRuntimeEvent(state, code, level, message, details = "", context = {}) {
+  pushLog(state, level, message, details, { code, context });
 }
 
 function activeJob(state) {
   return (state.jobs || []).find((job) => job.id === state.activeJobId) || null;
 }
 
+function setJobStatus(job, nextStatus, changes = {}) {
+  Object.assign(job, transitionJobStatus(job, nextStatus, changes));
+  return job;
+}
+
 function syncActiveJobSummary(state) {
   const job = activeJob(state);
   if (!job) return;
-  job.status = state.mode;
+  setJobStatus(job, state.mode);
   job.startedAt ||= state.startedAt || new Date().toISOString();
   job.completedAt = state.completedAt || "";
   job.lastMessage = state.lastMessage || job.lastMessage || "";
@@ -257,6 +541,9 @@ function syncActiveJobSummary(state) {
       .map((item) => ({ name: item.name, stage: item.failureStage, error: item.error }));
     job.failureRetryKeys = [...new Set((state.items || [])
       .filter((item) => item.status === "failed")
+      .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+    job.cancelledRetryKeys = [...new Set((state.items || [])
+      .filter((item) => item.status === "cancelled")
       .map((item) => `${item.parentUrl}\u0000${item.name}`))];
   }
   if (Number.isInteger(state.rootProjectCount) && state.rootProjectCount >= 0) {
@@ -280,10 +567,16 @@ function publicState(state) {
   delete snapshot.items;
   delete snapshot.itemChunkHashes;
   delete snapshot._itemsLoaded;
-  snapshot.jobs = clientVisibleJobs(snapshot.jobs || []).map((job) => ({
-    ...job,
-    queuePosition: queuePosition(state.jobs, job.id)
-  }));
+  snapshot.jobs = clientVisibleJobs(snapshot.jobs || []).map((job) => {
+    const publicJob = {
+      ...job,
+      existingGopeedTargetCount: job.existingGopeedTargetKeys?.length || 0,
+      queuePosition: queuePosition(state.jobs, job.id)
+    };
+    delete publicJob.existingGopeedTargetKeys;
+    return publicJob;
+  });
+  snapshot.popupOpen = popupUiPorts.size > 0;
   return snapshot;
 }
 
@@ -347,6 +640,61 @@ function saveState(state, force = false) {
   return write;
 }
 
+async function writeLegacyItemChunks(state, chunks, hashes, previousStorage) {
+  const jobId = String(state.activeJobId || "");
+  const updates = {};
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (previousStorage.backend !== "chrome-storage-fallback" ||
+        previousStorage.jobId !== jobId || previousStorage.hashes?.[index] !== hashes[index]) {
+      updates[itemChunkKey(jobId || "idle", index)] = chunks[index];
+    }
+  }
+  if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+
+  const staleKeys = [];
+  if (previousStorage.jobId && previousStorage.jobId !== jobId) {
+    for (let index = 0; index < previousStorage.chunkCount; index += 1) {
+      staleKeys.push(itemChunkKey(previousStorage.jobId, index));
+    }
+  } else if (previousStorage.jobId === jobId && previousStorage.chunkCount > chunks.length) {
+    for (let index = chunks.length; index < previousStorage.chunkCount; index += 1) {
+      staleKeys.push(itemChunkKey(previousStorage.jobId, index));
+    }
+  }
+  if (staleKeys.length && chrome.storage.local.remove) await chrome.storage.local.remove(staleKeys);
+  state.itemStorageBackend = "chrome-storage-fallback";
+  state.itemStorageGeneration = "";
+  state.itemStorageJobId = jobId;
+  state.itemChunkCount = chunks.length;
+  state.itemChunkHashes = hashes;
+  state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+  state.runtimeHealth.storage.backend = "chrome-storage-fallback";
+}
+
+async function cleanupCommittedItemStorage(previousStorage, state) {
+  if (!indexedDbTaskStoreAvailable()) return;
+  try {
+    if (state.itemStorageBackend === "indexeddb" && state.itemStorageJobId && state.itemStorageGeneration) {
+      await runtimeTaskStore.pruneJobGenerations(
+        state.itemStorageJobId,
+        state.itemStorageGeneration
+      );
+    }
+    if (previousStorage.jobId && previousStorage.jobId !== state.itemStorageJobId) {
+      await runtimeTaskStore.deleteJobItems(previousStorage.jobId);
+      if (chrome.storage.local.remove) {
+        const legacyKeys = Array.from(
+          { length: previousStorage.chunkCount },
+          (_, index) => itemChunkKey(previousStorage.jobId, index)
+        );
+        if (legacyKeys.length) await chrome.storage.local.remove(legacyKeys);
+      }
+    }
+  } catch (error) {
+    console.warn("清理旧版任务存储失败，将在后续保存时重试", error);
+  }
+}
+
 async function saveStateUnlocked(state, force = false) {
   syncActiveJobSummary(state);
   pruneTerminalJobs(state);
@@ -358,40 +706,42 @@ async function saveStateUnlocked(state, force = false) {
     return false;
   }
 
-  if (state._itemsLoaded !== false) {
-    const chunks = [];
-    for (let index = 0; index < state.items.length; index += ITEM_CHUNK_SIZE) {
-      chunks.push(state.items.slice(index, index + ITEM_CHUNK_SIZE));
-    }
-    const hashes = chunks.map((chunk) => hashText(JSON.stringify(chunk)));
-    const updates = {};
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (state.itemStorageJobId !== state.activeJobId || state.itemChunkHashes?.[index] !== hashes[index]) {
-        updates[itemChunkKey(state.activeJobId || "idle", index)] = chunks[index];
-      }
-    }
-    if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+  const previousStorage = {
+    backend: String(state.itemStorageBackend || ""),
+    generation: String(state.itemStorageGeneration || ""),
+    jobId: String(state.itemStorageJobId || ""),
+    chunkCount: Math.max(0, Number(state.itemChunkCount) || 0),
+    hashes: Array.isArray(state.itemChunkHashes) ? [...state.itemChunkHashes] : []
+  };
 
-    const staleKeys = [];
-    if (state.itemStorageJobId && state.itemStorageJobId !== state.activeJobId) {
-      for (let index = 0; index < (state.itemChunkCount || 0); index += 1) {
-        staleKeys.push(itemChunkKey(state.itemStorageJobId, index));
+  if (state._itemsLoaded !== false) {
+    const chunks = splitItemChunks(state.items || []);
+    const hashes = chunks.map(hashItemChunk);
+    if (state.activeJobId && indexedDbTaskStoreAvailable()) {
+      try {
+        await writeItemsToIndexedDb(state, chunks, hashes);
+      } catch (error) {
+        recordItemStorageFailure(state, "write", error);
+        await writeLegacyItemChunks(state, chunks, hashes, previousStorage);
       }
-    } else if (state.itemStorageJobId === state.activeJobId && (state.itemChunkCount || 0) > chunks.length) {
-      for (let index = chunks.length; index < state.itemChunkCount; index += 1) {
-        staleKeys.push(itemChunkKey(state.itemStorageJobId, index));
-      }
+    } else if (state.activeJobId) {
+      await writeLegacyItemChunks(state, chunks, hashes, previousStorage);
+    } else {
+      state.itemStorageBackend = indexedDbTaskStoreAvailable() ? "indexeddb" : "chrome-storage-fallback";
+      state.itemStorageGeneration = "";
+      state.itemStorageJobId = "";
+      state.itemChunkCount = 0;
+      state.itemChunkHashes = [];
+      state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+      state.runtimeHealth.storage.backend = state.itemStorageBackend;
     }
-    if (staleKeys.length && chrome.storage.local.remove) await chrome.storage.local.remove(staleKeys);
-    state.itemStorageJobId = state.activeJobId || "";
-    state.itemChunkCount = chunks.length;
-    state.itemChunkHashes = hashes;
   }
 
   const metadata = structuredClone(state);
   delete metadata.items;
   delete metadata._itemsLoaded;
   await chrome.storage.local.set({ popoState: metadata });
+  await cleanupCommittedItemStorage(previousStorage, state);
   await updateActionIndicator(state);
   return true;
 }
@@ -556,6 +906,14 @@ async function checkGopeedConnection(settings, stateToUpdate = null) {
   }
 }
 
+function gopeedTaskIdentityLabels(state, item) {
+  const taskIdentity = item.id || [item.parentUrl, item.itemIndex, item.name].join("\u0000");
+  return buildGopeedTaskIdentityLabels({
+    jobId: activeJob(state)?.id,
+    taskIdentity
+  });
+}
+
 function gopeedTaskDefinition(state, item, url) {
   const relativeFilename = buildDownloadFilename(item, state.settings);
   const target = splitDownloadTarget(state.gopeedDownloadDir, relativeFilename);
@@ -563,7 +921,8 @@ function gopeedTaskDefinition(state, item, url) {
     url,
     name: target.name,
     path: target.path,
-    connections: state.settings.gopeedConnections
+    connections: state.settings.gopeedConnections,
+    labels: gopeedTaskIdentityLabels(state, item)
   };
 }
 
@@ -583,6 +942,58 @@ async function getTab(tabId) {
   } catch {
     return null;
   }
+}
+
+function isPopoFolderPage(url) {
+  return /^https:\/\/docs\.popo\.netease\.com\/team\/pc\/[^/]+\/pageDetail\/[a-z0-9]+/i.test(
+    String(url || "")
+  );
+}
+
+async function broadcastPopupVisibility() {
+  if (typeof chrome.tabs?.query !== "function" || typeof chrome.tabs?.sendMessage !== "function") return;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: "https://docs.popo.netease.com/*" });
+  } catch {
+    return;
+  }
+  const message = {
+    type: "POPUP_VISIBILITY_CHANGED",
+    open: popupUiPorts.size > 0
+  };
+  await Promise.allSettled(tabs
+    .filter((tab) => Number.isInteger(tab.id) && isPopoFolderPage(tab.url))
+    .map((tab) => chrome.tabs.sendMessage(tab.id, message, { frameId: 0 })));
+}
+
+chrome.runtime.onConnect?.addListener((port) => {
+  if (port?.name !== POPUP_UI_PORT_NAME) return;
+  popupUiPorts.add(port);
+  void broadcastPopupVisibility();
+  port.onDisconnect.addListener(() => {
+    popupUiPorts.delete(port);
+    void broadcastPopupVisibility();
+  });
+});
+
+async function resolveRestoreSourceTabId(preferredTabId, fallbackTabId) {
+  const candidates = [...new Set([preferredTabId, fallbackTabId].filter(Number.isInteger))];
+  for (const tabId of candidates) {
+    const tab = await getTab(tabId);
+    if (tab && isPopoFolderPage(tab.url)) return tabId;
+  }
+
+  if (typeof chrome.tabs.query === "function") {
+    try {
+      const tabs = await chrome.tabs.query({ url: "https://docs.popo.netease.com/*" });
+      const candidate = tabs.find((tab) => tab.active && isPopoFolderPage(tab.url)) ||
+        tabs.find((tab) => isPopoFolderPage(tab.url));
+      if (Number.isInteger(candidate?.id)) return candidate.id;
+    } catch {}
+  }
+
+  return candidates[0] ?? null;
 }
 
 async function ensureWorkTab(state, initialUrl = "about:blank") {
@@ -680,7 +1091,11 @@ async function registerWorkerFrame(sender, url) {
   if (state.mode === "waiting_worker") {
     state.mode = "scanning";
     state.phase = "resolving_selection";
-    pushLog(state, "info", "隐藏工作区已就绪");
+    pushRuntimeEvent(state, "WORKER_FRAME_READY", "info", "隐藏工作区已就绪", "", {
+      jobId: job.id,
+      tabId,
+      frameId
+    });
   }
   await saveState(state);
 
@@ -706,15 +1121,13 @@ async function registerSourcePage(sender, url) {
     const candidateMatch = String(url || "").match(
       /^https:\/\/docs\.popo\.netease\.com\/team\/pc\/([^/]+)\/pageDetail\/[a-z0-9]+/i
     );
-    const expectedTeamSpaceKey = state.teamSpaceKey ||
-      String(job.parentUrl || "").match(/\/team\/pc\/([^/]+)\/pageDetail\//i)?.[1] || "";
-    if (previousStillHostsPopo || !candidateMatch || candidateMatch[1] !== expectedTeamSpaceKey) {
+    if (previousStillHostsPopo || !candidateMatch) {
       return { needsWorker: false, state: publicState(state) };
     }
     job.sourceTabId = tabId;
     state.sourceTabId = tabId;
     state.workerSourceTabId = tabId;
-    pushLog(state, "warn", "原 POPO 页面已关闭，已在重新打开的同一团队空间页面恢复任务");
+    pushLog(state, "warn", "原 POPO 页面已关闭，已在重新打开的 POPO 页面恢复任务");
   }
 
   const hadWorker = state.workerFrameId != null;
@@ -965,10 +1378,14 @@ function prepareJobForExecution(state, job, reuseWorker) {
     state.phase = "waiting_worker";
     state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
   }
-  job.status = state.mode;
-  job.startedAt ||= state.startedAt;
-  job.lastMessage = reuseWorker ? "开始读取文件夹" : "正在准备隐藏工作区";
-  pushLog(state, "info", `任务开始：${job.folderName}`);
+  setJobStatus(job, state.mode, {
+    startedAt: job.startedAt || state.startedAt,
+    lastMessage: reuseWorker ? "开始读取文件夹" : "正在准备隐藏工作区"
+  });
+  pushRuntimeEvent(state, "JOB_STARTED", "info", `任务开始：${job.folderName}`, "", {
+    jobId: job.id,
+    status: state.mode
+  });
 }
 
 async function removeWorkerFrameFromTab(tabId) {
@@ -1058,9 +1475,10 @@ async function repairQueueState(state) {
     state.completedAt = new Date().toISOString();
     pushLog(state, "info", "已结束取消任务；已经交给 Gopeed 的文件保持不变");
     syncActiveJobSummary(state);
-    job.status = "cancelled";
-    job.completedAt = state.completedAt;
-    job.lastMessage = "任务已取消；已经开始的下载保留在 Gopeed 中";
+    setJobStatus(job, "cancelled", {
+      completedAt: state.completedAt,
+      lastMessage: "任务已取消；已经开始的下载保留在 Gopeed 中"
+    });
   }
   state.activeJobId = null;
   const effects = transitionToNextQueuedJob(state);
@@ -1076,11 +1494,20 @@ async function finalizeActiveJob(state, status, message, notification = null, fo
   state.mode = status;
   state.phase = status;
   state.completedAt = new Date().toISOString();
-  pushLog(state, status === "failed" ? "error" : "info", message);
+  const eventCode = status === "failed"
+    ? "JOB_FAILED"
+    : status === "cancelled"
+      ? "JOB_CANCELLED"
+      : "JOB_COMPLETED";
+  pushRuntimeEvent(state, eventCode, status === "failed" ? "error" : "info", message, "", {
+    jobId: job.id,
+    status
+  });
   syncActiveJobSummary(state);
-  job.status = status;
-  job.completedAt = state.completedAt;
-  job.lastMessage = message;
+  setJobStatus(job, status, {
+    completedAt: state.completedAt,
+    lastMessage: message
+  });
   const source = {
     sourceTabId: state.sourceTabId,
     folderName: state.selectedFolderName
@@ -1150,10 +1577,17 @@ async function processScanStep(state) {
         const key = `${entry.url}\u0000${scanned.itemIndex}\u0000${scanned.name}`;
         if (state.items.some((item) => item.id === key)) continue;
         const systemMetadata = isSystemMetadataFile(scanned.name);
-        const retryKeys = activeJob(state)?.retryKeys;
+        const currentJob = activeJob(state);
+        const retryKeys = currentJob?.retryKeys;
         const retrySelected = !retryKeys?.length || retryKeys.includes(`${entry.url}\u0000${scanned.name}`);
+        const relativeTargetKey = normalizeGopeedTargetKey(buildDownloadFilename({
+          name: scanned.name,
+          directoryPath
+        }, settings));
+        const alreadyInGopeed = currentJob?.restoreStrategy === "missing_from_gopeed" &&
+          currentJob.existingGopeedTargetKeys?.includes(relativeTargetKey);
         // 用户选择的是整个文件夹：除系统元数据外，不按扩展名或关键词跳过文件。
-        const selected = !systemMetadata && retrySelected;
+        const selected = !systemMetadata && retrySelected && !alreadyInGopeed;
         state.items.push({
           id: key,
           name: scanned.name,
@@ -1169,8 +1603,10 @@ async function processScanStep(state) {
             : systemMetadata
               ? "系统元数据文件已自动忽略"
               : !retrySelected
-                ? "不属于本次失败重试"
-              : "未通过筛选条件",
+                ? "不属于本次恢复或失败重试"
+                : alreadyInGopeed
+                  ? "Gopeed 已有相同保存路径的完成或进行中任务，恢复时不重复下载"
+                  : "未通过筛选条件",
           attempts: 0,
           gopeedTaskId: null,
           retryTaskId: null,
@@ -1330,6 +1766,191 @@ function markAttemptFailure(state, item, stage, error, retryTaskId = null) {
   }
 }
 
+function recordGopeedReconciliation(state, outcome, options = {}) {
+  const checkedAt = new Date().toISOString();
+  state.runtimeHealth = normalizeRuntimeHealth(state.runtimeHealth);
+  const reconciliation = state.runtimeHealth.reconciliation;
+  const previousOutcome = reconciliation.lastOutcome;
+  const previousCheckedAt = Date.parse(reconciliation.lastCheckedAt || "");
+  reconciliation.lastCheckedAt = checkedAt;
+  reconciliation.lastOutcome = outcome;
+
+  if (outcome === "recovered" || outcome === "linked") {
+    reconciliation.recoveredCount += 1;
+    reconciliation.consecutiveErrors = 0;
+    reconciliation.lastError = "";
+  } else if (outcome === "missing") {
+    reconciliation.missCount += 1;
+    reconciliation.consecutiveErrors = 0;
+    reconciliation.lastError = "";
+  } else if (outcome === "ambiguous") {
+    reconciliation.ambiguousCount += 1;
+    reconciliation.consecutiveErrors = 0;
+    reconciliation.lastError = String(options.details || "").slice(0, 500);
+  } else if (outcome === "error") {
+    reconciliation.errorCount += 1;
+    reconciliation.consecutiveErrors += 1;
+    reconciliation.lastError = String(options.details || "").slice(0, 500);
+  }
+
+  const repeatedRecently = previousOutcome === outcome &&
+    Number.isFinite(previousCheckedAt) &&
+    Date.now() - previousCheckedAt < 30000;
+  if (!repeatedRecently || outcome === "recovered" || outcome === "linked" || outcome === "missing") {
+    pushRuntimeEvent(
+      state,
+      options.code || "GOPEED_RECONCILIATION",
+      options.level || "info",
+      options.message || "Gopeed 任务对账完成",
+      options.details || "",
+      options.context || {}
+    );
+  }
+}
+
+async function reconcileInterruptedGopeedTask(state) {
+  const item = state.items.find((candidate) => candidate.id === state.preparingItemId);
+  if (!item || TERMINAL_STATUSES.has(item.status)) return { handled: false };
+  if (!/Gopeed 任务|下载地址/.test(String(item.stage || ""))) return { handled: false };
+  const labels = gopeedTaskIdentityLabels(state, item);
+  const taskKey = labels.popoTaskKey || "";
+
+  const existingTransfer = (state.activeTransfers || [])
+    .find((transfer) => transfer.itemId === item.id);
+  if (existingTransfer) {
+    state.preparingItemId = null;
+    state.activeItemId = state.activeTransfers[0]?.itemId ?? item.id;
+    item.gopeedTaskId ||= existingTransfer.taskId;
+    item.status = state.mode === "paused" ? "paused" : "transferring";
+    item.stage = state.mode === "paused" ? "已暂停" : "Gopeed 传输中";
+    recordGopeedReconciliation(state, "linked", {
+      code: "GOPEED_TASK_LINK_CONFIRMED",
+      message: `已确认现有 Gopeed 任务关联：${item.name}`,
+      context: { taskKey, taskId: existingTransfer.taskId }
+    });
+    return { handled: true, delayMs: 100 };
+  }
+
+  let tasks;
+  try {
+    tasks = await listGopeedTasks(state.settings, { timeoutMs: 10000 });
+    if (!Array.isArray(tasks)) throw new Error("Gopeed 任务列表格式不正确");
+  } catch (error) {
+    const detail = String(error?.message || error).replace(/^Error:\s*/, "");
+    state.phase = "reconciling_gopeed";
+    recordGopeedReconciliation(state, "error", {
+      code: "GOPEED_RECONCILIATION_ERROR",
+      level: "warn",
+      message: "Gopeed 任务对账暂时失败，等待后重试",
+      details: detail,
+      context: { taskKey }
+    });
+    return { handled: true, delayMs: 2000 };
+  }
+
+  const selection = selectGopeedTaskByIdentity(tasks, labels);
+  if (selection.resolution === "missing") {
+    recordGopeedReconciliation(state, "missing", {
+      code: "GOPEED_RECONCILIATION_MISS",
+      level: "warn",
+      message: `Gopeed 中未找到中断任务，按原流程重新处理：${item.name}`,
+      context: { taskKey }
+    });
+    return { handled: false };
+  }
+  if (!selection.task) {
+    state.phase = "reconciling_gopeed";
+    recordGopeedReconciliation(state, "ambiguous", {
+      code: "GOPEED_RECONCILIATION_AMBIGUOUS",
+      level: "error",
+      message: `Gopeed 中存在多个同身份任务，已暂停自动重建：${item.name}`,
+      details: `matchCount=${selection.matchCount}; resolution=${selection.resolution}`,
+      context: { taskKey, matchCount: selection.matchCount }
+    });
+    return { handled: true, delayMs: 5000 };
+  }
+
+  const taskId = String(selection.task.id || "").trim();
+  const conflictingTransfer = (state.activeTransfers || []).find(
+    (transfer) => transfer.taskId === taskId && transfer.itemId !== item.id
+  );
+  if (!taskId || conflictingTransfer) {
+    state.phase = "reconciling_gopeed";
+    recordGopeedReconciliation(state, "ambiguous", {
+      code: "GOPEED_RECONCILIATION_AMBIGUOUS",
+      level: "error",
+      message: `Gopeed 任务关联冲突，已暂停自动重建：${item.name}`,
+      details: conflictingTransfer
+        ? `taskId=${taskId}; conflictingItemId=${conflictingTransfer.itemId}`
+        : "任务缺少 ID",
+      context: { taskKey, matchCount: selection.matchCount }
+    });
+    return { handled: true, delayMs: 5000 };
+  }
+
+  const now = new Date().toISOString();
+  const status = classifyGopeedTaskStatus(selection.task.status);
+  state.preparingItemId = null;
+  item.reconciledAt = now;
+  item.gopeedTaskId = taskId;
+  item.retryTaskId = null;
+  item.gopeedProgress = {
+    downloaded: selection.task?.progress?.downloaded || 0,
+    speed: selection.task?.progress?.speed || 0,
+    status: selection.task?.status || ""
+  };
+
+  if (status === "success") {
+    item.status = "success";
+    item.stage = "成功（已从 Gopeed 对账恢复）";
+    item.failureStage = "";
+    item.error = "";
+    item.completedAt = now;
+    removeActiveTransfer(state, item.id);
+  } else if (status === "failed") {
+    markAttemptFailure(
+      state,
+      item,
+      FAILURE.TRANSFER_INTERRUPTED,
+      "对账找到的 Gopeed 任务已失败；将刷新临时地址后继续原任务",
+      taskId
+    );
+  } else {
+    state.activeTransfers = (state.activeTransfers || [])
+      .filter((transfer) => transfer.itemId !== item.id);
+    state.activeTransfers.push({
+      itemId: item.id,
+      taskId,
+      pollFailures: 0,
+      startedAt: item.startedAt || now,
+      reconciledAt: now
+    });
+    state.activeItemId = state.activeTransfers[0]?.itemId ?? item.id;
+    item.status = status === "paused" ? "paused" : "transferring";
+    item.stage = status === "paused" ? "已在 Gopeed 暂停" : "Gopeed 传输中（已恢复关联）";
+    item.transferDeadline = Date.now() + state.settings.timeouts.transfer;
+    if (status === "paused") {
+      state.mode = activeJob(state)?.cancelRequested ? "draining_paused" : "paused";
+      state.phase = state.mode;
+    } else {
+      state.phase = "downloading";
+    }
+  }
+
+  recordGopeedReconciliation(state, "recovered", {
+    code: "GOPEED_TASK_RECONCILED",
+    message: `已恢复中断的 Gopeed 任务关联：${item.name}`,
+    details: `taskId=${taskId}; status=${selection.task.status || ""}`,
+    context: {
+      taskKey,
+      taskId,
+      taskStatus: status,
+      matchCount: selection.matchCount
+    }
+  });
+  return { handled: true, delayMs: 100 };
+}
+
 async function waitForPreview(state, item) {
   const deadline = Date.now() + state.settings.timeouts.previewLoad;
   let lastInfo;
@@ -1426,7 +2047,14 @@ async function beginDownload(state, item, url) {
   if (fresh.mode === "paused") {
     try { await pauseGopeedTask(fresh.settings, taskId); } catch {}
   }
-  pushLog(fresh, "info", `Gopeed 任务已建立：${item.name}`, `taskId=${taskId}`);
+  pushRuntimeEvent(
+    fresh,
+    "GOPEED_TASK_CREATED",
+    "info",
+    `Gopeed 任务已建立：${item.name}`,
+    `taskId=${taskId}`,
+    { jobId: activeJob(fresh)?.id || "", taskId }
+  );
   await saveState(fresh);
   schedulePump(500);
 }
@@ -1512,7 +2140,14 @@ async function syncGopeedTransfers(state) {
         item.completedAt = new Date().toISOString();
         item.retryTaskId = null;
         removeActiveTransfer(state, item.id);
-        pushLog(state, "info", `下载成功：${item.name}`, `taskId=${transfer.taskId}`);
+        pushRuntimeEvent(
+          state,
+          "GOPEED_TASK_COMPLETED",
+          "info",
+          `下载成功：${item.name}`,
+          `taskId=${transfer.taskId}`,
+          { jobId: activeJob(state)?.id || "", taskId: transfer.taskId }
+        );
       } else if (status === "failed") {
         markAttemptFailure(
           state,
@@ -1568,7 +2203,14 @@ async function syncGopeedTransfers(state) {
     }
   }
   if (connectionProblem) {
-    pushLog(state, "warn", "Gopeed 连接暂时中断，正在重连", state.gopeedLastError);
+    pushRuntimeEvent(
+      state,
+      "GOPEED_CONNECTION_LOST",
+      "warn",
+      "Gopeed 连接暂时中断，正在重连",
+      state.gopeedLastError,
+      { jobId: activeJob(state)?.id || "" }
+    );
   }
 }
 
@@ -1609,6 +2251,12 @@ async function processDownloadStep(state) {
     return;
   }
   if (state.preparingItemId) {
+    const reconciliation = await reconcileInterruptedGopeedTask(state);
+    if (reconciliation.handled) {
+      await saveState(state);
+      schedulePump(reconciliation.delayMs || 500);
+      return;
+    }
     // A preparation promise only lives for the current pump invocation. If a
     // later pump sees the persisted marker, the previous invocation ended or
     // the service worker was interrupted before it could clear the marker.
@@ -1619,7 +2267,14 @@ async function processDownloadStep(state) {
       interruptedItem.failureStage = "";
       interruptedItem.error = "";
       interruptedItem.attempts = Math.max(0, (interruptedItem.attempts || 0) - 1);
-      pushLog(state, "warn", `检测到准备步骤中断，自动重新处理：${interruptedItem.name}`);
+      pushRuntimeEvent(
+        state,
+        "PREPARATION_INTERRUPTED",
+        "warn",
+        `检测到准备步骤中断，自动重新处理：${interruptedItem.name}`,
+        "",
+        { jobId: activeJob(state)?.id || "" }
+      );
     }
     state.preparingItemId = null;
     state.activeItemId = state.activeTransfers[0]?.itemId ?? null;
@@ -1955,6 +2610,13 @@ async function pauseTask() {
 
 async function resumeTask() {
   const { state } = await getStored();
+  if (state.mode === "downloading") {
+    if (state.triggerMode === "folder_button" && state.workerFrameId == null) {
+      await requestWorkerFrameForActiveJob(state);
+      schedulePump(100);
+    }
+    return state;
+  }
   if (!["paused", "draining_paused"].includes(state.mode)) return state;
   const cancelRequested = Boolean(activeJob(state)?.cancelRequested);
   state.mode = cancelRequested ? "draining" : "downloading";
@@ -1973,6 +2635,9 @@ async function resumeTask() {
   }
   pushLog(state, "info", "任务已继续");
   await saveState(state);
+  if (state.triggerMode === "folder_button" && state.workerFrameId == null) {
+    await requestWorkerFrameForActiveJob(state);
+  }
   await notifySource(state, { type: "FOLDER_TASK_STATUS", message: "继续下载…" });
   schedulePump(100);
   return state;
@@ -1990,10 +2655,11 @@ async function cancelJob(jobId) {
   if (isJobTerminal(job.status)) return state;
 
   if (state.activeJobId !== job.id) {
-    job.status = "cancelled";
-    job.cancelRequested = true;
-    job.completedAt = new Date().toISOString();
-    job.lastMessage = "排队任务已取消，未创建任何下载";
+    setJobStatus(job, "cancelled", {
+      cancelRequested: true,
+      completedAt: new Date().toISOString(),
+      lastMessage: "排队任务已取消，未创建任何下载"
+    });
     rotateRunToken(state);
     await saveState(state, true);
     return state;
@@ -2019,6 +2685,53 @@ async function cancelJob(jobId) {
     { type: "FOLDER_TASK_CANCELLED", preservedTransfers: cancellation.preservedCount > 0 },
     true
   );
+  return state;
+}
+
+function linkedJobIds(jobs, target) {
+  const ids = new Set([target.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of jobs || []) {
+      const sameFolder = Boolean(target.key) && candidate.key === target.key;
+      const linkedToKnownJob = ids.has(candidate.retryOfJobId) || ids.has(candidate.restoreOfJobId);
+      const knownJobLinksToCandidate = [...ids].some((id) => {
+        const known = (jobs || []).find((job) => job.id === id);
+        return known?.retryOfJobId === candidate.id || known?.restoreOfJobId === candidate.id;
+      });
+      if ((sameFolder || linkedToKnownJob || knownJobLinksToCandidate) && !ids.has(candidate.id)) {
+        ids.add(candidate.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
+async function dismissJob(jobId) {
+  const { state } = await getStored({ loadItems: false });
+  const target = (state.jobs || []).find((candidate) => candidate.id === jobId);
+  if (!target) throw new Error("这个任务已经不在列表中");
+  if (!isJobTerminal(target.status)) throw new Error("任务进行中，暂时不能移除");
+
+  const relatedIds = linkedJobIds(state.jobs || [], target);
+  const hasActiveRelatedJob = (state.jobs || []).some(
+    (candidate) => relatedIds.has(candidate.id) && !isJobTerminal(candidate.status)
+  );
+  if (hasActiveRelatedJob) throw new Error("这个任务仍在进行，暂时不能移除");
+
+  state.jobs = (state.jobs || []).filter((candidate) => !relatedIds.has(candidate.id));
+  pushRuntimeEvent(
+    state,
+    "JOB_DISMISSED",
+    "info",
+    "任务记录已从扩展列表移除",
+    "",
+    { jobId: target.id, removedCount: relatedIds.size }
+  );
+  rotateRunToken(state);
+  await saveState(state, true);
   return state;
 }
 
@@ -2056,6 +2769,111 @@ async function retryJob(jobId) {
     completedAt: "",
     counts: summarizeItems([], 0, 0),
     lastMessage: `等待重新扫描并重试 ${source.failureRetryKeys.length} 个失败文件`
+  };
+  state.jobs.push(job);
+  if (!state.activeJobId) prepareJobForExecution(state, job, false);
+  rotateRunToken(state);
+  await saveState(state, true);
+  if (state.activeJobId === job.id) await requestWorkerFrameForActiveJob(state);
+  return state;
+}
+
+function cancelledRetryKeysForJob(state, source) {
+  const storedKeys = Array.isArray(source?.cancelledRetryKeys)
+    ? source.cancelledRetryKeys.filter(Boolean)
+    : [];
+  if (storedKeys.length) return [...new Set(storedKeys)];
+
+  const latestCancelled = [...(state.jobs || [])]
+    .reverse()
+    .find((candidate) => candidate.status === "cancelled" && (candidate.counts?.cancelled || 0) > 0);
+  if (latestCancelled?.id !== source?.id || state._itemsLoaded === false || state.activeJobId) return [];
+  return [...new Set((state.items || [])
+    .filter((item) => item.status === "cancelled")
+    .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+}
+
+async function restoreCancelledJob(jobId, preferredSourceTabId = null) {
+  const { state } = await getStored();
+  const source = (state.jobs || []).find((candidate) => candidate.id === jobId);
+  if (!source || source.status !== "cancelled") throw new Error("没有找到可恢复的已取消任务");
+
+  const restoreSourceTabId = await resolveRestoreSourceTabId(
+    preferredSourceTabId,
+    source.sourceTabId
+  );
+  if (restoreSourceTabId != null) source.sourceTabId = restoreSourceTabId;
+
+  const retryKeys = cancelledRetryKeysForJob(state, source);
+  const cancelledCount = Number(source.counts?.cancelled || 0);
+  if (!retryKeys.length && !cancelledCount) throw new Error("这个任务没有可恢复的未开始文件");
+  if (retryKeys.length) source.cancelledRetryKeys = retryKeys;
+
+  const existing = (state.jobs || []).find(
+    (candidate) => candidate.restoreOfJobId === source.id && !isJobTerminal(candidate.status)
+  );
+  if (existing) return state;
+  if ((state.jobs || []).some(
+    (candidate) => candidate.restoreOfJobId === source.id && candidate.status === "complete" &&
+      (candidate.counts?.failed || 0) === 0
+  )) {
+    throw new Error("这个已取消任务已经恢复完成");
+  }
+
+  let restoreStrategy = "retry_keys";
+  let existingGopeedTargetKeys = [];
+  if (!retryKeys.length) {
+    const connection = await checkGopeedConnection(state.settings, state);
+    if (!connection.connected) {
+      throw new Error(`无法安全恢复旧任务：读取 Gopeed 历史前连接失败（${connection.error}）`);
+    }
+    let gopeedTasks;
+    try {
+      gopeedTasks = await listGopeedTasks(state.settings, { timeoutMs: 10000 });
+    } catch (error) {
+      const detail = String(error?.message || error).replace(/^Error:\s*/, "");
+      throw new Error(`无法安全恢复旧任务：读取 Gopeed 历史失败（${detail}）`);
+    }
+    const allExistingGopeedTargetKeys = reusableTaskTargetKeys(
+      gopeedTasks,
+      state.settings.downloadRoot
+    );
+    const markerName = "__popo_restore_marker__";
+    const sourceTarget = normalizeGopeedTargetKey(buildDownloadFilename({
+      name: markerName,
+      directoryPath: [source.folderName]
+    }, state.settings));
+    const sourceTargetPrefix = sourceTarget.slice(0, -markerName.length);
+    existingGopeedTargetKeys = allExistingGopeedTargetKeys
+      .filter((targetKey) => targetKey.startsWith(sourceTargetPrefix));
+    if (Number(source.counts?.success || 0) > 0 && !existingGopeedTargetKeys.length) {
+      throw new Error("Gopeed 中没有找到已完成文件记录，暂不能安全恢复，避免重复下载");
+    }
+    restoreStrategy = "missing_from_gopeed";
+  }
+
+  const restoreCount = retryKeys.length || cancelledCount;
+
+  const job = {
+    id: createId("job"),
+    key: source.key,
+    sourceTabId: source.sourceTabId,
+    folderName: source.folderName,
+    displayName: `${source.folderName}（恢复未开始文件）`,
+    folderItemIndex: source.folderItemIndex,
+    parentUrl: source.parentUrl,
+    restoreOfJobId: source.id,
+    retryKeys,
+    restoreStrategy,
+    restoreExpectedCount: restoreCount,
+    existingGopeedTargetKeys,
+    status: "queued",
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    startedAt: "",
+    completedAt: "",
+    counts: summarizeItems([], 0, 0),
+    lastMessage: `等待重新扫描并恢复 ${restoreCount} 个未开始文件`
   };
   state.jobs.push(job);
   if (!state.activeJobId) prepareJobForExecution(state, job, false);
@@ -2149,7 +2967,8 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
-    switch (message.type) {
+    const command = enforceRuntimeCommandContract(validateRuntimeMessage(message));
+    switch (command.type) {
       case "GET_STATE":
       {
         let { state, settings } = await getStored({ loadItems: false });
@@ -2167,24 +2986,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, connection, settings: connection.settings || settings };
       }
       case "SAVE_GOPEED_SETTINGS": {
-        const settings = await saveGopeedSettings(message);
+        const settings = await saveGopeedSettings(command);
         const { state } = await getStored();
         const connection = await checkGopeedConnection(settings, state);
         await saveState(state);
         return { ok: true, connection, settings: connection.settings || settings };
       }
       case "CHOOSE_DOWNLOAD_DIRECTORY": {
-        const result = await chooseDownloadDirectory(message);
+        const result = await chooseDownloadDirectory(command);
         return { ok: true, ...result };
       }
       case "SAVE_SETTINGS":
-        return { ok: true, settings: await saveSettings(message.settings) };
+        return { ok: true, settings: await saveSettings(command.settings) };
       case "START_SCAN":
-        return { ok: true, state: await startScan(message) };
+        return { ok: true, state: await startScan(command) };
       case "START_FOLDER_SCAN":
       {
         const result = await withControlMutation(
-          () => startFolderScan(message, sender.tab?.id ?? null)
+          () => startFolderScan(command, sender.tab?.id ?? null)
         );
         return {
           ok: true,
@@ -2197,18 +3016,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case "SOURCE_PAGE_READY": {
         const result = await withControlMutation(
-          () => registerSourcePage(sender, message.url)
+          () => registerSourcePage(sender, command.url)
         );
         return { ok: true, ...result };
       }
       case "REGISTER_WORKER_FRAME":
-        return { ok: true, state: await registerWorkerFrame(sender, message.url) };
+        return { ok: true, state: await registerWorkerFrame(sender, command.url) };
       case "CANCEL_FOLDER_TASK": {
         const state = await withControlMutation(() => cancelTask());
         return { ok: true, state: publicState(state) };
       }
       case "CANCEL_JOB": {
-        const state = await withControlMutation(() => cancelJob(message.jobId));
+        const state = await withControlMutation(() => cancelJob(command.jobId));
         return { ok: true, state: publicState(state) };
       }
       case "START_DOWNLOAD": {
@@ -2232,7 +3051,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, state: publicState(state) };
       }
       case "RETRY_JOB": {
-        const state = await withControlMutation(() => retryJob(message.jobId));
+        const state = await withControlMutation(() => retryJob(command.jobId));
+        return { ok: true, state: publicState(state) };
+      }
+      case "DISMISS_JOB": {
+        const state = await withControlMutation(() => dismissJob(command.jobId));
+        return { ok: true, state: publicState(state) };
+      }
+      case "RESTORE_CANCELLED_JOB": {
+        const preferredSourceTabId = Number.isInteger(command.sourceTabId)
+          ? command.sourceTabId
+          : sender.tab?.id;
+        const state = await withControlMutation(
+          () => restoreCancelledJob(command.jobId, preferredSourceTabId)
+        );
         return { ok: true, state: publicState(state) };
       }
       case "RESET": {
@@ -2244,7 +3076,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, state };
       }
       default:
-        return { ok: false, error: `未知命令：${message.type}` };
+        return { ok: false, error: `未知命令：${command.type}` };
     }
   })().then(sendResponse).catch((error) => sendResponse({ ok: false, error: String(error) }));
   return true;

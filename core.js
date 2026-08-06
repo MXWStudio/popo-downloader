@@ -177,6 +177,216 @@
     return "";
   }
 
+  const SIMPLE_RUNTIME_COMMANDS = new Set([
+    "GET_STATE",
+    "CHECK_GOPEED",
+    "CANCEL_FOLDER_TASK",
+    "START_DOWNLOAD",
+    "PAUSE",
+    "RESUME",
+    "CANCEL",
+    "RETRY_FAILED",
+    "RESET"
+  ]);
+  const JOB_RUNTIME_COMMANDS = new Set([
+    "CANCEL_JOB",
+    "RETRY_JOB",
+    "DISMISS_JOB",
+    "RESTORE_CANCELLED_JOB"
+  ]);
+  const SETTINGS_STRING_LIMITS = Object.freeze({
+    formats: 4096,
+    includeKeywords: 4096,
+    excludeKeywords: 4096,
+    downloadRoot: 1024,
+    gopeedEndpoint: 2048,
+    gopeedToken: 4096,
+    gopeedDownloadDirOverride: 32768
+  });
+  const SETTINGS_NUMBER_LIMITS = Object.freeze({
+    concurrency: [1, 32],
+    gopeedConnections: [1, 16],
+    maxRetries: [0, 10]
+  });
+  const SETTINGS_BOOLEAN_FIELDS = new Set(["recursive", "preserveStructure"]);
+  const SETTINGS_TIMEOUT_FIELDS = new Set([
+    "directoryLoad",
+    "scanList",
+    "itemLookup",
+    "fileOpen",
+    "previewLoad",
+    "downloadStart",
+    "transfer"
+  ]);
+
+  function runtimeMessageError(field) {
+    return new Error(`后台命令格式不正确：${field}`);
+  }
+
+  function isPlainRecord(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  function boundedMessageString(value, field, maxLength, options = {}) {
+    const { allowEmpty = false, allowNumber = false, optional = false } = options;
+    if (value == null) {
+      if (optional) return "";
+      throw runtimeMessageError(field);
+    }
+    const validNumber = allowNumber && typeof value === "number" && Number.isFinite(value);
+    if (typeof value !== "string" && !validNumber) {
+      throw runtimeMessageError(field);
+    }
+    const normalized = String(value).trim();
+    if ((!allowEmpty && !normalized) || normalized.length > maxLength || normalized.includes("\u0000")) {
+      throw runtimeMessageError(field);
+    }
+    return normalized;
+  }
+
+  function normalizePopoPageUrl(value, field) {
+    const input = boundedMessageString(value, field, 4096);
+    let url;
+    try {
+      url = new URL(input);
+    } catch {
+      throw runtimeMessageError(field);
+    }
+    const valid = url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "docs.popo.netease.com" &&
+      (!url.port || url.port === "443") &&
+      !url.username &&
+      !url.password &&
+      /^\/team\/pc\/[^/]+\/pageDetail\/[a-z0-9]+/i.test(url.pathname);
+    if (!valid) throw runtimeMessageError(field);
+    return url.href;
+  }
+
+  function sanitizeSettingsInput(settings, field = "settings") {
+    if (settings == null) return {};
+    if (!isPlainRecord(settings)) throw runtimeMessageError(field);
+
+    const allowedFields = new Set([
+      ...Object.keys(SETTINGS_STRING_LIMITS),
+      ...Object.keys(SETTINGS_NUMBER_LIMITS),
+      ...SETTINGS_BOOLEAN_FIELDS,
+      "timeouts"
+    ]);
+    const keys = Object.keys(settings);
+    if (keys.length > allowedFields.size || keys.some((key) => !allowedFields.has(key))) {
+      throw runtimeMessageError(field);
+    }
+
+    const sanitized = {};
+    for (const [key, maxLength] of Object.entries(SETTINGS_STRING_LIMITS)) {
+      if (!Object.prototype.hasOwnProperty.call(settings, key)) continue;
+      sanitized[key] = boundedMessageString(settings[key], `${field}.${key}`, maxLength, {
+        allowEmpty: true
+      });
+    }
+    for (const key of SETTINGS_BOOLEAN_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(settings, key)) continue;
+      if (typeof settings[key] !== "boolean") throw runtimeMessageError(`${field}.${key}`);
+      sanitized[key] = settings[key];
+    }
+    for (const [key, [minimum, maximum]] of Object.entries(SETTINGS_NUMBER_LIMITS)) {
+      if (!Object.prototype.hasOwnProperty.call(settings, key)) continue;
+      const value = settings[key];
+      if (!Number.isInteger(value) || value < minimum || value > maximum) {
+        throw runtimeMessageError(`${field}.${key}`);
+      }
+      sanitized[key] = value;
+    }
+    if (Object.prototype.hasOwnProperty.call(settings, "timeouts")) {
+      if (!isPlainRecord(settings.timeouts)) throw runtimeMessageError(`${field}.timeouts`);
+      const timeoutKeys = Object.keys(settings.timeouts);
+      if (timeoutKeys.length > SETTINGS_TIMEOUT_FIELDS.size ||
+        timeoutKeys.some((key) => !SETTINGS_TIMEOUT_FIELDS.has(key))) {
+        throw runtimeMessageError(`${field}.timeouts`);
+      }
+      sanitized.timeouts = {};
+      for (const key of timeoutKeys) {
+        const value = settings.timeouts[key];
+        if (!Number.isInteger(value) || value < 100 || value > 86400000) {
+          throw runtimeMessageError(`${field}.timeouts.${key}`);
+        }
+        sanitized.timeouts[key] = value;
+      }
+    }
+    return sanitized;
+  }
+
+  function validateRuntimeMessage(message) {
+    if (!isPlainRecord(message)) throw runtimeMessageError("message");
+    const type = boundedMessageString(message.type, "type", 64);
+    const command = { type };
+    if (SIMPLE_RUNTIME_COMMANDS.has(type)) return command;
+
+    if (JOB_RUNTIME_COMMANDS.has(type)) {
+      command.jobId = boundedMessageString(message.jobId, "jobId", 200);
+      if (type === "RESTORE_CANCELLED_JOB" && message.sourceTabId != null) {
+        if (!Number.isInteger(message.sourceTabId) || message.sourceTabId < 0) {
+          throw runtimeMessageError("sourceTabId");
+        }
+        command.sourceTabId = message.sourceTabId;
+      }
+      return command;
+    }
+
+    switch (type) {
+      case "SAVE_GOPEED_SETTINGS":
+        return {
+          type,
+          gopeedEndpoint: boundedMessageString(message.gopeedEndpoint, "gopeedEndpoint", 2048, {
+            allowEmpty: true,
+            optional: true
+          }),
+          gopeedToken: boundedMessageString(message.gopeedToken, "gopeedToken", 4096, {
+            allowEmpty: true,
+            optional: true
+          }),
+          gopeedDownloadDirOverride: boundedMessageString(
+            message.gopeedDownloadDirOverride,
+            "gopeedDownloadDirOverride",
+            32768,
+            { allowEmpty: true, optional: true }
+          )
+        };
+      case "CHOOSE_DOWNLOAD_DIRECTORY":
+        return {
+          type,
+          initialPath: boundedMessageString(message.initialPath, "initialPath", 32768, {
+            allowEmpty: true,
+            optional: true
+          })
+        };
+      case "SAVE_SETTINGS":
+        return { type, settings: sanitizeSettingsInput(message.settings) };
+      case "START_SCAN":
+        return {
+          type,
+          url: normalizePopoPageUrl(message.url, "url"),
+          settings: sanitizeSettingsInput(message.settings)
+        };
+      case "START_FOLDER_SCAN":
+        return {
+          type,
+          folderName: boundedMessageString(message.folderName, "folderName", 1024),
+          folderItemIndex: boundedMessageString(message.folderItemIndex, "folderItemIndex", 200, {
+            allowNumber: true
+          }),
+          parentUrl: normalizePopoPageUrl(message.parentUrl, "parentUrl")
+        };
+      case "SOURCE_PAGE_READY":
+      case "REGISTER_WORKER_FRAME":
+        return { type, url: normalizePopoPageUrl(message.url, "url") };
+      default:
+        return command;
+    }
+  }
+
   function csvEscape(value) {
     const text = String(value == null ? "" : value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
@@ -224,7 +434,8 @@
     previewTitleMatchesFile,
     sanitizePathSegment,
     selectVirtualListMatch,
-    splitTokens
+    splitTokens,
+    validateRuntimeMessage
   };
 
   root.PopoCore = api;

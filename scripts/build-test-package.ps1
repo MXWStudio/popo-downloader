@@ -18,29 +18,32 @@ $gopeedPortableRoot = Join-Path $gopeedVendorRoot 'portable'
 $gopeedSourceArchive = Join-Path $gopeedVendorRoot 'Gopeed-v1.9.3-source.zip'
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $nativeSource = Join-Path $repoRoot 'native-host\FolderPickerHost.cs'
-$nativeBinRoot = Join-Path $repoRoot 'native-host\bin'
-$nativeExecutable = Join-Path $nativeBinRoot 'PopoFolderPickerHost.exe'
 $setupSource = Join-Path $repoRoot 'setup\PopoSetup.cs'
-$setupBinRoot = Join-Path $repoRoot 'setup\bin'
 $setupExecutableName = 'POPO-Setup.exe'
-$setupExecutable = Join-Path $setupBinRoot $setupExecutableName
+$compileRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
+  ("popo-package-compile-" + [Guid]::NewGuid().ToString('N'))
+$nativeExecutable = Join-Path $compileRoot 'PopoFolderPickerHost.exe'
+$setupExecutable = Join-Path $compileRoot $setupExecutableName
 
-New-Item -ItemType Directory -Path $nativeBinRoot -Force | Out-Null
-New-Item -ItemType Directory -Path $setupBinRoot -Force | Out-Null
-if (Test-Path -LiteralPath $compiler) {
-  & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
-    /reference:System.Windows.Forms.dll `
-    /reference:System.Drawing.dll `
-    /reference:System.Web.Extensions.dll `
-    /out:$nativeExecutable $nativeSource
-  if ($LASTEXITCODE -ne 0) { throw 'The native host failed to compile.' }
+& npm run build:runtime --prefix $repoRoot
+if ($LASTEXITCODE -ne 0) { throw 'The extension runtime bundle failed to build.' }
 
-  & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
-    /reference:System.Windows.Forms.dll `
-    /reference:System.Web.Extensions.dll `
-    /out:$setupExecutable $setupSource
-  if ($LASTEXITCODE -ne 0) { throw 'The green setup assistant failed to compile.' }
+if (-not (Test-Path -LiteralPath $compiler)) {
+  throw "The Windows .NET Framework compiler was not found: $compiler"
 }
+New-Item -ItemType Directory -Path $compileRoot -Force | Out-Null
+& $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
+  /reference:System.Windows.Forms.dll `
+  /reference:System.Drawing.dll `
+  /reference:System.Web.Extensions.dll `
+  /out:$nativeExecutable $nativeSource
+if ($LASTEXITCODE -ne 0) { throw 'The native host failed to compile.' }
+
+& $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
+  /reference:System.Windows.Forms.dll `
+  /reference:System.Web.Extensions.dll `
+  /out:$setupExecutable $setupSource
+if ($LASTEXITCODE -ne 0) { throw 'The green setup assistant failed to compile.' }
 
 foreach ($requiredPath in @(
   (Join-Path $gopeedPortableRoot 'gopeed.exe'),
@@ -86,13 +89,13 @@ $extensionFiles = @(
   'gopeed.js',
   'page-api.js',
   'popup.css',
-  'popup.html',
-  'popup.js'
+  'popup.html'
 )
 foreach ($file in $extensionFiles) {
   Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $extensionRoot $file)
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'assets') -Destination $extensionRoot -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'runtime') -Destination $extensionRoot -Recurse -Force
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\FolderPickerHost.cs') -Destination $nativeHostRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\install.ps1') -Destination $nativeHostRoot
@@ -132,7 +135,7 @@ $channelManifest = [ordered]@{
   url = ''
   sha256 = $hash
   size = $size
-  notes = 'Green beta downloading all user file formats recursively, preventing popup connection checks from overwriting progress, auto-recovering interrupted preparation, with verified Gopeed v1.9.3 and concurrency 5.'
+  notes = 'Green beta downloading all user file formats recursively, restoring accidentally cancelled pending files without repeating successes, rebuilding the POPO worker after pause or tab changes, with verified Gopeed v1.9.3 and concurrency 5.'
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(
@@ -142,6 +145,7 @@ $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 )
 
 Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+Remove-Item -LiteralPath $compileRoot -Recurse -Force
 
 [pscustomobject]@{
   Version = $versionName

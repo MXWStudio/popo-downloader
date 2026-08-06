@@ -2,6 +2,37 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fakeIndexedDb = require("fake-indexeddb");
+const { buildTaskIdentityLabels } = require("../gopeed.js");
+
+function installFakeIndexedDb() {
+  const names = [
+    "indexedDB",
+    "IDBCursor",
+    "IDBCursorWithValue",
+    "IDBDatabase",
+    "IDBFactory",
+    "IDBIndex",
+    "IDBKeyRange",
+    "IDBObjectStore",
+    "IDBOpenDBRequest",
+    "IDBRecord",
+    "IDBRequest",
+    "IDBTransaction",
+    "IDBVersionChangeEvent"
+  ];
+  const previous = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(global, name)]));
+  for (const name of names) {
+    const value = name === "indexedDB" ? new fakeIndexedDb.IDBFactory() : fakeIndexedDb[name];
+    Object.defineProperty(global, name, { configurable: true, writable: true, value });
+  }
+  return () => {
+    for (const [name, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(global, name, descriptor);
+      else delete global[name];
+    }
+  };
+}
 
 function eventStub() {
   return {
@@ -18,15 +49,24 @@ function createHarness(initial = {}, options = {}) {
   delete require.cache[backgroundPath];
   const stored = structuredClone(initial);
   const deletedGopeedTasks = [];
+  const sentTabMessages = [];
   const actionState = {};
+  const storageAccessState = {};
 
   global.importScripts = (...files) => {
+    if (files.includes("runtime/popo-runtime.js")) global.PopoRuntime = require("../runtime/popo-runtime.cjs");
     if (files.includes("core.js")) global.PopoCore = require("../core.js");
     if (files.includes("gopeed.js")) {
       global.PopoGopeed = {
         ...require("../gopeed.js"),
         ...(options.gopeedConfig ? {
           async getConfig() { return structuredClone(options.gopeedConfig); }
+        } : {}),
+        ...(options.gopeedTasks ? {
+          async listTasks() { return structuredClone(options.gopeedTasks); }
+        } : {}),
+        ...(options.listGopeedTasks ? {
+          listTasks: options.listGopeedTasks
         } : {}),
         async deleteTask(_settings, taskId) { deletedGopeedTasks.push(taskId); }
       };
@@ -43,6 +83,9 @@ function createHarness(initial = {}, options = {}) {
     runtime: { onInstalled: eventStub(), onMessage: eventStub(), onStartup: eventStub() },
     storage: {
       local: {
+        async setAccessLevel({ accessLevel }) {
+          storageAccessState.accessLevel = accessLevel;
+        },
         async get(keys) {
           const requested = Array.isArray(keys) ? keys : [keys];
           return Object.fromEntries(requested.filter((key) => key in stored).map((key) => [key, stored[key]]));
@@ -56,7 +99,10 @@ function createHarness(initial = {}, options = {}) {
     tabs: {
       onRemoved: eventStub(),
       onUpdated: eventStub(),
-      async sendMessage() { return { ok: true }; },
+      async sendMessage(tabId, message, options) {
+        sentTabMessages.push({ tabId, message: structuredClone(message), options: structuredClone(options) });
+        return { ok: true };
+      },
       async get() { return null; },
       async remove() {}
     }
@@ -73,13 +119,44 @@ function createHarness(initial = {}, options = {}) {
     delete global.PopoCore;
     delete global.PopoGopeed;
     delete global.PopoQueue;
+    delete global.PopoRuntime;
     delete require.cache[backgroundPath];
   };
   const fireAlarm = (name) => {
     for (const alarmListener of global.chrome.alarms.onAlarm.listeners) alarmListener({ name });
   };
-  return { actionState, cleanup, deletedGopeedTasks, fireAlarm, send, stored };
+  return {
+    actionState,
+    cleanup,
+    deletedGopeedTasks,
+    fireAlarm,
+    send,
+    sentTabMessages,
+    storageAccessState,
+    stored
+  };
 }
+
+test("后台启动时把本地状态限制在受信任扩展上下文", () => {
+  const harness = createHarness();
+  try {
+    assert.equal(harness.storageAccessState.accessLevel, "TRUSTED_CONTEXTS");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("后台在状态读取前拒绝格式错误的控制命令", async () => {
+  const harness = createHarness();
+  try {
+    const missingJob = await harness.send({ type: "CANCEL_JOB", jobId: "" });
+    assert.equal(missingJob.ok, false);
+    assert.match(missingJob.error, /jobId/);
+    assert.deepEqual(harness.stored, {});
+  } finally {
+    harness.cleanup();
+  }
+});
 
 test("文件数量检查完成后无需确认即可自动进入 Gopeed 下载", async () => {
   const now = new Date().toISOString();
@@ -317,7 +394,10 @@ test("后台再次运行时自动恢复遗留在准备中的文件", async () =>
     startedAt: now,
     completedAt: ""
   };
-  const harness = createHarness({ popoSettings: state.settings, popoState: state });
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    { gopeedTasks: [] }
+  );
   try {
     harness.fireAlarm("popo-stable-downloader-pump");
     for (let attempt = 0; attempt < 30 && harness.stored.popoState.preparingItemId; attempt += 1) {
@@ -329,6 +409,170 @@ test("后台再次运行时自动恢复遗留在准备中的文件", async () =>
     assert.equal(recovered.status, "pending");
     assert.equal(recovered.attempts, 0);
     assert.match(recovered.stage, /自动接续/);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("服务工作线程中断后按稳定标签重新挂接已创建的 Gopeed 任务", async () => {
+  const now = new Date().toISOString();
+  const itemId = "orphan-after-gopeed-create";
+  const jobId = "job-reconcile-created-task";
+  const labels = buildTaskIdentityLabels({ jobId, taskIdentity: itemId });
+  const state = {
+    version: 4,
+    runToken: "run-reconcile-created-task",
+    jobs: [{
+      id: jobId,
+      key: "key-reconcile-created-task",
+      sourceTabId: 7,
+      folderName: "母文件 A",
+      folderItemIndex: "1",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+      status: "downloading",
+      cancelRequested: false,
+      createdAt: now,
+      counts: {}
+    }],
+    activeJobId: jobId,
+    mode: "downloading",
+    phase: "download_start",
+    triggerMode: "folder_button",
+    sourceTabId: 7,
+    selectedFolderName: "母文件 A",
+    workerFrameId: 42,
+    workerReadyUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1",
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    items: [{
+      id: itemId,
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1",
+      itemIndex: "7",
+      name: "动画.gif",
+      selected: true,
+      status: "preparing",
+      stage: "建立 Gopeed 任务",
+      attempts: 1,
+      startedAt: now,
+      failureStage: "",
+      error: ""
+    }],
+    preparingItemId: itemId,
+    activeItemId: itemId,
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    scannedFolderCount: 0,
+    gopeedConnected: true,
+    logs: [],
+    startedAt: now,
+    completedAt: ""
+  };
+  const gopeedTasks = [{
+    id: "task-reconciled",
+    status: "running",
+    progress: { downloaded: 1024, speed: 128 },
+    meta: {
+      req: { labels: { source: "popo-stable-downloader", ...labels } }
+    }
+  }];
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    { gopeedTasks }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    for (let attempt = 0; attempt < 30 && !harness.stored.popoState?.activeTransfers?.length; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(harness.stored.popoState.preparingItemId, null);
+    assert.deepEqual(harness.stored.popoState.activeTransfers, [{
+      itemId,
+      taskId: "task-reconciled",
+      pollFailures: 0,
+      startedAt: now,
+      reconciledAt: harness.stored.popoState.activeTransfers[0].reconciledAt
+    }]);
+    const recovered = harness.stored[`popoItems:${jobId}:0`][0];
+    assert.equal(recovered.status, "transferring");
+    assert.equal(recovered.gopeedTaskId, "task-reconciled");
+    assert.match(recovered.stage, /已恢复关联/);
+    assert.equal(harness.stored.popoState.runtimeHealth.reconciliation.recoveredCount, 1);
+    assert.equal(harness.stored.popoState.runtimeHealth.lastEventCode, "GOPEED_TASK_RECONCILED");
+    assert.ok(harness.stored.popoState.logs.some(
+      (entry) => entry.code === "GOPEED_TASK_RECONCILED" && entry.context.taskKey === labels.popoTaskKey
+    ));
+    const snapshot = await harness.send({ type: "GET_STATE" });
+    assert.equal(snapshot.ok, true);
+    assert.equal(snapshot.state.runtimeHealth.reconciliation.lastOutcome, "recovered");
+    assert.equal(snapshot.state.runtimeHealth.eventCounts.GOPEED_TASK_RECONCILED, 1);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("Gopeed 对账接口失败时保留准备状态并等待重试", async () => {
+  const now = new Date().toISOString();
+  const itemId = "orphan-waiting-reconciliation";
+  const jobId = "job-reconciliation-error";
+  const state = {
+    version: 4,
+    runToken: "run-reconciliation-error",
+    jobs: [{
+      id: jobId,
+      key: "key-reconciliation-error",
+      sourceTabId: 7,
+      folderName: "母文件 B",
+      folderItemIndex: "2",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+      status: "downloading",
+      cancelRequested: false,
+      createdAt: now,
+      counts: {}
+    }],
+    activeJobId: jobId,
+    mode: "downloading",
+    phase: "download_start",
+    triggerMode: "folder_button",
+    sourceTabId: 7,
+    selectedFolderName: "母文件 B",
+    workerFrameId: 42,
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    items: [{
+      id: itemId,
+      name: "设计源文件.psd",
+      selected: true,
+      status: "preparing",
+      stage: "建立 Gopeed 任务",
+      attempts: 1
+    }],
+    preparingItemId: itemId,
+    activeItemId: itemId,
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    scannedFolderCount: 0,
+    gopeedConnected: true,
+    logs: [],
+    startedAt: now,
+    completedAt: ""
+  };
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    { listGopeedTasks: async () => { throw new Error("temporary list failure"); } }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    for (let attempt = 0; attempt < 30 && !harness.stored.popoState?.runtimeHealth; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(harness.stored.popoState.preparingItemId, itemId);
+    assert.deepEqual(harness.stored.popoState.activeTransfers, []);
+    assert.equal(harness.stored.popoState.phase, "reconciling_gopeed");
+    assert.equal(harness.stored.popoState.runtimeHealth.reconciliation.lastOutcome, "error");
+    assert.equal(harness.stored.popoState.runtimeHealth.reconciliation.errorCount, 1);
+    assert.equal(harness.stored.popoState.runtimeHealth.lastEventCode, "GOPEED_RECONCILIATION_ERROR");
   } finally {
     harness.cleanup();
   }
@@ -414,8 +658,8 @@ test("取消活动任务仅取消未开始文件并保留 Gopeed 传输", async 
     selectedFolderName: "母文件 A",
     settings,
     items: [
-      { id: "active", name: "active.mp4", selected: true, status: "transferring", gopeedTaskId: "task-1" },
-      { id: "pending", name: "pending.mp4", selected: true, status: "pending", gopeedTaskId: null }
+      { id: "active", parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1", name: "active.mp4", selected: true, status: "transferring", gopeedTaskId: "task-1" },
+      { id: "pending", parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1", name: "pending.mp4", selected: true, status: "pending", gopeedTaskId: null }
     ],
     activeTransfers: [{ itemId: "active", taskId: "task-1" }],
     scanQueue: [],
@@ -431,11 +675,308 @@ test("取消活动任务仅取消未开始文件并保留 Gopeed 传输", async 
     const response = await harness.send({ type: "CANCEL_JOB", jobId: "job-a" });
     assert.equal(response.ok, true);
     assert.equal(response.state.mode, "idle");
-    assert.deepEqual(response.state.jobs, []);
+    assert.equal(response.state.jobs.length, 1);
+    assert.equal(response.state.jobs[0].status, "cancelled");
+    assert.deepEqual(response.state.jobs[0].cancelledRetryKeys, [
+      "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1\u0000pending.mp4"
+    ]);
     assert.deepEqual(harness.deletedGopeedTasks, []);
     assert.equal(harness.stored.popoState.jobs[0].status, "cancelled");
     assert.equal(harness.stored.popoState.jobs[0].cancelRequested, true);
     assert.deepEqual(harness.stored.popoState.activeTransfers, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("移除终止任务只清理扩展记录且不删除下载任务或文件", async () => {
+  const now = new Date().toISOString();
+  const settings = { concurrency: 5, gopeedConnections: 1 };
+  const state = {
+    version: 4,
+    runToken: "run-dismiss-terminal",
+    jobs: [{
+      id: "job-cancelled",
+      key: "folder-a",
+      folderName: "母文件 A",
+      status: "cancelled",
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 3, success: 1, failed: 0, cancelled: 2 },
+      cancelledRetryKeys: ["folder\u0000a.psd", "folder\u0000b.psd"]
+    }, {
+      id: "job-cancelled-retry",
+      key: "folder-a",
+      restoreOfJobId: "job-cancelled",
+      folderName: "母文件 A",
+      status: "failed",
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 0, success: 0, failed: 0, cancelled: 0 }
+    }, {
+      id: "job-unrelated-failure",
+      key: "folder-b",
+      folderName: "母文件 B",
+      status: "failed",
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 1, success: 0, failed: 1, cancelled: 0 },
+      failureRetryKeys: ["folder\u0000broken.psd"]
+    }],
+    activeJobId: null,
+    mode: "idle",
+    phase: "idle",
+    settings,
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    logs: []
+  };
+  const harness = createHarness({ popoSettings: settings, popoState: state });
+  try {
+    const response = await harness.send({ type: "DISMISS_JOB", jobId: "job-cancelled" });
+    assert.equal(response.ok, true);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.id), ["job-unrelated-failure"]);
+    assert.deepEqual(response.state.jobs.map((job) => job.id), ["job-unrelated-failure"]);
+    assert.deepEqual(harness.deletedGopeedTasks, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("进行中的同组任务不能被移除", async () => {
+  const now = new Date().toISOString();
+  const settings = { concurrency: 5, gopeedConnections: 1 };
+  const state = {
+    version: 4,
+    runToken: "run-dismiss-active",
+    jobs: [{
+      id: "job-old-failure",
+      key: "folder-a",
+      folderName: "母文件 A",
+      status: "failed",
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 1, success: 0, failed: 1, cancelled: 0 }
+    }, {
+      id: "job-active-retry",
+      key: "folder-a",
+      retryOfJobId: "job-old-failure",
+      folderName: "母文件 A",
+      status: "paused",
+      createdAt: now,
+      counts: { files: 1, success: 0, failed: 0, cancelled: 0 }
+    }],
+    activeJobId: "job-active-retry",
+    mode: "paused",
+    phase: "paused",
+    settings,
+    items: [],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    logs: []
+  };
+  const harness = createHarness({ popoSettings: settings, popoState: state });
+  try {
+    const response = await harness.send({ type: "DISMISS_JOB", jobId: "job-old-failure" });
+    assert.equal(response.ok, false);
+    assert.match(response.error, /仍在进行/);
+    assert.equal(harness.stored.popoState.jobs.length, 2);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("升级后可从旧版取消状态中只恢复未开始文件", async () => {
+  const now = new Date().toISOString();
+  const parentUrl = "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1";
+  const state = {
+    version: 4,
+    runToken: "run-legacy-cancelled",
+    jobs: [{
+      id: "job-legacy-cancelled",
+      key: "key-legacy-cancelled",
+      sourceTabId: 7,
+      folderName: "母文件 A",
+      folderItemIndex: "1",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+      status: "cancelled",
+      cancelRequested: true,
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 3, success: 1, failed: 0, cancelled: 2 }
+    }],
+    activeJobId: null,
+    mode: "idle",
+    phase: "idle",
+    itemStorageJobId: "idle",
+    itemChunkCount: 1,
+    itemChunkHashes: [],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    logs: []
+  };
+  const items = [
+    { id: "done", parentUrl, name: "done.psd", selected: true, status: "success" },
+    { id: "cancelled-1", parentUrl, name: "remaining.gif", selected: true, status: "cancelled" },
+    { id: "cancelled-2", parentUrl, name: "remaining.bin", selected: true, status: "cancelled" }
+  ];
+  const harness = createHarness({
+    popoSettings: state.settings,
+    popoState: state,
+    "popoItems:idle:0": items
+  });
+  try {
+    const response = await harness.send({
+      type: "RESTORE_CANCELLED_JOB",
+      jobId: "job-legacy-cancelled"
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.state.mode, "waiting_worker");
+    assert.equal(response.state.jobs.length, 1);
+    assert.match(response.state.jobs[0].displayName, /恢复未开始文件/);
+    const storedJobs = harness.stored.popoState.jobs;
+    const source = storedJobs.find((job) => job.id === "job-legacy-cancelled");
+    const restored = storedJobs.find((job) => job.restoreOfJobId === source.id);
+    assert.deepEqual(source.cancelledRetryKeys, [
+      `${parentUrl}\u0000remaining.gif`,
+      `${parentUrl}\u0000remaining.bin`
+    ]);
+    assert.deepEqual(restored.retryKeys, source.cancelledRetryKeys);
+    assert.equal(restored.status, "waiting_worker");
+    assert.equal(harness.deletedGopeedTasks.length, 0);
+    assert.ok(harness.sentTabMessages.some(({ message }) => message.type === "ENSURE_WORKER_FRAME"));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("从弹窗恢复时改用当前打开的 POPO 页面承载隐藏工作区", async () => {
+  const now = new Date().toISOString();
+  const state = {
+    version: 4,
+    runToken: "run-popup-restore",
+    jobs: [{
+      id: "job-popup-restore",
+      key: "key-popup-restore",
+      sourceTabId: 99,
+      folderName: "母文件 A",
+      folderItemIndex: "1",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+      status: "cancelled",
+      cancelRequested: true,
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 2, success: 1, failed: 0, cancelled: 1 },
+      cancelledRetryKeys: [
+        "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1\u0000remaining.psd"
+      ]
+    }],
+    activeJobId: null,
+    mode: "idle",
+    phase: "idle",
+    itemStorageJobId: "idle",
+    itemChunkCount: 0,
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    logs: []
+  };
+  const harness = createHarness({ popoSettings: state.settings, popoState: state });
+  try {
+    const response = await harness.send(
+      { type: "RESTORE_CANCELLED_JOB", jobId: "job-popup-restore", sourceTabId: 7 },
+      { url: "chrome-extension://coocdgkmbpkacapjlmnmemebmmdahjaa/popup.html", frameId: 0 }
+    );
+    assert.equal(response.ok, true);
+    const source = harness.stored.popoState.jobs.find((job) => job.id === "job-popup-restore");
+    const restored = harness.stored.popoState.jobs.find(
+      (job) => job.restoreOfJobId === "job-popup-restore"
+    );
+    assert.equal(source.sourceTabId, 7);
+    assert.equal(restored.sourceTabId, 7);
+    assert.ok(harness.sentTabMessages.some(({ tabId, message }) =>
+      tabId === 7 && message.type === "ENSURE_WORKER_FRAME"
+    ));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("旧版取消任务丢失明细时按 Gopeed 已有保存路径恢复缺失文件", async () => {
+  const now = new Date().toISOString();
+  const state = {
+    version: 4,
+    runToken: "run-legacy-no-items",
+    jobs: [{
+      id: "job-legacy-no-items",
+      key: "key-legacy-no-items",
+      sourceTabId: 7,
+      folderName: "母文件 A",
+      folderItemIndex: "1",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+      status: "cancelled",
+      cancelRequested: true,
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 3, success: 1, failed: 0, cancelled: 2 }
+    }],
+    activeJobId: null,
+    mode: "idle",
+    phase: "idle",
+    itemStorageJobId: "",
+    itemChunkCount: 0,
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    settings: { downloadRoot: "POPO稳定下载", concurrency: 5, gopeedConnections: 1 },
+    logs: []
+  };
+  const gopeedTasks = [{
+    status: "done",
+    name: "done.psd",
+    meta: {
+      req: { labels: { source: "popo-stable-downloader" } },
+      opts: {
+        path: "D:\\Downloads\\POPO稳定下载\\母文件 A",
+        name: "done.psd"
+      }
+    }
+  }];
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      gopeedConfig: { downloadDir: "D:\\Downloads" },
+      gopeedTasks
+    }
+  );
+  try {
+    const response = await harness.send({
+      type: "RESTORE_CANCELLED_JOB",
+      jobId: "job-legacy-no-items"
+    });
+    assert.equal(response.ok, true);
+    assert.equal(response.state.mode, "waiting_worker");
+    const source = harness.stored.popoState.jobs.find((job) => job.id === "job-legacy-no-items");
+    const restored = harness.stored.popoState.jobs.find((job) => job.restoreOfJobId === source.id);
+    assert.deepEqual(restored.retryKeys, []);
+    assert.equal(restored.restoreStrategy, "missing_from_gopeed");
+    assert.equal(restored.restoreExpectedCount, 2);
+    assert.deepEqual(restored.existingGopeedTargetKeys, [
+      "popo稳定下载/母文件 a/done.psd"
+    ]);
+    assert.equal(response.state.jobs[0].existingGopeedTargetCount, 1);
+    assert.equal(response.state.jobs[0].existingGopeedTargetKeys, undefined);
+    assert.ok(harness.sentTabMessages.some(({ message }) => message.type === "ENSURE_WORKER_FRAME"));
   } finally {
     harness.cleanup();
   }
@@ -508,7 +1049,7 @@ test("刷新 POPO 页面会恢复准备中的文件且保留已开始的 Gopeed 
   }
 });
 
-test("原 POPO 标签页关闭后可在同一团队空间的新标签页恢复任务", async () => {
+test("原 POPO 标签页关闭后可在其他团队空间的 POPO 标签页恢复任务", async () => {
   const now = new Date().toISOString();
   const rootUrl = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
   const state = {
@@ -549,7 +1090,7 @@ test("原 POPO 标签页关闭后可在同一团队空间的新标签页恢复�
   const harness = createHarness({ popoSettings: state.settings, popoState: state });
   try {
     const response = await harness.send(
-      { type: "SOURCE_PAGE_READY", url: rootUrl },
+      { type: "SOURCE_PAGE_READY", url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1" },
       { tab: { id: 9 }, frameId: 0 }
     );
     assert.equal(response.ok, true);
@@ -562,7 +1103,144 @@ test("原 POPO 标签页关闭后可在同一团队空间的新标签页恢复�
   }
 });
 
+test("继续下载时会主动重建失联的页面工作区", async () => {
+  const now = new Date().toISOString();
+  const rootUrl = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const state = {
+    version: 4,
+    runToken: "run-paused-worker-missing",
+    jobs: [{
+      id: "job-paused-worker-missing",
+      key: "key-paused-worker-missing",
+      sourceTabId: 7,
+      folderName: "母文件 A",
+      folderItemIndex: "1",
+      parentUrl: rootUrl,
+      status: "paused",
+      cancelRequested: false,
+      createdAt: now,
+      counts: { files: 1, success: 0, failed: 0, cancelled: 0 }
+    }],
+    activeJobId: "job-paused-worker-missing",
+    mode: "paused",
+    phase: "paused",
+    triggerMode: "folder_button",
+    sourceTabId: 7,
+    selectedFolderName: "母文件 A",
+    rootUrl,
+    teamSpaceKey: "team1",
+    workerFrameId: null,
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    items: [{
+      id: "pending",
+      parentUrl: rootUrl,
+      name: "pending.psd",
+      selected: true,
+      status: "pending",
+      attempts: 0
+    }],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    scannedFolderCount: 0,
+    logs: [],
+    startedAt: now,
+    completedAt: ""
+  };
+  const harness = createHarness({ popoSettings: state.settings, popoState: state });
+  try {
+    const response = await harness.send({ type: "RESUME" });
+    assert.equal(response.ok, true);
+    assert.equal(response.state.mode, "downloading");
+    assert.ok(harness.sentTabMessages.some(({ tabId, message }) =>
+      tabId === 7 && message.type === "ENSURE_WORKER_FRAME" && message.url === rootUrl
+    ));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("旧版 chrome.storage 文件分块首次读取后迁移到 IndexedDB", async () => {
+  const restoreIndexedDb = installFakeIndexedDb();
+  const runtime = require("../runtime/popo-runtime.cjs");
+  await runtime.taskStore.resetDatabaseForTests();
+  const now = new Date().toISOString();
+  const jobId = "job-legacy-storage";
+  const legacyKey = "popoItems:" + jobId + ":0";
+  const items = [{
+    id: "legacy-item",
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+    name: "legacy.psd",
+    selected: true,
+    status: "pending",
+    attempts: 0
+  }];
+  const state = {
+    version: 4,
+    runToken: "run-legacy-storage",
+    jobs: [{
+      id: jobId,
+      key: "legacy-storage-key",
+      sourceTabId: null,
+      folderName: "旧版大任务",
+      folderItemIndex: "1",
+      parentUrl: items[0].parentUrl,
+      status: "downloading",
+      cancelRequested: false,
+      createdAt: now,
+      counts: { files: 1 }
+    }],
+    activeJobId: jobId,
+    mode: "downloading",
+    phase: "starting",
+    triggerMode: "folder_button",
+    sourceTabId: null,
+    settings: { concurrency: 5, gopeedConnections: 1 },
+    itemStorageBackend: "chrome-storage-fallback",
+    itemStorageGeneration: "",
+    itemStorageJobId: jobId,
+    itemChunkCount: 1,
+    itemChunkHashes: [],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    scannedFolderCount: 0,
+    logs: [],
+    startedAt: now,
+    completedAt: ""
+  };
+  const harness = createHarness({
+    popoSettings: state.settings,
+    popoState: state,
+    [legacyKey]: items
+  });
+  try {
+    const response = await harness.send({ type: "PAUSE" });
+    assert.equal(response.ok, true);
+    assert.equal(harness.stored.popoState.itemStorageBackend, "indexeddb");
+    assert.match(harness.stored.popoState.itemStorageGeneration, /^v1-/);
+    assert.equal(legacyKey in harness.stored, false);
+    assert.ok(harness.stored.popoState.runtimeHealth.storage.lastMigrationAt);
+    const restored = await runtime.taskStore.readItemChunks({
+      jobId,
+      generation: harness.stored.popoState.itemStorageGeneration,
+      chunkCount: 1,
+      hashes: harness.stored.popoState.itemChunkHashes
+    });
+    assert.deepEqual(restored, items);
+  } finally {
+    harness.cleanup();
+    await runtime.taskStore.resetDatabaseForTests();
+    restoreIndexedDb();
+  }
+});
+
 test("万级文件状态按块持久化且公开状态不传输完整文件数组", async () => {
+  const restoreIndexedDb = installFakeIndexedDb();
+  const runtime = require("../runtime/popo-runtime.cjs");
+  await runtime.taskStore.resetDatabaseForTests();
   const now = new Date().toISOString();
   const items = Array.from({ length: 10000 }, (_, index) => ({
     id: `item-${index}`,
@@ -608,14 +1286,25 @@ test("万级文件状态按块持久化且公开状态不传输完整文件数�
     const paused = await harness.send({ type: "PAUSE" });
     assert.equal(paused.ok, true);
     assert.equal(harness.stored.popoState.itemChunkCount, 50);
+    assert.equal(harness.stored.popoState.itemStorageBackend, "indexeddb");
+    assert.match(harness.stored.popoState.itemStorageGeneration, /^v1-/);
     assert.equal("items" in harness.stored.popoState, false);
-    assert.equal(harness.stored["popoItems:job-large:0"].length, 200);
-    assert.equal(harness.stored["popoItems:job-large:49"].length, 200);
+    assert.equal("popoItems:job-large:0" in harness.stored, false);
+    const restoredItems = await runtime.taskStore.readItemChunks({
+      jobId: "job-large",
+      generation: harness.stored.popoState.itemStorageGeneration,
+      chunkCount: 50,
+      hashes: harness.stored.popoState.itemChunkHashes
+    });
+    assert.equal(restoredItems.length, 10000);
+    assert.equal(restoredItems[9999].id, "item-9999");
     const snapshot = await harness.send({ type: "GET_STATE" });
     assert.equal("items" in snapshot.state, false);
     assert.equal(snapshot.state.jobs[0].counts.files, 10000);
     assert.equal(snapshot.state.jobs[0].counts.projects, 10050);
   } finally {
     harness.cleanup();
+    await runtime.taskStore.resetDatabaseForTests();
+    restoreIndexedDb();
   }
 });

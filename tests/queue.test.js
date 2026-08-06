@@ -3,14 +3,50 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+global.PopoRuntime = require("../runtime/popo-runtime.cjs");
+
 const {
   applyCancelPolicy,
+  canTransitionJobStatus,
   clientVisibleJobs,
   findDuplicateJob,
+  isJobActive,
   makeFolderJobKey,
   queuePosition,
-  summarizeItems
+  summarizeItems,
+  transitionJobStatus
 } = require("../queue.js");
+
+test.after(() => {
+  delete global.PopoRuntime;
+});
+
+test("任务状态转换由纯函数统一约束且终态不能回流", () => {
+  const original = { id: "job-a", status: "queued", lastMessage: "等待中" };
+  const waiting = transitionJobStatus(original, "waiting_worker", { lastMessage: "准备工作区" });
+  const scanning = transitionJobStatus(waiting, "scanning");
+  const scanComplete = transitionJobStatus(scanning, "scan_complete");
+  const starting = transitionJobStatus(scanComplete, "starting");
+  const downloading = transitionJobStatus(starting, "downloading");
+  const paused = transitionJobStatus(downloading, "paused");
+  const resumed = transitionJobStatus(paused, "downloading");
+  const complete = transitionJobStatus(resumed, "complete");
+
+  assert.equal(original.status, "queued");
+  assert.equal(original.lastMessage, "等待中");
+  assert.notEqual(waiting, original);
+  assert.equal(waiting.lastMessage, "准备工作区");
+  assert.equal(complete.status, "complete");
+  assert.equal(isJobActive("scan_complete"), true);
+  assert.equal(canTransitionJobStatus("failed", "downloading"), false);
+  assert.throws(
+    () => transitionJobStatus(complete, "downloading"),
+    /非法任务状态转换/
+  );
+
+  const legacy = transitionJobStatus({ id: "legacy", status: "legacy_running" }, "scanning");
+  assert.equal(legacy.status, "scanning");
+});
 
 test("client view hides finished jobs and resolved failures", () => {
   const jobs = [
@@ -45,6 +81,43 @@ test("client view hides finished jobs and resolved failures", () => {
   assert.deepEqual(
     clientVisibleJobs(jobs).map((job) => job.id),
     ["active", "unresolved-error"]
+  );
+});
+
+test("误取消任务在恢复完成前保持可见", () => {
+  const cancelled = {
+    id: "cancelled-recoverable",
+    key: "folder-a",
+    status: "cancelled",
+    createdAt: "2026-08-04T00:00:00Z",
+    counts: { files: 3, success: 1, cancelled: 2 },
+    cancelledRetryKeys: ["folder\u0000a.psd", "folder\u0000b.gif"]
+  };
+  assert.deepEqual(clientVisibleJobs([cancelled]).map((job) => job.id), [cancelled.id]);
+  assert.deepEqual(clientVisibleJobs([
+    cancelled,
+    {
+      id: "restored",
+      key: "folder-a",
+      restoreOfJobId: cancelled.id,
+      status: "complete",
+      createdAt: "2026-08-04T00:01:00Z",
+      counts: { files: 2, success: 2, cancelled: 0, failed: 0 }
+    }
+  ]), []);
+
+  const failedRestore = {
+    id: "failed-restore",
+    key: "folder-a",
+    restoreOfJobId: cancelled.id,
+    status: "failed",
+    createdAt: "2026-08-04T00:02:00Z",
+    counts: { files: 0, success: 0, cancelled: 0, failed: 0 },
+    lastMessage: "POPO 页面工作区未能加载"
+  };
+  assert.deepEqual(
+    clientVisibleJobs([cancelled, failedRestore]).map((job) => job.id),
+    [cancelled.id, failedRestore.id]
   );
 });
 

@@ -4,11 +4,16 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildCreateTaskBody,
+  buildTaskIdentityLabels,
   classifyTaskStatus,
   createTask,
+  listTasks,
   normalizeDownloadDirectory,
   normalizeEndpoint,
+  normalizeTargetKey,
   request,
+  reusableTaskTargetKeys,
+  selectTaskByIdentity,
   startOrReplaceTask,
   splitDownloadTarget
 } = require("../gopeed.js");
@@ -49,6 +54,93 @@ test("创建任务时固定文件名、目录和单连接", () => {
   });
 });
 
+test("Gopeed 任务携带可对账且不暴露文件信息的稳定标签", () => {
+  const taskIdentity = "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1\u00007\u0000视频.mp4";
+  const labels = buildTaskIdentityLabels({
+    jobId: "job-20260805",
+    taskIdentity
+  });
+  const repeated = buildTaskIdentityLabels({
+    jobId: "job-20260805",
+    taskIdentity
+  });
+  const different = buildTaskIdentityLabels({
+    jobId: "job-20260805",
+    taskIdentity: `${taskIdentity}-different`
+  });
+
+  assert.deepEqual(labels, repeated);
+  assert.equal(labels.popoSchema, "1");
+  assert.equal(labels.popoJobId, "job-20260805");
+  assert.match(labels.popoTaskKey, /^[a-f0-9]{16}$/);
+  assert.notEqual(labels.popoTaskKey, different.popoTaskKey);
+  assert.doesNotMatch(JSON.stringify(labels), /pageDetail|视频\.mp4/);
+
+  const body = buildCreateTaskBody({
+    url: "https://example.com/video.mp4",
+    name: "视频.mp4",
+    path: "D:\\Downloads",
+    labels: {
+      ...labels,
+      source: "untrusted-source",
+      unrelated: "discard-me"
+    }
+  });
+  assert.deepEqual(body.req.labels, {
+    source: "popo-stable-downloader",
+    popoSchema: "1",
+    popoJobId: "job-20260805",
+    popoTaskKey: labels.popoTaskKey
+  });
+});
+
+test("任务对账按作业与任务键唯一匹配并优先采用已完成结果", () => {
+  const labels = buildTaskIdentityLabels({
+    jobId: "job-reconcile",
+    taskIdentity: "folder\u00001\u0000video.mp4"
+  });
+  const makeTask = (id, status, overrides = {}) => ({
+    id,
+    status,
+    meta: {
+      req: {
+        labels: {
+          source: "popo-stable-downloader",
+          ...labels,
+          ...overrides
+        }
+      }
+    }
+  });
+
+  const live = makeTask("task-live", "running");
+  assert.deepEqual(selectTaskByIdentity([
+    makeTask("foreign-job", "running", { popoJobId: "job-other" }),
+    live
+  ], labels), {
+    task: live,
+    matchCount: 1,
+    resolution: "live"
+  });
+
+  const ambiguous = selectTaskByIdentity([
+    makeTask("task-live-a", "running"),
+    makeTask("task-live-b", "wait")
+  ], labels);
+  assert.equal(ambiguous.task, null);
+  assert.equal(ambiguous.matchCount, 2);
+  assert.equal(ambiguous.resolution, "ambiguous");
+
+  const done = makeTask("task-done", "done");
+  const completed = selectTaskByIdentity([
+    makeTask("task-live-c", "running"),
+    done
+  ], labels);
+  assert.equal(completed.task, done);
+  assert.equal(completed.matchCount, 2);
+  assert.equal(completed.resolution, "success");
+});
+
 test("保存位置使用选择的根目录并保留 POPO 文件夹结构", () => {
   assert.deepEqual(
     splitDownloadTarget(
@@ -69,6 +161,50 @@ test("Gopeed 状态映射区分完成、失败、暂停和进行中", () => {
   assert.equal(classifyTaskStatus("ready"), "active");
   assert.equal(classifyTaskStatus("running"), "active");
   assert.equal(classifyTaskStatus("wait"), "active");
+});
+
+test("旧任务恢复只把 POPO 已完成或进行中的保存路径作为去重依据", () => {
+  const makeTask = (status, path, name, source = "popo-stable-downloader") => ({
+    status,
+    name,
+    meta: {
+      req: { labels: { source } },
+      opts: { path, name }
+    }
+  });
+  const tasks = [
+    makeTask("done", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\母文件 A", "DONE.PSD"),
+    makeTask("running", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\母文件 A\\gif", "a.gif"),
+    makeTask("error", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\母文件 A", "retry.bin"),
+    makeTask("done", "C:\\Users\\EDY\\Downloads\\其他工具", "outside.psd"),
+    makeTask("done", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\母文件 A", "foreign.psd", "other")
+  ];
+  assert.deepEqual(reusableTaskTargetKeys(tasks, "POPO稳定下载"), [
+    "popo稳定下载/母文件 a/done.psd",
+    "popo稳定下载/母文件 a/gif/a.gif"
+  ]);
+  assert.equal(normalizeTargetKey("POPO稳定下载\\母文件 A\\DONE.PSD"),
+    "popo稳定下载/母文件 a/done.psd");
+});
+
+test("读取 Gopeed 全部任务调用 tasks 列表接口", async () => {
+  let captured;
+  const tasks = await listTasks({
+    gopeedEndpoint: "http://127.0.0.1:9999",
+    gopeedToken: ""
+  }, {
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return {
+        ok: true,
+        status: 200,
+        async json() { return { code: 0, data: [{ id: "task-1", status: "done" }] }; }
+      };
+    }
+  });
+  assert.equal(captured.url, "http://127.0.0.1:9999/api/v1/tasks");
+  assert.equal(captured.options.method, "GET");
+  assert.deepEqual(tasks, [{ id: "task-1", status: "done" }]);
 });
 
 test("REST 请求携带 Token 并解析 Gopeed 响应信封", async () => {

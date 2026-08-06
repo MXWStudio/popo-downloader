@@ -55,27 +55,29 @@ internal static class PopoSetup
             }
             productRoot = Path.GetFullPath(productRoot);
             string extensionRoot = Path.Combine(productRoot, "Extension");
-            string nativeRoot = Path.Combine(productRoot, "NativeHost");
-            string gopeedRoot = Path.Combine(nativeRoot, "Gopeed");
-            Directory.CreateDirectory(productRoot);
-            Directory.CreateDirectory(extensionRoot);
-            Directory.CreateDirectory(nativeRoot);
-
-            CopyDirectory(sourceExtension, extensionRoot);
-            InstallGopeed(sourceGopeed, gopeedRoot, nativeRoot);
-            string installedNativeHost = Path.Combine(nativeRoot, "PopoFolderPickerHost.exe");
-            File.Copy(sourceNativeHost, installedNativeHost, true);
-            InstallNativeManifest(
-                nativeRoot,
-                installedNativeHost,
+            bool simulateUpdateFailure = HasArgument(args, "--test-fail-after-swap") &&
+                String.Equals(
+                    Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                    "1",
+                    StringComparison.Ordinal
+                );
+            ApplyVerifiedUpdate(
+                packageRoot,
+                productRoot,
+                sourceExtension,
+                sourceGopeed,
+                sourceNativeHost,
                 extensionId,
-                !skipRegister
+                versionName,
+                !skipRegister,
+                simulateUpdateFailure
             );
-            CopyOptionalFiles(packageRoot, productRoot);
-            WriteInstallState(productRoot, extensionRoot, extensionId, versionName);
 
             bool alreadyLoaded = IsKnownByChrome(extensionId);
-            try { Clipboard.SetText(extensionRoot); } catch {}
+            if (!quiet)
+            {
+                try { Clipboard.SetText(extensionRoot); } catch {}
+            }
 
             string message = alreadyLoaded
                 ? "绿色版已经更新完成。\r\n\r\nChrome 扩展管理页即将打开，请找到“POPO 稳定下载助手”并点击一次“重新加载”。\r\n\r\n扩展路径已复制：\r\n" + extensionRoot
@@ -161,6 +163,470 @@ internal static class PopoSetup
         return id.ToString();
     }
 
+    private static void ApplyVerifiedUpdate(
+        string packageRoot,
+        string productRoot,
+        string sourceExtension,
+        string sourceGopeed,
+        string sourceNativeHost,
+        string extensionId,
+        string versionName,
+        bool registerNativeHost,
+        bool simulateUpdateFailure
+    )
+    {
+        ValidateProductRoot(productRoot);
+        Directory.CreateDirectory(productRoot);
+
+        string transactionId = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") +
+            "-" + Guid.NewGuid().ToString("N");
+        string updatesRoot = Path.Combine(productRoot, "Updates");
+        string candidateRoot = Path.Combine(updatesRoot, "candidate-" + transactionId);
+        string candidateExtension = Path.Combine(candidateRoot, "Extension");
+        string candidateNative = Path.Combine(candidateRoot, "NativeHost");
+        string candidateGopeed = Path.Combine(candidateNative, "Gopeed");
+        string candidateNativeHost = Path.Combine(candidateNative, "PopoFolderPickerHost.exe");
+
+        string extensionRoot = Path.Combine(productRoot, "Extension");
+        string nativeRoot = Path.Combine(productRoot, "NativeHost");
+        string gopeedRoot = Path.Combine(nativeRoot, "Gopeed");
+        string installedNativeHost = Path.Combine(nativeRoot, "PopoFolderPickerHost.exe");
+        string installStatePath = Path.Combine(productRoot, "install-state.json");
+
+        string rollbackParent = Path.Combine(productRoot, "Rollback");
+        string rollbackRoot = Path.Combine(rollbackParent, transactionId);
+        string rollbackExtension = Path.Combine(rollbackRoot, "Extension");
+        string rollbackNative = Path.Combine(rollbackRoot, "NativeHost");
+        string rollbackInstallState = Path.Combine(rollbackRoot, "install-state.json");
+
+        bool extensionChanged = false;
+        bool nativeChanged = false;
+        bool extensionActivated = false;
+        bool nativeActivated = false;
+        bool previousExtensionBackedUp = false;
+        bool previousNativeBackedUp = false;
+        bool previousStateBackedUp = false;
+        bool stateExistedBefore = File.Exists(installStatePath);
+        string previousRollbackPath = ReadExistingRollbackPath(installStatePath);
+        bool committed = false;
+
+        Directory.CreateDirectory(candidateExtension);
+        Directory.CreateDirectory(candidateNative);
+        try
+        {
+            CopyDirectory(sourceExtension, candidateExtension);
+            CopyDirectory(sourceGopeed, candidateGopeed);
+            File.Copy(sourceNativeHost, candidateNativeHost, true);
+            InstallNativeManifest(
+                candidateNative,
+                installedNativeHost,
+                extensionId,
+                false
+            );
+            VerifyCandidate(
+                sourceExtension,
+                sourceGopeed,
+                sourceNativeHost,
+                candidateRoot,
+                extensionId,
+                versionName
+            );
+            VerifyInstalledExtensionIdentity(extensionRoot, extensionId);
+
+            extensionChanged = !DirectoriesMatch(candidateExtension, extensionRoot);
+            // Gopeed may create helper files next to its packaged payload at runtime.
+            // Compare every packaged file, but do not treat those extra runtime files
+            // as a native update that would unnecessarily interrupt the live session.
+            nativeChanged = !PackagedDirectoryMatches(
+                candidateNative,
+                nativeRoot,
+                Path.Combine("Gopeed", "storage")
+            );
+            if (nativeChanged && IsProcessRunningAt(Path.Combine(gopeedRoot, "gopeed.exe")))
+            {
+                throw new InvalidOperationException(
+                    "Bundled Gopeed is running. Exit Gopeed from the system tray before updating its files."
+                );
+            }
+
+            if ((extensionChanged && Directory.Exists(extensionRoot)) ||
+                (nativeChanged && Directory.Exists(nativeRoot)))
+            {
+                Directory.CreateDirectory(rollbackRoot);
+            }
+            if (extensionChanged && Directory.Exists(extensionRoot))
+            {
+                Directory.Move(extensionRoot, rollbackExtension);
+                previousExtensionBackedUp = true;
+            }
+            if (nativeChanged && Directory.Exists(nativeRoot))
+            {
+                Directory.Move(nativeRoot, rollbackNative);
+                previousNativeBackedUp = true;
+            }
+            if ((extensionChanged || nativeChanged) && File.Exists(installStatePath))
+            {
+                Directory.CreateDirectory(rollbackRoot);
+                File.Copy(installStatePath, rollbackInstallState, true);
+                previousStateBackedUp = true;
+            }
+
+            if (extensionChanged)
+            {
+                Directory.Move(candidateExtension, extensionRoot);
+                extensionActivated = true;
+            }
+            if (nativeChanged)
+            {
+                Directory.Move(candidateNative, nativeRoot);
+                nativeActivated = true;
+                string previousGopeedStorage = Path.Combine(
+                    rollbackNative,
+                    "Gopeed",
+                    "storage"
+                );
+                string installedGopeedStorage = Path.Combine(
+                    nativeRoot,
+                    "Gopeed",
+                    "storage"
+                );
+                if (previousNativeBackedUp && Directory.Exists(previousGopeedStorage))
+                {
+                    if (Directory.Exists(installedGopeedStorage))
+                    {
+                        DeleteDirectoryInside(productRoot, installedGopeedStorage);
+                    }
+                    CopyDirectory(previousGopeedStorage, installedGopeedStorage);
+                    if (!DirectoriesMatch(previousGopeedStorage, installedGopeedStorage))
+                    {
+                        throw new InvalidDataException(
+                            "The previous Gopeed session data was not preserved correctly."
+                        );
+                    }
+                }
+            }
+            if (simulateUpdateFailure && (extensionChanged || nativeChanged))
+            {
+                throw new InvalidOperationException("Simulated failure after candidate activation.");
+            }
+
+            VerifyInstalledLayout(
+                extensionRoot,
+                nativeRoot,
+                extensionId,
+                versionName
+            );
+            InstallNativeManifest(
+                nativeRoot,
+                installedNativeHost,
+                extensionId,
+                registerNativeHost
+            );
+            CopyOptionalFiles(packageRoot, productRoot);
+            WriteInstallState(
+                productRoot,
+                extensionRoot,
+                extensionId,
+                versionName,
+                Directory.Exists(rollbackRoot) ? rollbackRoot : previousRollbackPath
+            );
+            committed = true;
+        }
+        catch (Exception updateError)
+        {
+            Exception rollbackError = null;
+            try
+            {
+                if (extensionActivated && Directory.Exists(extensionRoot))
+                {
+                    DeleteDirectoryInside(productRoot, extensionRoot);
+                }
+                if (nativeActivated && Directory.Exists(nativeRoot))
+                {
+                    DeleteDirectoryInside(productRoot, nativeRoot);
+                }
+                if (previousExtensionBackedUp && Directory.Exists(rollbackExtension))
+                {
+                    Directory.Move(rollbackExtension, extensionRoot);
+                }
+                if (previousNativeBackedUp && Directory.Exists(rollbackNative))
+                {
+                    Directory.Move(rollbackNative, nativeRoot);
+                }
+                if (previousStateBackedUp && File.Exists(rollbackInstallState))
+                {
+                    File.Copy(rollbackInstallState, installStatePath, true);
+                }
+                else if (!stateExistedBefore && File.Exists(installStatePath))
+                {
+                    File.Delete(installStatePath);
+                }
+            }
+            catch (Exception restoreError)
+            {
+                rollbackError = restoreError;
+            }
+
+            if (rollbackError != null)
+            {
+                throw new InvalidOperationException(
+                    "The verified update failed and automatic rollback also failed. Recovery snapshot: " +
+                    rollbackRoot,
+                    new AggregateException(updateError, rollbackError)
+                );
+            }
+            throw new InvalidOperationException(
+                "The verified update failed; the previous installation was restored.",
+                updateError
+            );
+        }
+        finally
+        {
+            if (Directory.Exists(candidateRoot))
+            {
+                DeleteDirectoryInside(productRoot, candidateRoot);
+            }
+            if (!committed && Directory.Exists(rollbackRoot) &&
+                Directory.GetFileSystemEntries(rollbackRoot).Length == 0)
+            {
+                DeleteDirectoryInside(productRoot, rollbackRoot);
+            }
+        }
+    }
+
+    private static void VerifyCandidate(
+        string sourceExtension,
+        string sourceGopeed,
+        string sourceNativeHost,
+        string candidateRoot,
+        string extensionId,
+        string versionName
+    )
+    {
+        string extensionRoot = Path.Combine(candidateRoot, "Extension");
+        string nativeRoot = Path.Combine(candidateRoot, "NativeHost");
+        string gopeedRoot = Path.Combine(nativeRoot, "Gopeed");
+        RequireFile(Path.Combine(extensionRoot, "manifest.json"));
+        RequireFile(Path.Combine(extensionRoot, "background.js"));
+        RequireFile(Path.Combine(extensionRoot, "content.js"));
+        RequireFile(Path.Combine(extensionRoot, "core.js"));
+        RequireFile(Path.Combine(extensionRoot, "gopeed.js"));
+        RequireFile(Path.Combine(extensionRoot, "queue.js"));
+        RequireFile(Path.Combine(extensionRoot, "popup.html"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "popo-runtime.js"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "popup.js"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
+        RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
+        RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
+        RequireFile(Path.Combine(gopeedRoot, "gopeed.exe"));
+        RequireFile(Path.Combine(gopeedRoot, "libgopeed.dll"));
+        RequireFile(Path.Combine(gopeedRoot, ".popo-bundle-version"));
+
+        if (!DirectoriesMatch(sourceExtension, extensionRoot))
+        {
+            throw new InvalidDataException("Candidate extension does not match its package source.");
+        }
+        if (!DirectoriesMatch(sourceGopeed, gopeedRoot))
+        {
+            throw new InvalidDataException("Candidate Gopeed payload does not match its package source.");
+        }
+        if (!FilesMatch(sourceNativeHost, Path.Combine(nativeRoot, "PopoFolderPickerHost.exe")))
+        {
+            throw new InvalidDataException("Candidate native host does not match its package source.");
+        }
+        VerifyExtensionManifest(extensionRoot, extensionId, versionName);
+    }
+
+    private static void VerifyInstalledLayout(
+        string extensionRoot,
+        string nativeRoot,
+        string extensionId,
+        string versionName
+    )
+    {
+        VerifyExtensionManifest(extensionRoot, extensionId, versionName);
+        RequireFile(Path.Combine(extensionRoot, "background.js"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "popo-runtime.js"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "popup.js"));
+        RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
+        RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
+        RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
+        RequireFile(Path.Combine(nativeRoot, "Gopeed", "gopeed.exe"));
+        RequireFile(Path.Combine(nativeRoot, "Gopeed", "libgopeed.dll"));
+    }
+
+    private static void VerifyExtensionManifest(
+        string extensionRoot,
+        string extensionId,
+        string versionName
+    )
+    {
+        string manifestPath = Path.Combine(extensionRoot, "manifest.json");
+        RequireFile(manifestPath);
+        Dictionary<string, object> manifest = Json.Deserialize<Dictionary<string, object>>(
+            File.ReadAllText(manifestPath, Encoding.UTF8)
+        );
+        string actualId = ComputeExtensionId(GetString(manifest, "key"));
+        if (!String.Equals(actualId, extensionId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Candidate extension identity changed.");
+        }
+        if (!String.Equals(GetString(manifest, "version_name"), versionName, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Candidate extension version does not match the package.");
+        }
+    }
+
+    private static void VerifyInstalledExtensionIdentity(string extensionRoot, string extensionId)
+    {
+        string manifestPath = Path.Combine(extensionRoot, "manifest.json");
+        if (!File.Exists(manifestPath)) return;
+        Dictionary<string, object> manifest = Json.Deserialize<Dictionary<string, object>>(
+            File.ReadAllText(manifestPath, Encoding.UTF8)
+        );
+        string installedId = ComputeExtensionId(GetString(manifest, "key"));
+        if (!String.Equals(installedId, extensionId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The installed extension uses a different identity; refusing to replace it."
+            );
+        }
+    }
+
+    private static bool DirectoriesMatch(string leftRoot, string rightRoot)
+    {
+        return DirectoriesMatchExcluding(leftRoot, rightRoot, "");
+    }
+
+    private static bool DirectoriesMatchExcluding(
+        string leftRoot,
+        string rightRoot,
+        string excludedRelativeRoot
+    )
+    {
+        if (!Directory.Exists(leftRoot) || !Directory.Exists(rightRoot)) return false;
+        string[] leftFiles = RelativeFiles(leftRoot, excludedRelativeRoot);
+        string[] rightFiles = RelativeFiles(rightRoot, excludedRelativeRoot);
+        if (leftFiles.Length != rightFiles.Length) return false;
+        for (int index = 0; index < leftFiles.Length; index++)
+        {
+            if (!String.Equals(leftFiles[index], rightFiles[index], StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            if (!FilesMatch(
+                Path.Combine(leftRoot, leftFiles[index]),
+                Path.Combine(rightRoot, rightFiles[index])
+            ))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool PackagedDirectoryMatches(
+        string packageRoot,
+        string installedRoot,
+        string excludedRelativeRoot
+    )
+    {
+        if (!Directory.Exists(packageRoot) || !Directory.Exists(installedRoot)) return false;
+        string[] packageFiles = RelativeFiles(packageRoot, excludedRelativeRoot);
+        foreach (string relative in packageFiles)
+        {
+            if (!FilesMatch(
+                Path.Combine(packageRoot, relative),
+                Path.Combine(installedRoot, relative)
+            ))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static string[] RelativeFiles(string root)
+    {
+        return RelativeFiles(root, "");
+    }
+
+    private static string[] RelativeFiles(string root, string excludedRelativeRoot)
+    {
+        string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+        string excluded = (excludedRelativeRoot ?? "")
+            .Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        List<string> files = new List<string>();
+        foreach (string file in Directory.GetFiles(fullRoot, "*", SearchOption.AllDirectories))
+        {
+            string relative = file.Substring(fullRoot.Length)
+                .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!String.IsNullOrEmpty(excluded) &&
+                (String.Equals(relative, excluded, StringComparison.OrdinalIgnoreCase) ||
+                 relative.StartsWith(
+                     excluded + Path.DirectorySeparatorChar,
+                     StringComparison.OrdinalIgnoreCase
+                 )))
+            {
+                continue;
+            }
+            files.Add(relative);
+        }
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+        return files.ToArray();
+    }
+
+    private static bool FilesMatch(string left, string right)
+    {
+        if (!File.Exists(left) || !File.Exists(right)) return false;
+        FileInfo leftInfo = new FileInfo(left);
+        FileInfo rightInfo = new FileInfo(right);
+        if (leftInfo.Length != rightInfo.Length) return false;
+        byte[] leftHash;
+        byte[] rightHash;
+        using (SHA256 sha256 = SHA256.Create())
+        using (FileStream stream = File.OpenRead(left))
+        {
+            leftHash = sha256.ComputeHash(stream);
+        }
+        using (SHA256 sha256 = SHA256.Create())
+        using (FileStream stream = File.OpenRead(right))
+        {
+            rightHash = sha256.ComputeHash(stream);
+        }
+        if (leftHash.Length != rightHash.Length) return false;
+        for (int index = 0; index < leftHash.Length; index++)
+        {
+            if (leftHash[index] != rightHash[index]) return false;
+        }
+        return true;
+    }
+
+    private static void ValidateProductRoot(string productRoot)
+    {
+        string fullRoot = Path.GetFullPath(productRoot).TrimEnd(Path.DirectorySeparatorChar);
+        string driveRoot = Path.GetPathRoot(fullRoot).TrimEnd(Path.DirectorySeparatorChar);
+        if (String.IsNullOrWhiteSpace(fullRoot) ||
+            String.Equals(fullRoot, driveRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The install root must not be a drive root.");
+        }
+    }
+
+    private static void DeleteDirectoryInside(string productRoot, string target)
+    {
+        string fullRoot = Path.GetFullPath(productRoot).TrimEnd(Path.DirectorySeparatorChar);
+        string fullTarget = Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar);
+        if (!fullTarget.StartsWith(
+            fullRoot + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase
+        ))
+        {
+            throw new InvalidOperationException("Refusing to delete a directory outside the install root.");
+        }
+        Directory.Delete(fullTarget, true);
+    }
+
     private static void InstallNativeManifest(
         string nativeRoot,
         string installedNativeHost,
@@ -189,40 +655,6 @@ internal static class PopoSetup
             if (key == null) throw new InvalidOperationException("Cannot register the Chrome helper.");
             key.SetValue("", manifestPath, RegistryValueKind.String);
         }
-    }
-
-    private static void InstallGopeed(string source, string target, string nativeRoot)
-    {
-        string sourceMarker = Path.Combine(source, ".popo-bundle-version");
-        string targetMarker = Path.Combine(target, ".popo-bundle-version");
-        bool sameBundle = File.Exists(sourceMarker) &&
-            File.Exists(targetMarker) &&
-            File.Exists(Path.Combine(target, "gopeed.exe")) &&
-            File.Exists(Path.Combine(target, "libgopeed.dll")) &&
-            String.Equals(
-                File.ReadAllText(sourceMarker).Trim(),
-                File.ReadAllText(targetMarker).Trim(),
-                StringComparison.Ordinal
-            );
-        if (sameBundle) return;
-        if (IsProcessRunningAt(Path.Combine(target, "gopeed.exe")))
-        {
-            throw new InvalidOperationException(
-                "内置 Gopeed 正在运行。请先从系统托盘退出 Gopeed，再重新运行安装助手。"
-            );
-        }
-        string fullTarget = Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar);
-        string fullNativeRoot = Path.GetFullPath(nativeRoot).TrimEnd(Path.DirectorySeparatorChar);
-        if (!fullTarget.StartsWith(
-            fullNativeRoot + Path.DirectorySeparatorChar,
-            StringComparison.OrdinalIgnoreCase
-        ))
-        {
-            throw new InvalidOperationException("Refusing to replace an unsafe Gopeed directory.");
-        }
-        if (Directory.Exists(fullTarget)) Directory.Delete(fullTarget, true);
-        Directory.CreateDirectory(fullTarget);
-        CopyDirectory(source, fullTarget);
     }
 
     private static bool IsProcessRunningAt(string expectedPath)
@@ -275,20 +707,41 @@ internal static class PopoSetup
         string productRoot,
         string extensionRoot,
         string extensionId,
-        string versionName
+        string versionName,
+        string rollbackPath
     )
     {
         Dictionary<string, object> state = new Dictionary<string, object> {
             { "version", versionName },
             { "extensionId", extensionId },
             { "extensionPath", extensionRoot },
-            { "installedAt", DateTimeOffset.Now.ToString("o") }
+            { "installedAt", DateTimeOffset.Now.ToString("o") },
+            { "updateMode", "verified-candidate" },
+            { "rollbackPath", rollbackPath },
+            { "verifiedAt", DateTimeOffset.Now.ToString("o") }
         };
         File.WriteAllText(
             Path.Combine(productRoot, "install-state.json"),
             Json.Serialize(state),
             new UTF8Encoding(false)
         );
+    }
+
+    private static string ReadExistingRollbackPath(string installStatePath)
+    {
+        if (!File.Exists(installStatePath)) return "";
+        try
+        {
+            Dictionary<string, object> state = Json.Deserialize<Dictionary<string, object>>(
+                File.ReadAllText(installStatePath, Encoding.UTF8)
+            );
+            string rollbackPath = GetString(state, "rollbackPath");
+            return Directory.Exists(rollbackPath) ? Path.GetFullPath(rollbackPath) : "";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private static bool IsKnownByChrome(string extensionId)

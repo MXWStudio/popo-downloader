@@ -18,6 +18,7 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
   const backgroundPath = require.resolve(path.join(__dirname, "..", "background.js"));
   delete require.cache[backgroundPath];
   global.importScripts = (...files) => {
+    if (files.includes("runtime/popo-runtime.js")) global.PopoRuntime = require("../runtime/popo-runtime.cjs");
     if (files.includes("core.js")) global.PopoCore = require("../core.js");
     if (files.includes("gopeed.js")) global.PopoGopeed = require("../gopeed.js");
     if (files.includes("queue.js")) global.PopoQueue = require("../queue.js");
@@ -29,6 +30,7 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
     },
     runtime: {
       onInstalled: eventStub(),
+      onConnect: eventStub(),
       onMessage: eventStub(),
       onStartup: eventStub()
     },
@@ -40,6 +42,7 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
   };
 
   assert.doesNotThrow(() => require(backgroundPath));
+  assert.equal(global.chrome.runtime.onConnect.listeners.length, 1);
   assert.equal(global.chrome.runtime.onMessage.listeners.length, 1);
   assert.equal(global.chrome.tabs.onRemoved.listeners.length, 1);
 
@@ -48,6 +51,65 @@ test("后台状态机可在 Manifest V3 服务工作线程中完成初始化", (
   delete global.PopoCore;
   delete global.PopoGopeed;
   delete global.PopoQueue;
+  delete global.PopoRuntime;
+  delete require.cache[backgroundPath];
+});
+
+test("弹窗连接会通知 POPO 页面收起持续摘要并暂停瞬时提醒", async () => {
+  const backgroundPath = require.resolve(path.join(__dirname, "..", "background.js"));
+  delete require.cache[backgroundPath];
+  const sent = [];
+  const onConnect = eventStub();
+  global.importScripts = (...files) => {
+    if (files.includes("runtime/popo-runtime.js")) global.PopoRuntime = require("../runtime/popo-runtime.cjs");
+    if (files.includes("core.js")) global.PopoCore = require("../core.js");
+    if (files.includes("gopeed.js")) global.PopoGopeed = require("../gopeed.js");
+    if (files.includes("queue.js")) global.PopoQueue = require("../queue.js");
+  };
+  global.chrome = {
+    alarms: { create() {}, onAlarm: eventStub() },
+    runtime: {
+      onInstalled: eventStub(),
+      onConnect,
+      onMessage: eventStub(),
+      onStartup: eventStub()
+    },
+    storage: { local: {} },
+    tabs: {
+      async query() {
+        return [{
+          id: 7,
+          url: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1"
+        }];
+      },
+      async sendMessage(tabId, message, options) {
+        sent.push({ tabId, message, options });
+      },
+      onRemoved: eventStub(),
+      onUpdated: eventStub()
+    }
+  };
+
+  require(backgroundPath);
+  const onDisconnect = eventStub();
+  onConnect.listeners[0]({ name: "popo-popup-ui", onDisconnect });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1), {
+    tabId: 7,
+    message: { type: "POPUP_VISIBILITY_CHANGED", open: true },
+    options: { frameId: 0 }
+  });
+
+  onDisconnect.listeners[0]();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.at(-1).message.open, false);
+
+  delete global.chrome;
+  delete global.importScripts;
+  delete global.PopoCore;
+  delete global.PopoGopeed;
+  delete global.PopoQueue;
+  delete global.PopoRuntime;
   delete require.cache[backgroundPath];
 });
 
@@ -60,6 +122,7 @@ test("固定端口不可用时自动启动内置 Gopeed 并保存发现的端口
   const actualGopeed = require("../gopeed.js");
 
   global.importScripts = (...files) => {
+    if (files.includes("runtime/popo-runtime.js")) global.PopoRuntime = require("../runtime/popo-runtime.cjs");
     if (files.includes("core.js")) global.PopoCore = require("../core.js");
     if (files.includes("gopeed.js")) {
       global.PopoGopeed = {
@@ -121,5 +184,6 @@ test("固定端口不可用时自动启动内置 Gopeed 并保存发现的端口
   delete global.PopoCore;
   delete global.PopoGopeed;
   delete global.PopoQueue;
+  delete global.PopoRuntime;
   delete require.cache[backgroundPath];
 });

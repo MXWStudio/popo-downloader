@@ -10,8 +10,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.0.8");
-  assert.equal(manifest.version_name, "0.7.0-beta.8");
+  assert.equal(manifest.version, "0.7.0.11");
+  assert.equal(manifest.version_name, "0.7.0-beta.11");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";
   const extensionId = [...digest.subarray(0, 16)]
@@ -32,14 +32,17 @@ test("Manifest V3 仅申请任务所需权限", () => {
   );
 });
 
-test("页面接口桥运行在主世界，控制逻辑运行在隔离世界", () => {
-  assert.equal(manifest.content_scripts.length, 2);
+test("页面接口桥、全框架工作脚本和顶层 React 界面分层运行", () => {
+  assert.equal(manifest.content_scripts.length, 3);
   assert.equal(manifest.content_scripts[0].world, "MAIN");
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.equal(manifest.content_scripts[0].js[0], "page-api.js");
   assert.equal(manifest.content_scripts[1].world, undefined);
   assert.equal(manifest.content_scripts[1].all_frames, true);
   assert.deepEqual(manifest.content_scripts[1].js, ["core.js", "queue.js", "content.js"]);
+  assert.equal(manifest.content_scripts[2].world, undefined);
+  assert.equal(manifest.content_scripts[2].all_frames, false);
+  assert.deepEqual(manifest.content_scripts[2].js, ["runtime/page-ui.js"]);
 });
 
 test("扩展运行时不包含 Playwright", () => {
@@ -50,7 +53,8 @@ test("扩展运行时不包含 Playwright", () => {
     "gopeed.js",
     "queue.js",
     "page-api.js",
-    "popup.js"
+    "runtime/popup.js",
+    "runtime/page-ui.js"
   ];
   for (const file of runtimeFiles) {
     const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
@@ -58,30 +62,38 @@ test("扩展运行时不包含 Playwright", () => {
   }
 });
 
-test("文件夹行按钮、项目总数和直接入队逻辑存在于内容脚本", () => {
+test("React 页面根接管项目数、文件夹按钮、任务条和通知", () => {
   const content = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
-  assert.match(content, /popo-stable-download-button/);
-  assert.match(content, /稳定下载此文件夹/);
-  assert.match(content, /popo-stable-project-count/);
-  assert.match(content, /所有类型/);
-  assert.match(content, /margin-right: auto/);
-  assert.match(content, /placement\.leftControl\.nextSibling/);
-  assert.match(content, /inferVirtualListItemCount/);
-  assert.match(content, /\$\{count\} 个项目/);
-  assert.match(content, /START_FOLDER_SCAN/);
-  assert.doesNotMatch(content, /CONFIRM_FOLDER_DOWNLOAD|SHOW_FOLDER_CONFIRMATION|确认下载/);
+  const pageUi = fs.readFileSync(path.join(__dirname, "..", "src", "page-ui.tsx"), "utf8");
+  assert.match(pageUi, /function PageEnhancerApp/);
+  assert.match(pageUi, /createPortal/);
+  assert.match(pageUi, /ProjectCount/);
+  assert.match(pageUi, /FolderDownloadButton/);
+  assert.match(pageUi, /QueueDock/);
+  assert.match(pageUi, /ToastViewport/);
+  assert.match(pageUi, /POPUP_VISIBILITY_CHANGED/);
+  assert.match(pageUi, /popupOpen \? false : expanded/);
+  assert.match(pageUi, /popupOpen \? \[\] : toasts/);
+  assert.match(pageUi, /observeLegacyUi/);
+  assert.match(pageUi, /nextServiceNotice/);
+  assert.match(pageUi, /popo-stable-download-button/);
+  assert.match(pageUi, /稳定下载此文件夹/);
+  assert.match(pageUi, /popo-stable-project-count/);
+  assert.match(pageUi, /所有类型/);
+  assert.match(pageUi, /inferVirtualListItemCount/);
+  assert.match(pageUi, /count \+ " 个项目"/);
+  assert.match(pageUi, /START_FOLDER_SCAN/);
+  assert.doesNotMatch(pageUi, /CONFIRM_FOLDER_DOWNLOAD|SHOW_FOLDER_CONFIRMATION|确认下载/);
   assert.match(content, /popo-stable-download-worker-frame/);
   assert.match(content, /REGISTER_WORKER_FRAME/);
-  assert.match(content, /popo-stable-download-queue/);
-  assert.match(content, /CANCEL_JOB/);
-  assert.match(content, /已添加下载，排队中/);
   assert.match(content, /SOURCE_PAGE_READY/);
   assert.match(content, /needsWorkerRecovery/);
-  assert.match(content, /data-collapsed/);
-  assert.match(content, /popo-queue-toggle/);
-  assert.match(content, /popo-queue-progress/);
-  assert.match(content, /正在添加下载/);
-  assert.doesNotMatch(content, /下载多个文件/);
+  assert.match(content, /popo-stable-download:ensure-worker/);
+  const topFrameBoot = content.match(
+    /if \(IS_TOP_FRAME\) \{[\s\S]+?(?=\n  \} else \{)/
+  )?.[0] || "";
+  assert.doesNotMatch(topFrameBoot, /startFolderButtonObserver/);
+  assert.match(topFrameBoot, /startQueueStatePolling/);
   assert.match(content, /folderItemIndex/);
   assert.match(content, /img\[src\*="s3v2-drive-"\]/);
   assert.match(content, /RESOLVE_TEAM_SPACE_ID/);
@@ -94,56 +106,66 @@ test("文件夹行按钮、项目总数和直接入队逻辑存在于内容脚�
   assert.doesNotMatch(content, /case "CLICK_DOWNLOAD"/);
 });
 
-test("队列按钮同步不会触发虚拟列表 DOM 监听死循环", () => {
-  const content = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
-  const applyQueueState = content.match(
-    /function applyQueueStateToButton[\s\S]+?(?=\n  function syncFolderButtonsWithQueue)/
-  )?.[0] || "";
-
-  assert.match(applyQueueState, /setTextIfChanged\(button/);
-  assert.doesNotMatch(applyQueueState, /button\.textContent\s*=/);
-  assert.match(content, /function mutationNeedsFolderButtonInstall/);
-  assert.match(
-    content,
-    /mutations\.some\(mutationNeedsFolderButtonInstall\)/
-  );
-  assert.doesNotMatch(
-    content,
-    /new MutationObserver\(scheduleFolderButtonInstall\)/
-  );
-  const renderQueuePanel = content.match(
-    /function renderQueuePanel[\s\S]+?(?=\n  async function refreshQueueState)/
-  )?.[0] || "";
-  assert.match(renderQueuePanel, /panel\.hidden = liveJobs\.length === 0/);
-  assert.doesNotMatch(renderQueuePanel, /recentTerminal/);
+test("页面只创建一个 React 根且 Portal 监听不会形成 DOM 死循环", () => {
+  const pageUi = fs.readFileSync(path.join(__dirname, "..", "src", "page-ui.tsx"), "utf8");
+  assert.equal((pageUi.match(/createRoot\(/g) || []).length, 1);
+  assert.match(pageUi, /createPortal/);
+  assert.match(pageUi, /function mutationNeedsReconcile/);
+  assert.match(pageUi, /popoReactOwned/);
+  assert.match(pageUi, /mutations\.some\(mutationNeedsReconcile\)/);
+  assert.match(pageUi, /new MutationObserver/);
+  assert.match(pageUi, /继续（/);
+  assert.match(pageUi, /DISMISS_JOB/);
+  assert.match(pageUi, /确认移除/);
+  assert.match(pageUi, /只从列表移除，不会删除已下载文件/);
+  assert.doesNotMatch(pageUi, /window\.confirm/);
+  assert.doesNotMatch(pageUi, /恢复未开始文件|隐藏工作区|连接下载引擎/);
 });
 
-test("弹窗已移除全局扫描和筛选设置", () => {
+test("弹窗只展示普通用户需要的任务和保存位置", () => {
   const popup = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
-  const popupScript = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
+  const popupScript = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
   assert.doesNotMatch(popup, /扫描当前文件夹|文件格式|包含关键词|导出 CSV|导出 JSON|清空任务/);
-  assert.match(popup, /点击文件夹右侧、三个点左边的蓝色下载按钮/);
-  assert.match(popup, /Gopeed 下载引擎/);
-  assert.match(popup, /保存根目录/);
-  assert.match(popup, /gopeedDownloadDirOverride/);
-  assert.match(popup, /chooseDownloadDirectoryButton/);
-  assert.match(popup, /clearDownloadDirectoryButton/);
-  assert.doesNotMatch(popup, /id="gopeedDownloadDirOverride"[^>]*type="text"/);
-  assert.doesNotMatch(popup, /下载多个文件/);
+  assert.match(popup, /id="popup-root"/);
+  assert.match(popup, /runtime\/popup\.js/);
+  assert.doesNotMatch(popup, /src="popup\.js"/);
+  assert.match(popupScript, /在 POPO 中，点击文件夹旁的蓝色下载按钮/);
+  assert.match(popupScript, /下载服务/);
+  assert.match(popupScript, /popo-popup-ui/);
+  assert.match(popupScript, /engine-alert/);
+  assert.match(popupScript, /engine-settings/);
+  assert.match(popupScript, /job\.status !== "queued"/);
+  assert.match(popupScript, /保存位置/);
+  assert.match(popupScript, /默认下载文件夹/);
+  assert.match(popupScript, /gopeedDownloadDirOverride/);
+  assert.match(popupScript, /chooseDownloadDirectoryButton/);
+  assert.match(popupScript, /clearDownloadDirectoryButton/);
+  assert.doesNotMatch(popupScript, /下载多个文件|Gopeed 下载引擎|绿色安装版|并发设置/);
+  assert.doesNotMatch(popupScript, /下载服务运行正常/);
   assert.doesNotMatch(popupScript, /recentTerminal/);
-  assert.match(popupScript, /clearRecoveredRefreshError/);
+  assert.doesNotMatch(popupScript, /phaseLabels|failurePreview|failureItems|当前层|递归已发现/);
+  assert.match(popupScript, /继续（/);
+  assert.match(popupScript, /DISMISS_JOB/);
+  assert.match(popupScript, /确认移除/);
+  assert.match(popupScript, /返回/);
+  assert.match(popupScript, /只从列表移除，不会删除已下载文件/);
+  assert.doesNotMatch(popupScript, /window\.confirm/);
+  assert.match(popupScript, /current\?\.transient \? null : current/);
 });
 
 test("POPO Logo 在弹窗和网页按钮中支持明暗主题", () => {
   const popup = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
+  const popupSource = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
   const popupCss = fs.readFileSync(path.join(__dirname, "..", "popup.css"), "utf8");
-  const content = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
+  const pageUi = fs.readFileSync(path.join(__dirname, "..", "src", "page-ui.tsx"), "utf8");
   const logo = fs.readFileSync(path.join(__dirname, "..", "assets", "popo-logo.svg"), "utf8");
 
-  assert.match(popup, /class="brand-logo"[^>]+assets\/popo-logo\.svg/);
+  assert.match(popup, /runtime\/popup\.js/);
+  assert.match(popupSource, /className="brand-logo"/);
+  assert.match(popupSource, /assets\/popo-logo\.svg/);
   assert.match(popupCss, /@media \(prefers-color-scheme: dark\)/);
-  assert.match(content, /chrome\.runtime\.getURL\("assets\/popo-logo\.svg"\)/);
-  assert.match(content, /data-theme="dark"/);
+  assert.match(pageUi, /chrome\.runtime\.getURL\("assets\/popo-logo\.svg"\)/);
+  assert.match(pageUi, /data-theme='dark'/);
   assert.match(logo, /@media \(prefers-color-scheme: dark\)/);
   assert.deepEqual(manifest.icons, {
     16: "assets/popo-logo-16.png",
@@ -201,10 +223,16 @@ test("下载由 Gopeed 统一管理并固定任务并发 5", () => {
 });
 
 test("弹窗为每个任务显示文件进度条", () => {
-  const popup = fs.readFileSync(path.join(__dirname, "..", "popup.js"), "utf8");
+  const popup = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
+  const popupHtml = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
   const popupCss = fs.readFileSync(path.join(__dirname, "..", "popup.css"), "utf8");
-  assert.match(popup, /function jobProgress/);
+  assert.match(popup, /jobProgress/);
   assert.match(popup, /popup-job-progress/);
+  assert.match(popup, /job\.status !== "queued"/);
   assert.match(popup, /aria-valuenow/);
+  assert.match(popup, /chrome\.runtime\.getManifest\(\)/);
+  assert.match(popup, /id="versionInfo"/);
+  assert.match(popupHtml, /id="popup-root"/);
+  assert.doesNotMatch(popupHtml, /版本 0\.7\.0-beta\.6/);
   assert.match(popupCss, /\.popup-job-progress/);
 });

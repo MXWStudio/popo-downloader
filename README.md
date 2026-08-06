@@ -65,6 +65,13 @@ npm run build:test-package
 
 ## 本地重新加载
 
+首次检出代码或依赖发生变化后，先生成扩展运行文件：
+
+```powershell
+npm ci
+npm run build:runtime
+```
+
 修改代码后打开 `chrome://extensions/`，找到“POPO 稳定下载助手”，点击重新加载。
 
 ## 验证命令
@@ -72,6 +79,15 @@ npm run build:test-package
 ```powershell
 npm test
 npm run check
+npm run test:e2e
+npm run check:full
 ```
 
-Playwright 仅用于自动化验收，不参与扩展运行。
+`check:full` 会依次执行 TypeScript/Zod/XState/Gopeed SDK 契约测试、IndexedDB 万级任务测试、MSW 断网恢复测试、安装器回滚测试和 Playwright 临时浏览器恢复测试。Playwright 与 MSW 仅用于自动化验收，不参与扩展运行。
+
+## 稳定性基础设施
+
+- P0：使用 Gopeed 官方 SDK 处理任务接口，Zod 校验命令和返回数据，XState 约束扫描、下载、暂停、恢复和结束状态迁移。
+- P1：使用 IndexedDB + idb 保存大任务文件明细；Playwright + MSW 验证刷新、浏览器重启和 Gopeed 断网恢复；绿色安装器采用 Velopack 的候选版本校验与失败回滚模式。
+- 用户可见界面统一由 React + TypeScript 渲染：右上弹窗负责完整管理，左下任务条只保留持续摘要，右下仅提示完成、失败和服务断开等一次性事件。
+- POPO 是 Chrome 扩展而不是常驻桌面应用，因此没有直接嵌入 Velopack 运行库；安装器保留固定的 `Extension` 路径，并实现相同的“完整候选目录 → 校验 → 切换 → 失败恢复旧目录”事务语义。

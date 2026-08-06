@@ -1,11 +1,33 @@
 {
   "name": "popo-stable-downloader",
-  "version": "0.7.0-beta.8",
+  "version": "0.7.0-beta.11",
   "private": true,
   "description": "POPO 稳定下载助手 Chrome 扩展",
   "scripts": {
-    "check": "node --check background.js && node --check content.js && node --check page-api.js && node --check popup.js && node --check core.js && node --check gopeed.js && node --check queue.js",
-    "test": "node --test tests/*.test.js",
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run build:runtime && npm run typecheck && node --check runtime/popo-runtime.js && node --check runtime/popup.js && node --check runtime/page-ui.js && node --check background.js && node --check content.js && node --check page-api.js && node --check core.js && node --check gopeed.js && node --check queue.js",
+    "test": "npm run build:runtime && node --test tests/*.test.js",
+    "test:e2e": "npm run build:runtime && playwright test",
+    "check:full": "npm run check && npm test && npm run test:e2e",
     "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1"
+  },
+  "dependencies": {
+    "@gopeed/rest": "1.7.0",
+    "idb": "8.0.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "xstate": "5.32.5",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/chrome": "0.2.5",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "esbuild": "0.28.1",
+    "fake-indexeddb": "6.2.4",
+    "msw": "2.15.0",
+    "typescript": "7.0.2"
   }
 }

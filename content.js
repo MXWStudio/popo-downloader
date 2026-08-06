@@ -16,6 +16,7 @@
   const STATUS_ID = "popo-stable-download-status";
   const QUEUE_PANEL_ID = "popo-stable-download-queue";
   const WORKER_FRAME_ID = "popo-stable-download-worker-frame";
+  const ENSURE_WORKER_EVENT = "popo-stable-download:ensure-worker";
   const EXTENSION_NODE_SELECTOR = [
     `#${STYLE_ID}`,
     `#${PROJECT_COUNT_ID}`,
@@ -396,20 +397,47 @@
       #${QUEUE_PANEL_ID} .popo-queue-actions {
         display: flex;
         justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 6px;
         margin-top: 7px;
       }
-      #${QUEUE_PANEL_ID} .popo-queue-cancel {
+      #${QUEUE_PANEL_ID} .popo-remove-confirmation {
+        margin-top: 7px;
+        padding: 8px;
+        border: 1px solid #dfe5ec;
+        border-radius: 7px;
+        background: #f7f9fc;
+      }
+      #${QUEUE_PANEL_ID} .popo-remove-note {
+        margin: 0;
+        color: #59697a;
+        font: 500 11px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #${QUEUE_PANEL_ID} .popo-remove-confirmation .popo-queue-actions {
+        margin-top: 6px;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-action {
         min-width: 0;
         height: 26px;
         padding: 0 9px;
-        border: 1px solid #e3a5a5;
+        border: 1px solid #d7dee7;
         border-radius: 6px;
-        color: #a32626;
-        background: #fff7f7;
+        color: #4e5c6d;
+        background: #fff;
         font: 600 11px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
         cursor: pointer;
       }
-      #${QUEUE_PANEL_ID} .popo-queue-cancel:disabled {
+      #${QUEUE_PANEL_ID} .popo-queue-action[data-kind="primary"] {
+        color: #0a4fae;
+        border-color: #b8d2f5;
+        background: #f5f9ff;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-action[data-kind="danger"] {
+        color: #a32626;
+        border-color: #e3a5a5;
+        background: #fff7f7;
+      }
+      #${QUEUE_PANEL_ID} .popo-queue-action:disabled {
         cursor: wait;
         opacity: .6;
       }
@@ -428,7 +456,8 @@
         }
         #${STATUS_ID} span,
         #${QUEUE_PANEL_ID} .popo-queue-header span,
-        #${QUEUE_PANEL_ID} .popo-queue-detail { color: #a4b0c0; }
+        #${QUEUE_PANEL_ID} .popo-queue-detail,
+        #${QUEUE_PANEL_ID} .popo-remove-note { color: #a4b0c0; }
         #${QUEUE_PANEL_ID} .popo-queue-header {
           border-bottom-color: #33404f;
           background: #202a38;
@@ -436,7 +465,21 @@
         #${QUEUE_PANEL_ID} .popo-queue-job { border-bottom-color: #2c3642; }
         #${QUEUE_PANEL_ID} .popo-queue-name { color: #edf3fb; }
         #${QUEUE_PANEL_ID} .popo-queue-state { color: #67aaff; }
-        #${QUEUE_PANEL_ID} .popo-queue-cancel {
+        #${QUEUE_PANEL_ID} .popo-remove-confirmation {
+          border-color: #38485b;
+          background: #202832;
+        }
+        #${QUEUE_PANEL_ID} .popo-queue-action {
+          color: #b6c2d0;
+          border-color: #465365;
+          background: #202832;
+        }
+        #${QUEUE_PANEL_ID} .popo-queue-action[data-kind="primary"] {
+          color: #a8cdff;
+          border-color: #3d5f84;
+          background: #1c3048;
+        }
+        #${QUEUE_PANEL_ID} .popo-queue-action[data-kind="danger"] {
           color: #ffaaaa;
           border-color: #7c4a50;
           background: #382328;
@@ -585,7 +628,11 @@
       document.documentElement.appendChild(status);
     }
     status.querySelector("strong").textContent = folderName || "POPO 稳定下载";
-    status.querySelector("span").textContent = message || "正在准备…";
+    const detail = String(message || "正在准备…");
+    status.querySelector("span").textContent =
+      /隐藏工作区|后台工作区|Gopeed|\bAPI\b|IndexedDB|运行时契约|TCP/i.test(detail)
+        ? "正在准备，请保持 POPO 页面打开。"
+        : detail;
   }
 
   function hideStatus() {
@@ -593,42 +640,56 @@
   }
 
   const queueStatusLabels = {
-    queued: "排队中",
+    queued: "等待",
     waiting_worker: "准备中",
-    scanning: "统计中",
-    awaiting_confirmation: "准备自动下载",
-    starting: "连接下载引擎",
+    scanning: "查找文件",
+    awaiting_confirmation: "准备中",
+    starting: "准备中",
     downloading: "下载中",
     paused: "已暂停",
-    draining: "取消剩余，完成已开始文件",
-    draining_paused: "取消剩余，已开始文件暂停",
+    draining: "正在停止",
+    draining_paused: "已暂停",
     complete: "已完成",
-    cancelled: "已取消",
-    failed: "任务失败"
+    cancelled: "已停止",
+    failed: "未完成"
   };
 
   function queueJobDetail(job) {
     const counts = job.counts || {};
-    const currentLevel = Number.isInteger(job.projectCount)
-      ? `当前层 ${job.projectCount} 个项目 · `
-      : "";
     if (job.status === "queued") {
-      return job.queuePosition ? `排队第 ${job.queuePosition} 位 · 等待统计项目数量` : "等待统计项目数量";
+      return job.queuePosition > 1 ? `前面还有 ${job.queuePosition - 1} 个任务` : "等待开始";
     }
     if (["waiting_worker", "scanning"].includes(job.status)) {
-      return `${currentLevel}递归已发现 ${counts.discoveredFiles || 0} 个文件 · ${counts.folders || 0} 个文件夹`;
+      return `已找到 ${counts.discoveredFiles || 0} 个文件`;
     }
-    const finished = (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
+    const success = Number(counts.success) || 0;
+    const failed = Number(counts.failed) || 0;
+    const cancelled = Number(counts.cancelled) || 0;
     const total = Number(counts.files) || 0;
-    const percent = total ? Math.max(0, Math.min(100, Math.round(finished * 100 / total))) : 0;
-    return `${currentLevel}递归可下载 ${total} 个文件 · ${counts.folders || 0} 个文件夹 · 已处理 ${finished} / ${total}（${percent}%）`;
+    if (job.status === "cancelled") {
+      return cancelled ? `已完成 ${success} 个 · ${cancelled} 个可继续` : `已完成 ${success} 个`;
+    }
+    if (job.status === "failed") {
+      return failed ? `已完成 ${success} 个 · ${failed} 个未完成` : "未能开始，请稍后重试";
+    }
+    if (!total) return "正在准备文件";
+    const paused = ["paused", "draining_paused"].includes(job.status) ? "已暂停 · " : "";
+    return `${paused}已完成 ${success} / ${total}`;
+  }
+
+  function queueUserFacingError(error) {
+    const detail = String(error?.message || error || "").replace(/^Error:\s*/, "");
+    if (/请先打开|POPO 页面|页面已关闭/.test(detail)) return "请先打开 POPO 页面，再试一次。";
+    if (/已经不在列表|没有可恢复|任务.*进行/.test(detail)) return detail;
+    console.warn("下载任务操作失败", error);
+    return "操作没有完成，请稍后重试。";
   }
 
   function queueJobProgress(job) {
     if (["queued", "waiting_worker", "scanning"].includes(job.status)) return null;
     const counts = job.counts || {};
     const total = Number(counts.files) || 0;
-    if (!total) return null;
+    if (!total) return ["complete", "cancelled", "failed"].includes(job.status) ? 0 : null;
     const finished = (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
     return Math.max(0, Math.min(100, Math.round(finished * 100 / total)));
   }
@@ -673,15 +734,25 @@
     const panel = ensureQueuePanel();
     const jobs = state.jobs || [];
     const liveJobs = jobs.filter((job) => isJobActive(job.status));
-    panel.hidden = liveJobs.length === 0;
-    if (!liveJobs.length) return;
+    const recoverableJobs = jobs.filter((job) => job.status === "cancelled" &&
+      ((job.cancelledRetryKeys?.length || 0) > 0 || (job.counts?.cancelled || 0) > 0));
+    const visibleJobs = [...liveJobs, ...recoverableJobs];
+    panel.hidden = visibleJobs.length === 0;
+    if (!visibleJobs.length) return;
 
     const queuedCount = liveJobs.filter((job) => job.status === "queued").length;
     const runningCount = liveJobs.length - queuedCount;
-    panel.querySelector(".popo-queue-header span").textContent =
-      `${liveJobs.length} 个进行中 · ${runningCount} 个处理 · ${queuedCount} 个排队`;
+    panel.querySelector(".popo-queue-header span").textContent = recoverableJobs.length && liveJobs.length
+      ? `${liveJobs.length} 个进行中 · ${recoverableJobs.length} 个可继续`
+      : recoverableJobs.length
+        ? `${recoverableJobs.length} 个可继续`
+        : runningCount && queuedCount
+          ? `${runningCount} 个进行中 · ${queuedCount} 个等待`
+          : runningCount
+            ? `${runningCount} 个进行中`
+            : `${queuedCount} 个等待`;
     const list = panel.querySelector(".popo-queue-list");
-    list.replaceChildren(...liveJobs.map((job) => {
+    list.replaceChildren(...visibleJobs.map((job) => {
       const card = document.createElement("section");
       card.className = "popo-queue-job";
       card.dataset.jobId = job.id;
@@ -689,7 +760,7 @@
       titleRow.className = "popo-queue-title-row";
       const name = document.createElement("span");
       name.className = "popo-queue-name";
-      name.textContent = job.displayName || job.folderName || "未命名文件夹";
+      name.textContent = job.folderName || job.displayName || "未命名文件夹";
       name.title = name.textContent;
       const status = document.createElement("span");
       status.className = "popo-queue-state";
@@ -718,28 +789,107 @@
       progress.appendChild(progressValue);
       card.appendChild(progress);
 
+      const actions = document.createElement("div");
+      actions.className = "popo-queue-actions";
       if (isJobActive(job.status) && !job.cancelRequested) {
-        const actions = document.createElement("div");
-        actions.className = "popo-queue-actions";
         const cancel = document.createElement("button");
         cancel.type = "button";
-        cancel.className = "popo-queue-cancel";
-        cancel.textContent = "取消未开始文件";
+        cancel.className = "popo-queue-action";
+        cancel.dataset.kind = "danger";
+        cancel.textContent = "停止后续下载";
         cancel.addEventListener("click", async () => {
           cancel.disabled = true;
           try {
             const response = await chrome.runtime.sendMessage({ type: "CANCEL_JOB", jobId: job.id });
-            if (!response?.ok) throw new Error(response?.error || "取消失败");
-            showStatus(job.folderName, "未开始文件已取消；已经开始的下载会保留");
+            if (!response?.ok) throw new Error(response?.error || "操作失败");
+            showStatus(job.folderName, "后续下载已停止，已开始的文件不受影响");
             await refreshQueueState();
           } catch (error) {
             cancel.disabled = false;
-            showStatus(job.folderName, String(error).replace(/^Error:\s*/, ""));
+            showStatus(job.folderName, queueUserFacingError(error));
           }
         });
         actions.appendChild(cancel);
-        card.appendChild(actions);
+      } else if (job.status === "cancelled" &&
+        ((job.cancelledRetryKeys?.length || 0) > 0 || (job.counts?.cancelled || 0) > 0)) {
+        const restore = document.createElement("button");
+        restore.type = "button";
+        restore.className = "popo-queue-action";
+        restore.dataset.kind = "primary";
+        const cancelledCount = job.cancelledRetryKeys?.length || job.counts?.cancelled || 0;
+        restore.textContent = `继续（${cancelledCount}）`;
+        restore.addEventListener("click", async () => {
+          restore.disabled = true;
+          try {
+            const response = await chrome.runtime.sendMessage({
+              type: "RESTORE_CANCELLED_JOB",
+              jobId: job.id
+            });
+            if (!response?.ok) throw new Error(response?.error || "操作失败");
+            showStatus(job.folderName, "正在继续，已完成文件不会重复下载");
+            await refreshQueueState();
+          } catch (error) {
+            restore.disabled = false;
+            showStatus(job.folderName, queueUserFacingError(error));
+          }
+        });
+        actions.appendChild(restore);
       }
+      if (!isJobActive(job.status)) {
+        const dismiss = document.createElement("button");
+        dismiss.type = "button";
+        dismiss.className = "popo-queue-action";
+        dismiss.textContent = "移除";
+        dismiss.addEventListener("click", () => {
+          const confirmation = document.createElement("div");
+          confirmation.className = "popo-remove-confirmation";
+          confirmation.setAttribute("role", "group");
+          confirmation.setAttribute("aria-label", "确认移除任务");
+
+          const note = document.createElement("p");
+          note.className = "popo-remove-note";
+          note.textContent = "只从列表移除，不会删除已下载文件。";
+
+          const confirmationActions = document.createElement("div");
+          confirmationActions.className = "popo-queue-actions";
+          const confirmDismiss = document.createElement("button");
+          confirmDismiss.type = "button";
+          confirmDismiss.className = "popo-queue-action";
+          confirmDismiss.dataset.kind = "danger";
+          confirmDismiss.textContent = "确认移除";
+          const back = document.createElement("button");
+          back.type = "button";
+          back.className = "popo-queue-action";
+          back.textContent = "返回";
+
+          back.addEventListener("click", () => {
+            confirmation.replaceWith(actions);
+          });
+          confirmDismiss.addEventListener("click", async () => {
+            confirmDismiss.disabled = true;
+            back.disabled = true;
+            try {
+              const response = await chrome.runtime.sendMessage({
+                type: "DISMISS_JOB",
+                jobId: job.id
+              });
+              if (!response?.ok) throw new Error(response?.error || "操作失败");
+              showStatus(job.folderName, "任务已移除，已下载文件仍然保留");
+              await refreshQueueState();
+            } catch (error) {
+              confirmDismiss.disabled = false;
+              back.disabled = false;
+              showStatus(job.folderName, queueUserFacingError(error));
+            }
+          });
+
+          confirmationActions.append(confirmDismiss, back);
+          confirmation.append(note, confirmationActions);
+          actions.replaceWith(confirmation);
+        });
+        actions.appendChild(dismiss);
+      }
+      if (actions.childElementCount) card.appendChild(actions);
       return card;
     }));
     syncFolderButtonsWithQueue();
@@ -747,11 +897,9 @@
 
   async function refreshQueueState() {
     if (!IS_TOP_FRAME) return;
-    installProjectCount();
     try {
       const response = await chrome.runtime.sendMessage({ type: "GET_STATE" });
       if (response?.ok) {
-        renderQueuePanel(response.state);
         const state = response.state || {};
         const job = (state.jobs || []).find((candidate) => candidate.id === state.activeJobId);
         const needsWorkerRecovery = job && state.triggerMode === "folder_button" &&
@@ -784,7 +932,6 @@
       if (response.needsWorker) {
         createHiddenWorkerFrame(response.workerUrl || location.href, true);
       }
-      if (response.state) renderQueuePanel(response.state);
     } catch {
       // Extension reloads can briefly interrupt the background connection.
     }
@@ -1268,22 +1415,12 @@
           createHiddenWorkerFrame(message.url || location.href, Boolean(message.force));
           return { ok: true };
         case "FOLDER_TASK_STATUS":
-          showStatus(message.folderName, message.message);
           return { ok: true };
         case "FOLDER_TASK_FINISHED":
-          showStatus(
-            message.folderName,
-            `下载结束：成功 ${message.successCount || 0}，失败 ${message.failedCount || 0}`
-          );
-          resetFolderButtons(message.folderName);
           return { ok: true };
         case "FOLDER_TASK_CANCELLED":
-          hideStatus();
-          resetFolderButtons(message.folderName);
           return { ok: true };
         case "FOLDER_TASK_ERROR":
-          showStatus(message.folderName, message.message || "任务失败");
-          resetFolderButtons(message.folderName);
           return { ok: true };
         default:
           return { ok: false, error: `未知内容脚本命令：${message.type}` };
@@ -1293,7 +1430,10 @@
   });
 
   if (IS_TOP_FRAME) {
-    startFolderButtonObserver();
+    document.addEventListener(ENSURE_WORKER_EVENT, (event) => {
+      const detail = event instanceof CustomEvent ? event.detail : null;
+      createHiddenWorkerFrame(detail?.url || location.href);
+    });
     startQueueStatePolling();
     void restoreSourcePageSession();
   } else {

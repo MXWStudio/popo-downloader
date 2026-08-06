@@ -8,6 +8,12 @@
   const DEFAULT_ENDPOINT = "http://127.0.0.1:9999";
   const ACTIVE_STATUSES = new Set(["ready", "running", "wait"]);
 
+  function officialSdk(options = {}) {
+    if (options.fetchImpl || options.useOfficialSdk === false) return null;
+    const sdk = globalThis.PopoRuntime?.gopeed;
+    return typeof sdk?.isAvailable === "function" && sdk.isAvailable() ? sdk : null;
+  }
+
   class GopeedApiError extends Error {
     constructor(message, options = {}) {
       super(message);
@@ -118,14 +124,42 @@
     return payload.data;
   }
 
-  function buildCreateTaskBody({ url, name, path, connections = 1 }) {
+  function stableTaskIdentityKey(value) {
+    const input = String(value || "").normalize("NFC");
+    if (!input) return "";
+
+    let hash = 0xcbf29ce484222325n;
+    for (const character of input) {
+      hash ^= BigInt(character.codePointAt(0));
+      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return hash.toString(16).padStart(16, "0");
+  }
+
+  function buildTaskIdentityLabels({ jobId, taskIdentity } = {}) {
+    const labels = { popoSchema: "1" };
+    const normalizedJobId = String(jobId || "").trim();
+    const taskKey = stableTaskIdentityKey(taskIdentity);
+    if (normalizedJobId) labels.popoJobId = normalizedJobId.slice(0, 128);
+    if (taskKey) labels.popoTaskKey = taskKey;
+    return labels;
+  }
+
+  function normalizeCreateTaskLabels(labels) {
+    const normalized = { source: "popo-stable-downloader" };
+    for (const key of ["popoSchema", "popoJobId", "popoTaskKey"]) {
+      const value = String(labels?.[key] || "").trim();
+      if (value) normalized[key] = value.slice(0, 128);
+    }
+    return normalized;
+  }
+
+  function buildCreateTaskBody({ url, name, path, connections = 1, labels = {} }) {
     const safeConnections = Math.max(1, Math.min(16, Number(connections) || 1));
     return {
       req: {
         url,
-        labels: {
-          source: "popo-stable-downloader"
-        }
+        labels: normalizeCreateTaskLabels(labels)
       },
       opts: {
         name,
@@ -162,15 +196,109 @@
     return "unknown";
   }
 
+  function normalizeTargetKey(value) {
+    return String(value || "")
+      .replace(/\\/g, "/")
+      .replace(/\/{2,}/g, "/")
+      .replace(/^\/+|\/+$/g, "")
+      .toLowerCase();
+  }
+
+  function reusableTaskTargetKey(task, downloadRoot) {
+    if (task?.meta?.req?.labels?.source !== "popo-stable-downloader") return "";
+    if (!["success", "active", "paused"].includes(classifyTaskStatus(task?.status))) return "";
+
+    const options = task?.meta?.opts || {};
+    const name = options.name || task?.name || task?.meta?.res?.files?.[0]?.name || "";
+    const fullTarget = normalizeTargetKey(`${options.path || ""}/${name}`);
+    const root = normalizeTargetKey(downloadRoot);
+    if (!fullTarget || !root || !name) return "";
+
+    const paddedTarget = `/${fullTarget}`;
+    const marker = `/${root}/`;
+    const markerIndex = paddedTarget.indexOf(marker);
+    return markerIndex < 0 ? "" : paddedTarget.slice(markerIndex + 1);
+  }
+
+  function reusableTaskTargetKeys(tasks, downloadRoot) {
+    return [...new Set((Array.isArray(tasks) ? tasks : [])
+      .map((task) => reusableTaskTargetKey(task, downloadRoot))
+      .filter(Boolean))];
+  }
+
+  function managedTaskIdentity(task) {
+    const labels = task?.meta?.req?.labels;
+    if (labels?.source !== "popo-stable-downloader") return null;
+    const taskId = String(task?.id || "").trim();
+    const jobId = String(labels.popoJobId || "").trim();
+    const taskKey = String(labels.popoTaskKey || "").trim();
+    if (!taskId || !jobId || !taskKey) return null;
+    return {
+      taskId,
+      jobId,
+      taskKey,
+      status: classifyTaskStatus(task?.status)
+    };
+  }
+
+  function selectTaskByIdentity(tasks, labels = {}) {
+    const jobId = String(labels.popoJobId || "").trim();
+    const taskKey = String(labels.popoTaskKey || "").trim();
+    if (!jobId || !taskKey) {
+      return { task: null, matchCount: 0, resolution: "invalid_identity" };
+    }
+
+    const matches = (Array.isArray(tasks) ? tasks : []).filter((task) => {
+      const identity = managedTaskIdentity(task);
+      return identity?.jobId === jobId && identity.taskKey === taskKey;
+    });
+    if (!matches.length) return { task: null, matchCount: 0, resolution: "missing" };
+
+    const successful = matches.filter(
+      (task) => classifyTaskStatus(task?.status) === "success"
+    );
+    if (successful.length) {
+      return {
+        task: successful[0],
+        matchCount: matches.length,
+        resolution: successful.length === 1 ? "success" : "success_preferred"
+      };
+    }
+
+    const live = matches.filter((task) =>
+      ["active", "paused"].includes(classifyTaskStatus(task?.status))
+    );
+    if (live.length === 1) {
+      return { task: live[0], matchCount: matches.length, resolution: "live" };
+    }
+    if (live.length > 1 || matches.length > 1) {
+      return { task: null, matchCount: matches.length, resolution: "ambiguous" };
+    }
+    return { task: matches[0], matchCount: 1, resolution: "single" };
+  }
+
   function getConfig(settings, options) {
     return request(settings, "/api/v1/config", options);
   }
 
   function getTask(settings, taskId, options) {
+    const sdk = officialSdk(options);
+    if (sdk) return sdk.getTask(settings, taskId, options).catch(wrapOfficialSdkError);
     return request(settings, `/api/v1/tasks/${encodeURIComponent(taskId)}`, options);
   }
 
+  function listTasks(settings, options) {
+    const sdk = officialSdk(options);
+    if (sdk) return sdk.listTasks(settings, options).catch(wrapOfficialSdkError);
+    return request(settings, "/api/v1/tasks", options);
+  }
+
   function createTask(settings, task, options = {}) {
+    const sdk = officialSdk(options);
+    if (sdk) {
+      return sdk.createTask(settings, buildCreateTaskBody(task), options)
+        .catch(wrapOfficialSdkError);
+    }
     return request(settings, "/api/v1/tasks", {
       ...options,
       method: "POST",
@@ -187,6 +315,8 @@
   }
 
   function pauseTask(settings, taskId, options = {}) {
+    const sdk = officialSdk(options);
+    if (sdk) return sdk.pauseTask(settings, taskId, options).catch(wrapOfficialSdkError);
     return request(settings, `/api/v1/tasks/${encodeURIComponent(taskId)}/pause`, {
       ...options,
       method: "PUT"
@@ -194,6 +324,8 @@
   }
 
   function continueTask(settings, taskId, options = {}) {
+    const sdk = officialSdk(options);
+    if (sdk) return sdk.continueTask(settings, taskId, options).catch(wrapOfficialSdkError);
     return request(settings, `/api/v1/tasks/${encodeURIComponent(taskId)}/continue`, {
       ...options,
       method: "PUT"
@@ -215,9 +347,19 @@
   }
 
   function deleteTask(settings, taskId, options = {}) {
+    const sdk = officialSdk(options);
+    if (sdk) return sdk.deleteTask(settings, taskId, options).catch(wrapOfficialSdkError);
     return request(settings, `/api/v1/tasks/${encodeURIComponent(taskId)}?force=true`, {
       ...options,
       method: "DELETE"
+    });
+  }
+
+  function wrapOfficialSdkError(error) {
+    if (error instanceof GopeedApiError) throw error;
+    throw new GopeedApiError(error?.message || "Gopeed 官方 SDK 请求失败", {
+      code: Number.isFinite(Number(error?.code)) ? Number(error.code) : null,
+      cause: error
     });
   }
 
@@ -225,18 +367,24 @@
     DEFAULT_ENDPOINT,
     GopeedApiError,
     buildCreateTaskBody,
+    buildTaskIdentityLabels,
     classifyTaskStatus,
     continueTask,
     createTask,
     deleteTask,
     getConfig,
     getTask,
+    listTasks,
     normalizeDownloadDirectory,
     normalizeEndpoint,
+    normalizeTargetKey,
     patchTask,
     pauseTask,
     request,
     requestHeaders,
+    reusableTaskTargetKey,
+    reusableTaskTargetKeys,
+    selectTaskByIdentity,
     startOrReplaceTask,
     splitDownloadTarget
   };
