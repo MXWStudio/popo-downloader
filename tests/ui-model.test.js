@@ -25,6 +25,68 @@ test("共享 React 界面模型统一任务摘要、详情和进度", () => {
   assert.equal(uiModel.jobProgress(queued), null);
 });
 
+test("网页行按钮用真实数量区分查找、空结果、遗漏和失败", () => {
+  assert.deepEqual(
+    uiModel.folderButtonDisplay({
+      id: "scan",
+      status: "scanning",
+      counts: { discoveredFiles: 383 }
+    }),
+    {
+      visualState: "scanning",
+      primary: "查找中",
+      secondary: "已找到 383 个",
+      progress: null,
+      indeterminate: true,
+      warningSegment: false
+    }
+  );
+
+  assert.deepEqual(
+    uiModel.folderButtonDisplay({
+      id: "partial",
+      status: "complete",
+      counts: {
+        files: 380,
+        discoveredFiles: 380,
+        success: 380,
+        failed: 0,
+        scanFailures: 3
+      }
+    }),
+    {
+      visualState: "warning",
+      primary: "找到 380 个",
+      secondary: "遗漏 3 处",
+      progress: 100,
+      indeterminate: false,
+      warningSegment: true
+    }
+  );
+
+  assert.equal(uiModel.folderButtonDisplay({
+    id: "empty",
+    status: "complete",
+    counts: { files: 0, discoveredFiles: 0 }
+  }).primary, "未找到文件");
+
+  assert.deepEqual(
+    uiModel.folderButtonDisplay({
+      id: "failed",
+      status: "failed",
+      counts: { files: 3, success: 2, failed: 1 }
+    }),
+    {
+      visualState: "failed",
+      primary: "未完成 1 个",
+      secondary: "重试",
+      progress: 67,
+      indeterminate: false,
+      warningSegment: false
+    }
+  );
+});
+
 test("页面通知只在任务转为完成或失败时产生且初始历史保持静默", () => {
   const complete = {
     id: "job-complete",

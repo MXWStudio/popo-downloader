@@ -15,6 +15,7 @@
   "dependencies": {
     "@gopeed/rest": "1.7.0",
     "idb": "8.0.3",
+    "motion": "13.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "xstate": "5.32.5",

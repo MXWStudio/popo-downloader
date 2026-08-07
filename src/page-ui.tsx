@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   attentionJobs,
   failedRetryCount,
   findMatchingFolderJob,
+  folderButtonDisplay,
   inferVirtualListItemCount,
   jobDetail,
   jobIsActive,
+  jobIsTerminal,
   jobName,
   jobProgress,
   liveJobs,
@@ -28,6 +31,7 @@ const SELECTORS = {
   scroller: '[data-test-id="virtuoso-scroller"], [data-virtuoso-scroller="true"]',
   row: "[data-item-index]",
   name: '[class*="topName"]',
+  nameHost: '[class*="pageName"]',
   folderIcon: '[class*="drive-icon-folder"]',
   actions: '[class*="listMore"]'
 } as const;
@@ -37,6 +41,7 @@ const GLOBAL_STYLE_ID = "popo-react-page-global-style";
 const PROJECT_COUNT_ID = "popo-stable-project-count";
 const DOWNLOAD_ANCHOR_CLASS = "popo-react-download-anchor";
 const DOWNLOAD_BUTTON_CLASS = "popo-stable-download-button";
+const DOWNLOAD_HOST_ATTRIBUTE = "data-popo-download-host";
 const OWNED_SELECTOR = [
   "#" + ROOT_ID,
   "#" + GLOBAL_STYLE_ID,
@@ -169,16 +174,21 @@ function ensureProjectCountTarget(): HTMLElement | null {
 
 function ensureFolderTargets(): FolderPortalTarget[] {
   const activeAnchors = new Set<HTMLElement>();
+  const activeHosts = new Set<HTMLElement>();
   const targets: FolderPortalTarget[] = [];
   for (const row of document.querySelectorAll<HTMLElement>(SELECTORS.row)) {
     const item = parseFolderRow(row);
     const existing = row.querySelector<HTMLElement>("." + DOWNLOAD_ANCHOR_CLASS);
     if (!item) {
       existing?.remove();
+      for (const host of row.querySelectorAll<HTMLElement>(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
+        host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
+      }
       continue;
     }
-    const actions = row.querySelector<HTMLElement>(SELECTORS.actions);
-    if (!actions) {
+    const nameNode = row.querySelector<HTMLElement>(SELECTORS.name);
+    const nameHost = row.querySelector<HTMLElement>(SELECTORS.nameHost) || nameNode?.parentElement;
+    if (!nameHost) {
       existing?.remove();
       continue;
     }
@@ -188,19 +198,21 @@ function ensureFolderTargets(): FolderPortalTarget[] {
       anchor.className = DOWNLOAD_ANCHOR_CLASS;
     }
     anchor.dataset.popoReactOwned = "true";
-    const nativeChildren = Array.from(actions.children)
-      .filter((child) => child !== anchor && !child.matches("[data-popo-react-owned]"));
-    const reference = nativeChildren.at(-1) || null;
-    if (anchor.parentElement !== actions || anchor.nextElementSibling !== reference) {
-      actions.insertBefore(anchor, reference);
+    nameHost.setAttribute(DOWNLOAD_HOST_ATTRIBUTE, "true");
+    if (anchor.parentElement !== nameHost || anchor !== nameHost.lastElementChild) {
+      nameHost.append(anchor);
     }
     const key = [item.parentUrl, item.itemIndex, item.name].join("\u0000");
     anchor.dataset.popoKey = key;
     activeAnchors.add(anchor);
+    activeHosts.add(nameHost);
     targets.push({ key, target: anchor, item });
   }
   for (const anchor of document.querySelectorAll<HTMLElement>("." + DOWNLOAD_ANCHOR_CLASS)) {
     if (!activeAnchors.has(anchor)) anchor.remove();
+  }
+  for (const host of document.querySelectorAll<HTMLElement>(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
+    if (!activeHosts.has(host)) host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
   }
   return targets;
 }
@@ -269,24 +281,52 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     if (frame) cancelAnimationFrame(frame);
     document.getElementById(PROJECT_COUNT_ID)?.remove();
     for (const anchor of document.querySelectorAll("." + DOWNLOAD_ANCHOR_CLASS)) anchor.remove();
+    for (const host of document.querySelectorAll(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
+      host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
+    }
   };
 }
 
 function globalStyles(): string {
   const logoUrl = chrome.runtime.getURL("assets/popo-logo.svg");
   return [
-    "." + DOWNLOAD_ANCHOR_CLASS + "{display:inline-flex!important;align-items:center!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "{box-sizing:border-box!important;position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 28px!important;width:28px!important;height:28px!important;overflow:visible!important;margin:0 3px!important;padding:0!important;border:1px solid #b9cce5!important;border-radius:6px!important;color:#1268e8!important;background-color:#fff!important;background-position:center!important;background-repeat:no-repeat!important;background-size:24px 24px!important;font:700 17px/1 'Segoe UI',sans-serif!important;cursor:pointer!important;box-shadow:0 1px 3px rgba(24,61,106,.1)!important;color-scheme:light;}",
+    "[" + DOWNLOAD_HOST_ATTRIBUTE + "]{box-sizing:border-box!important;position:relative!important;padding-right:166px!important;}",
+    "." + DOWNLOAD_ANCHOR_CLASS + "{position:absolute!important;top:0!important;right:0!important;bottom:0!important;z-index:2!important;display:inline-flex!important;align-items:center!important;justify-content:flex-end!important;width:166px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "{box-sizing:border-box!important;position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 28px!important;width:28px!important;height:28px!important;overflow:visible!important;margin:0 3px!important;padding:0!important;border:1px solid #b9cce5!important;border-radius:7px!important;color:#1268e8!important;background-color:#fff!important;background-position:center!important;background-repeat:no-repeat!important;background-size:24px 24px!important;font:600 11px/1 'Segoe UI','Microsoft YaHei',sans-serif!important;white-space:nowrap!important;cursor:pointer!important;box-shadow:0 1px 3px rgba(24,61,106,.1)!important;color-scheme:light;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']{background-image:url('" + logoUrl + "')!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']::after{box-sizing:border-box!important;position:absolute!important;right:-2px!important;bottom:-2px!important;display:flex!important;align-items:center!important;justify-content:center!important;width:12px!important;height:12px!important;border:1.5px solid #fff!important;border-radius:999px!important;color:#fff!important;background:#1268e8!important;content:'↓'!important;font:700 9px/1 'Segoe UI',sans-serif!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + ":not([data-state='idle']){background-image:none!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + ":hover{border-color:#1268e8!important;background-color:#eaf3ff!important;box-shadow:0 2px 7px rgba(18,104,232,.22)!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + ":disabled{cursor:wait!important;opacity:.65!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-expanded='true']{justify-content:flex-start!important;overflow:hidden!important;padding:0 9px!important;background-image:none!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{flex-basis:86px!important;width:86px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing']{flex-basis:104px!important;width:104px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{flex-basis:154px!important;width:154px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty']{flex-basis:132px!important;width:132px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{flex-basis:158px!important;width:158px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + ":hover{border-color:#1268e8!important;box-shadow:0 2px 7px rgba(18,104,232,.22)!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']:hover{background-color:#eaf3ff!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + ":disabled{cursor:wait!important;opacity:.82!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning']{color:#1268e8!important;border-color:#8db9f3!important;background:#f2f7ff!important;cursor:progress!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{color:#53657a!important;border-color:#c4cfdb!important;background:#f7f9fc!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success']{color:#087a5c!important;border-color:#87cfba!important;background:#f0fbf7!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{color:#1268e8!important;border-color:#8db9f3!important;background:#f2f7ff!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{color:#5f6e80!important;border-color:#bbc7d4!important;background:#f5f7fa!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning']{color:#946200!important;border-color:#e2bd68!important;background:#fff9e8!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{color:#b4232d!important;border-color:#e5a3a8!important;background:#fff5f5!important;}",
+    ".popo-download-content{position:relative!important;z-index:1!important;display:flex!important;align-items:center!important;width:100%!important;min-width:0!important;gap:5px!important;overflow:hidden!important;}",
+    ".popo-download-state-icon{display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 12px!important;width:12px!important;height:12px!important;transform-origin:50% 50%!important;}",
+    ".popo-download-state-icon svg{display:block!important;width:12px!important;height:12px!important;overflow:visible!important;}",
+    ".popo-download-primary{flex:none!important;font-weight:700!important;line-height:1!important;}",
+    ".popo-download-secondary{min-width:0!important;margin-left:auto!important;overflow:hidden!important;color:currentColor!important;font-size:10px!important;font-weight:600!important;line-height:1!important;text-overflow:ellipsis!important;opacity:.82!important;}",
+    ".popo-download-rail{position:absolute!important;right:7px!important;bottom:2px!important;left:7px!important;height:3px!important;overflow:hidden!important;border-radius:999px!important;background:repeating-linear-gradient(90deg,rgba(70,100,138,.32) 0 4px,rgba(70,100,138,.09) 4px 8px)!important;}",
+    ".popo-download-fill{position:absolute!important;inset:0 auto 0 0!important;display:block!important;height:100%!important;border-radius:inherit!important;background:linear-gradient(90deg,#1268e8,#13a17a)!important;}",
+    ".popo-download-wave{position:absolute!important;inset:0 auto 0 0!important;display:block!important;width:36%!important;height:100%!important;border-radius:inherit!important;background:linear-gradient(90deg,transparent,rgba(55,190,255,.72) 24%,#1268e8 52%,rgba(30,195,166,.8) 76%,transparent)!important;box-shadow:0 0 7px rgba(18,104,232,.48)!important;}",
+    ".popo-download-warning-segment{position:absolute!important;right:0!important;bottom:0!important;width:13px!important;height:100%!important;border-radius:999px!important;background:#e6a700!important;box-shadow:-3px 0 5px rgba(230,167,0,.25)!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'] .popo-download-fill,." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'] .popo-download-fill{background:#0b9b74!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed'] .popo-download-fill{background:#d64550!important;}",
     "#" + PROJECT_COUNT_ID + "{display:contents!important;}",
     ".popo-react-project-count{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:72px;height:32px;margin-left:10px;margin-right:auto;padding:0 10px;border:1px solid #e0e6ee;border-radius:6px;color:#59697a;background:#fff;font:500 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;}",
     ".popo-react-project-count[data-state='loading']{color:#7b8795;}",
-    "@media(prefers-color-scheme:dark){." + DOWNLOAD_BUTTON_CLASS + "{color:#89bdff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']::after{border-color:#222a35!important;background:#4d9aff!important;}.popo-react-project-count{color:#b6c2d0;border-color:#3b4655;background:#202832;}}",
-    ":is(html,body).dark ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-theme='dark'] ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-color-mode='dark'] ." + DOWNLOAD_BUTTON_CLASS + "{color:#89bdff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}",
+    "@media(prefers-color-scheme:dark){." + DOWNLOAD_BUTTON_CLASS + "{color:#9ec9ff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']::after{border-color:#222a35!important;background:#4d9aff!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{color:#9ec9ff!important;border-color:#466f9f!important;background:#202d3d!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success']{color:#81d9bd!important;border-color:#3e7566!important;background:#1d302c!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning']{color:#f1cc73!important;border-color:#756038!important;background:#332c1f!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{color:#ffabb1!important;border-color:#7d484e!important;background:#382327!important;}.popo-react-project-count{color:#b6c2d0;border-color:#3b4655;background:#202832;}}",
+    ":is(html,body).dark ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-theme='dark'] ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-color-mode='dark'] ." + DOWNLOAD_BUTTON_CLASS + "{color:#9ec9ff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}",
     ":is(html,body).dark .popo-react-project-count,:is(html,body)[data-theme='dark'] .popo-react-project-count,:is(html,body)[data-color-mode='dark'] .popo-react-project-count{color:#b6c2d0;border-color:#3b4655;background:#202832;}"
   ].join("\n");
 }
@@ -590,6 +630,88 @@ function ProjectCount({ count }: { count: number | null }) {
   );
 }
 
+function FolderButtonStateIcon({
+  visualState,
+  reducedMotion
+}: {
+  visualState: ReturnType<typeof folderButtonDisplay>["visualState"];
+  reducedMotion: boolean | null;
+}) {
+  if (visualState !== "scanning") return null;
+  return (
+    <motion.span
+      className="popo-download-state-icon"
+      aria-hidden="true"
+      initial={false}
+      animate={reducedMotion
+        ? { x: 0, y: 0, rotate: 0 }
+        : { x: [-1, 1, -1], y: [0, -1, 0], rotate: [-8, 8, -8] }}
+      transition={reducedMotion
+        ? { duration: 0 }
+        : { duration: 1.15, ease: "easeInOut", repeat: Infinity }}
+    >
+      <svg viewBox="0 0 16 16" fill="none" focusable="false">
+        <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M10.25 10.25 14 14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+        <path d="M4.8 7h4.4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity=".58" />
+      </svg>
+    </motion.span>
+  );
+}
+
+function FolderButtonRail({
+  display,
+  reducedMotion
+}: {
+  display: ReturnType<typeof folderButtonDisplay>;
+  reducedMotion: boolean | null;
+}) {
+  const visible = display.indeterminate || display.progress != null;
+  return (
+    <AnimatePresence initial={false}>
+      {visible && (
+        <motion.span
+          key={display.indeterminate ? "indeterminate" : "determinate"}
+          className="popo-download-rail"
+          aria-hidden="true"
+          initial={reducedMotion ? false : { opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: reducedMotion ? 1 : 0 }}
+          transition={{ duration: reducedMotion ? 0 : 0.16 }}
+        >
+          {display.indeterminate ? (
+            <motion.span
+              className="popo-download-wave"
+              initial={false}
+              animate={reducedMotion ? { x: "70%" } : { x: ["-120%", "260%"] }}
+              transition={reducedMotion
+                ? { duration: 0 }
+                : { duration: 1.15, ease: "easeInOut", repeat: Infinity }}
+            />
+          ) : (
+            <motion.span
+              className="popo-download-fill"
+              initial={false}
+              animate={{ width: `${display.progress || 0}%` }}
+              transition={reducedMotion
+                ? { duration: 0 }
+                : { type: "spring", stiffness: 360, damping: 34 }}
+            />
+          )}
+          {display.warningSegment && (
+            <motion.span
+              className="popo-download-warning-segment"
+              initial={reducedMotion ? false : { opacity: 0, scaleX: 0 }}
+              animate={{ opacity: 1, scaleX: 1 }}
+              transition={{ duration: reducedMotion ? 0 : 0.18 }}
+            />
+          )}
+        </motion.span>
+      )}
+    </AnimatePresence>
+  );
+}
+
 function FolderDownloadButton({
   item,
   state,
@@ -604,42 +726,97 @@ function FolderDownloadButton({
   onError: (title: string, error: unknown) => void;
 }) {
   const [starting, setStarting] = useState(false);
-  const job = findMatchingFolderJob(state, item);
-  const visualState = starting ? "scanning" : job?.status || "idle";
-  const text = starting ? "…" : job ? (job.status === "queued" ? "✓" : "…") : "";
+  const [outcome, setOutcome] = useState<QueueJob | null>(null);
+  const lastActiveJob = useRef<QueueJob | null>(null);
+  const reducedMotion = useReducedMotion();
+  const activeJob = findMatchingFolderJob(state, item);
+  const transitionOutcome = !activeJob && lastActiveJob.current
+    ? (state?.jobs || []).find((candidate) =>
+        candidate.id === lastActiveJob.current?.id && jobIsTerminal(candidate)
+      ) || null
+    : null;
+  const visibleJob = activeJob || transitionOutcome || outcome;
+  const display = folderButtonDisplay(visibleJob, starting);
+  const terminalJob = visibleJob && jobIsTerminal(visibleJob) ? visibleJob : null;
+  const statusText = [display.primary, display.secondary].filter(Boolean).join("，");
   const title = starting
     ? "正在添加下载"
-    : job
-      ? (job.status === "queued"
-          ? "已添加下载，点击查看排队状态"
-          : "该文件夹正在处理中，点击查看状态")
-      : "稳定下载此文件夹";
+    : activeJob
+      ? `${statusText || "任务进行中"}，点击查看任务`
+      : terminalJob
+        ? `${statusText}，点击${terminalJob.status === "cancelled" && recoverableCount(terminalJob) > 0
+            ? "继续"
+            : terminalJob.status === "complete" && display.visualState === "success"
+              ? "重新查找"
+              : "重试"}`
+        : "稳定下载此文件夹";
+
+  useEffect(() => {
+    if (activeJob) {
+      lastActiveJob.current = activeJob;
+      setOutcome(null);
+      return;
+    }
+    const previous = lastActiveJob.current;
+    if (!previous) return;
+    const terminal = (state?.jobs || []).find((candidate) =>
+      candidate.id === previous.id && jobIsTerminal(candidate)
+    );
+    if (!terminal) return;
+    lastActiveJob.current = null;
+    setOutcome(terminal);
+  }, [activeJob, state?.jobs]);
+
+  useEffect(() => {
+    if (!outcome) return;
+    const outcomeId = outcome.id;
+    const timer = window.setTimeout(() => {
+      setOutcome((current) => current?.id === outcomeId ? null : current);
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [outcome?.completedAt, outcome?.id]);
+
+  const requestFolderScan = async () => {
+    const response = await callExtension<{
+      needsWorker?: boolean;
+      job?: QueueJob;
+    }>({
+      type: "START_FOLDER_SCAN",
+      folderName: item.name,
+      folderItemIndex: item.itemIndex,
+      parentUrl: item.parentUrl
+    });
+    if (response.needsWorker) {
+      document.dispatchEvent(new CustomEvent(ENSURE_WORKER_EVENT, {
+        detail: { url: item.parentUrl }
+      }));
+    }
+  };
 
   const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    if (job) {
-      onInspect(job.id);
+    if (activeJob) {
+      onInspect(activeJob.id);
       return;
     }
+    setOutcome(null);
+    lastActiveJob.current = null;
     setStarting(true);
     try {
-      const response = await callExtension<{
-        needsWorker?: boolean;
-        job?: QueueJob;
-      }>({
-        type: "START_FOLDER_SCAN",
-        folderName: item.name,
-        folderItemIndex: item.itemIndex,
-        parentUrl: item.parentUrl
-      });
-      if (response.needsWorker) {
-        document.dispatchEvent(new CustomEvent(ENSURE_WORKER_EVENT, {
-          detail: { url: item.parentUrl }
-        }));
+      if (terminalJob?.status === "failed" && terminalJob.failureRetryKeys?.length) {
+        await callExtension({ type: "RETRY_JOB", jobId: terminalJob.id });
+      } else if (
+        terminalJob?.status === "cancelled" &&
+        recoverableCount(terminalJob) > 0
+      ) {
+        await callExtension({ type: "RESTORE_CANCELLED_JOB", jobId: terminalJob.id });
+      } else {
+        await requestFolderScan();
       }
       await refresh();
     } catch (error) {
+      if (terminalJob) setOutcome(terminalJob);
       onError(item.name, error);
     } finally {
       setStarting(false);
@@ -647,21 +824,51 @@ function FolderDownloadButton({
   };
 
   return (
-    <button
+    <motion.button
+      layout
+      initial={false}
+      transition={reducedMotion
+        ? { duration: 0 }
+        : { layout: { type: "spring", stiffness: 420, damping: 34 } }}
+      whileTap={reducedMotion ? {} : { scale: 0.97 }}
       type="button"
       className={DOWNLOAD_BUTTON_CLASS}
       data-popo-react-owned="true"
-      data-state={visualState}
-      data-job-id={job?.id || ""}
+      data-state={display.visualState}
+      data-expanded={display.visualState === "idle" ? "false" : "true"}
+      data-job-status={visibleJob?.status || ""}
+      data-job-id={visibleJob?.id || ""}
       data-folder-name={item.name}
       disabled={starting}
       title={title}
-      aria-label={title}
+      aria-label={`${item.name}：${title}`}
+      aria-busy={display.indeterminate || undefined}
       onMouseDown={(event) => event.stopPropagation()}
       onClick={(event) => void handleClick(event)}
     >
-      {text}
-    </button>
+      <AnimatePresence initial={false} mode="popLayout">
+        {display.primary && (
+          <motion.span
+            key={`${display.visualState}:${visibleJob?.status || "starting"}`}
+            className="popo-download-content"
+            initial={reducedMotion ? false : { opacity: 0, y: 3 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: reducedMotion ? 1 : 0, y: reducedMotion ? 0 : -3 }}
+            transition={{ duration: reducedMotion ? 0 : 0.16 }}
+          >
+            <FolderButtonStateIcon
+              visualState={display.visualState}
+              reducedMotion={reducedMotion}
+            />
+            <span className="popo-download-primary">{display.primary}</span>
+            {display.secondary && (
+              <span className="popo-download-secondary">{display.secondary}</span>
+            )}
+          </motion.span>
+        )}
+      </AnimatePresence>
+      <FolderButtonRail display={display} reducedMotion={reducedMotion} />
+    </motion.button>
   );
 }
 

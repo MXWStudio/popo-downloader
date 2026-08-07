@@ -103,18 +103,22 @@ test("single React page root renders project count and recycled folder-row porta
     </div>
     <div data-test-id="virtuoso-scroller">
       <div data-test-id="virtuoso-item-list" style="padding-bottom: 672px">
-        <div data-item-index="0" data-known-size="48">
-          <span class="topName">文件夹 A</span>
-          <span class="drive-icon-folder"></span>
+        <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">文件夹 A</span></div>
+          <div class="ownerName" style="flex:0 0 150px">成员 A</div>
+          <div class="timeDate" style="flex:0 0 140px">今天</div>
           <div class="listMore"><button aria-label="更多 A">…</button></div>
         </div>
-        <div data-item-index="1" data-known-size="48">
-          <span class="topName">文件夹 B</span>
-          <span class="drive-icon-folder"></span>
+        <div data-item-index="1" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">文件夹 B</span></div>
+          <div class="ownerName" style="flex:0 0 150px">成员 B</div>
+          <div class="timeDate" style="flex:0 0 140px">今天</div>
           <div class="listMore"><button aria-label="更多 B">…</button></div>
         </div>
-        <div data-item-index="2" data-known-size="48">
-          <span class="topName">普通文件.psd</span>
+        <div data-item-index="2" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="topName">普通文件.psd</span></div>
+          <div class="ownerName" style="flex:0 0 150px">成员 C</div>
+          <div class="timeDate" style="flex:0 0 140px">今天</div>
           <div class="listMore"><button aria-label="更多文件">…</button></div>
         </div>
       </div>
@@ -173,6 +177,9 @@ test("single React page root renders project count and recycled folder-row porta
   await expect(page.locator(".popo-react-project-count")).toHaveText("17 个项目");
   await expect(page.locator("button.popo-stable-download-button")).toHaveCount(2);
   await expect(page.locator("[data-item-index='2'] button.popo-stable-download-button")).toHaveCount(0);
+  await expect(page.locator("[data-item-index='0'] .pageName > .popo-react-download-anchor")).toHaveCount(1);
+  await expect(page.locator("[data-item-index='0'] .listMore .popo-react-download-anchor")).toHaveCount(0);
+  await expect(page.locator("[data-item-index='0'] .pageName")).toHaveAttribute("data-popo-download-host", "true");
   await page.evaluate(() => {
     const oldStatus = document.createElement("aside");
     oldStatus.id = "popo-stable-download-status";
@@ -187,10 +194,33 @@ test("single React page root renders project count and recycled folder-row porta
     "[data-item-index='0'] button.popo-stable-download-button"
   );
   await firstButton.click();
-  await expect(firstButton).toHaveText("✓");
+  await expect(firstButton).toContainText("排队中");
+  await expect(firstButton).toContainText("第 1");
   await expect(page.locator(".popo-page-queue")).toContainText("1 个排队");
   await page.locator(".popo-page-queue-toggle").click();
   await expect(page.locator(".popo-page-queue")).toHaveAttribute("data-collapsed", "false");
+
+  await page.evaluate(() => {
+    const job = window.__popoUiTest.state.jobs[0];
+    job.status = "scanning";
+    job.counts = { discoveredFiles: 383 };
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(firstButton).toHaveAttribute("data-state", "scanning");
+  await expect(firstButton).toContainText("查找中");
+  await expect(firstButton).toContainText("已找到 383 个");
+  await expect(firstButton.locator(".popo-download-state-icon")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-rail")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-wave")).toBeVisible();
+  const [buttonBox, ownerBox] = await Promise.all([
+    firstButton.boundingBox(),
+    page.locator("[data-item-index='0'] .ownerName").boundingBox()
+  ]);
+  expect(buttonBox).not.toBeNull();
+  expect(ownerBox).not.toBeNull();
+  expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(ownerBox.x);
 
   await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = true;
@@ -204,12 +234,20 @@ test("single React page root renders project count and recycled folder-row porta
     const job = window.__popoUiTest.state.jobs[0];
     job.status = "complete";
     job.completedAt = new Date().toISOString();
-    job.counts = { files: 1, success: 1, failed: 0, cancelled: 0 };
+    job.counts = {
+      files: 383,
+      discoveredFiles: 383,
+      success: 383,
+      failed: 0,
+      cancelled: 0
+    };
     for (const listener of window.__popoUiTest.listeners) {
       listener({ type: "FOLDER_TASK_FINISHED" });
     }
   });
   await expect(page.locator(".popo-toast")).toHaveCount(0);
+  await expect(firstButton).toHaveAttribute("data-state", "success");
+  await expect(firstButton).toContainText("已完成 383 个");
   await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = false;
     for (const listener of window.__popoUiTest.listeners) {
@@ -254,6 +292,16 @@ test("single React page root renders project count and recycled folder-row porta
     }
   });
   await expect(page.locator(".popo-toast[data-kind='error']")).toContainText("1 个未完成");
+  await expect(recycledButton).toHaveAttribute("data-state", "failed");
+  await expect(recycledButton).toContainText("未完成 1 个");
+  await expect(recycledButton).toContainText("重试");
+  await recycledButton.click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__popoUiTest.calls.filter(
+      (message) => message.type === "START_FOLDER_SCAN"
+    ).length
+  )).toBe(3);
+  await expect(recycledButton).toHaveAttribute("data-state", "queued");
 });
 
 test("popup uses simple wording and safely removes cancelled history", async () => {

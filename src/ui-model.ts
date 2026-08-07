@@ -20,6 +20,7 @@ export interface JobCounts {
   files?: number | undefined;
   total?: number | undefined;
   discoveredFiles?: number | undefined;
+  scanFailures?: number | undefined;
   pending?: number | undefined;
   success?: number | undefined;
   failed?: number | undefined;
@@ -175,6 +176,230 @@ export function jobProgress(job: QueueJob): number | null {
     (Number(counts.failed) || 0) +
     (Number(counts.cancelled) || 0);
   return Math.max(0, Math.min(100, Math.round(finished * 100 / total)));
+}
+
+export type FolderButtonVisualState =
+  | "idle"
+  | "queued"
+  | "preparing"
+  | "scanning"
+  | "ready"
+  | "downloading"
+  | "paused"
+  | "success"
+  | "empty"
+  | "warning"
+  | "failed";
+
+export interface FolderButtonDisplay {
+  visualState: FolderButtonVisualState;
+  primary: string;
+  secondary: string;
+  progress: number | null;
+  indeterminate: boolean;
+  warningSegment: boolean;
+}
+
+function countValue(value: unknown): number {
+  return Math.max(0, Number(value) || 0);
+}
+
+export function folderButtonDisplay(
+  job: QueueJob | null | undefined,
+  starting = false
+): FolderButtonDisplay {
+  if (starting) {
+    return {
+      visualState: "preparing",
+      primary: "正在添加",
+      secondary: "",
+      progress: null,
+      indeterminate: true,
+      warningSegment: false
+    };
+  }
+  if (!job) {
+    return {
+      visualState: "idle",
+      primary: "",
+      secondary: "",
+      progress: null,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+
+  const counts = job.counts || {};
+  const discovered = countValue(counts.discoveredFiles ?? counts.files ?? counts.total);
+  const total = countValue(counts.files ?? counts.total ?? counts.discoveredFiles);
+  const success = countValue(counts.success);
+  const failed = countValue(counts.failed);
+  const scanFailures = countValue(counts.scanFailures);
+  const warningSegment = scanFailures > 0;
+
+  if (job.status === "queued") {
+    const position = countValue(job.queuePosition);
+    return {
+      visualState: "queued",
+      primary: "排队中",
+      secondary: position ? `第 ${position}` : "",
+      progress: null,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+  if (job.status === "waiting_worker") {
+    return {
+      visualState: "preparing",
+      primary: "准备查找",
+      secondary: "",
+      progress: null,
+      indeterminate: true,
+      warningSegment: false
+    };
+  }
+  if (job.status === "scanning") {
+    return {
+      visualState: "scanning",
+      primary: "查找中",
+      secondary: `已找到 ${discovered} 个`,
+      progress: null,
+      indeterminate: true,
+      warningSegment: false
+    };
+  }
+  if (["scan_complete", "awaiting_confirmation", "starting"].includes(job.status)) {
+    if (scanFailures > 0) {
+      return {
+        visualState: "warning",
+        primary: `找到 ${discovered} 个`,
+        secondary: `遗漏 ${scanFailures} 处`,
+        progress: 100,
+        indeterminate: false,
+        warningSegment: true
+      };
+    }
+    if (!discovered) {
+      return {
+        visualState: "empty",
+        primary: "未找到文件",
+        secondary: "",
+        progress: 0,
+        indeterminate: false,
+        warningSegment: false
+      };
+    }
+    return {
+      visualState: "ready",
+      primary: `已找到 ${discovered} 个`,
+      secondary: "准备下载",
+      progress: 100,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+  if (["downloading", "draining"].includes(job.status)) {
+    const finished = success + failed + countValue(counts.cancelled);
+    return {
+      visualState: "downloading",
+      primary: job.status === "draining" ? "正在停止" : "下载中",
+      secondary: total ? `${finished} / ${total}` : "",
+      progress: jobProgress(job),
+      indeterminate: jobProgress(job) == null,
+      warningSegment
+    };
+  }
+  if (["paused", "draining_paused"].includes(job.status)) {
+    const finished = success + failed + countValue(counts.cancelled);
+    return {
+      visualState: "paused",
+      primary: "已暂停",
+      secondary: total ? `${finished} / ${total}` : "",
+      progress: jobProgress(job),
+      indeterminate: false,
+      warningSegment
+    };
+  }
+  if (job.status === "complete") {
+    if (scanFailures > 0) {
+      return {
+        visualState: "warning",
+        primary: `找到 ${discovered} 个`,
+        secondary: `遗漏 ${scanFailures} 处`,
+        progress: 100,
+        indeterminate: false,
+        warningSegment: true
+      };
+    }
+    if (failed > 0) {
+      return {
+        visualState: "warning",
+        primary: `完成 ${success} 个`,
+        secondary: `未完成 ${failed} 个`,
+        progress: 100,
+        indeterminate: false,
+        warningSegment: true
+      };
+    }
+    if (!total && !discovered) {
+      return {
+        visualState: "empty",
+        primary: "未找到文件",
+        secondary: "重试",
+        progress: 0,
+        indeterminate: false,
+        warningSegment: false
+      };
+    }
+    return {
+      visualState: "success",
+      primary: `已完成 ${success || total || discovered} 个`,
+      secondary: "",
+      progress: 100,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+  if (job.status === "cancelled") {
+    const recoverable = recoverableCount(job);
+    return {
+      visualState: "warning",
+      primary: "已停止",
+      secondary: recoverable ? `可继续 ${recoverable} 个` : "重试",
+      progress: jobProgress(job),
+      indeterminate: false,
+      warningSegment: true
+    };
+  }
+
+  if (!discovered && scanFailures > 0) {
+    return {
+      visualState: "failed",
+      primary: "查找失败",
+      secondary: `遗漏 ${scanFailures} 处 · 重试`,
+      progress: 0,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+  if (failed > 0) {
+    return {
+      visualState: "failed",
+      primary: `未完成 ${failed} 个`,
+      secondary: "重试",
+      progress: total ? Math.round(success * 100 / total) : 0,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
+  return {
+    visualState: "failed",
+    primary: discovered ? "下载未开始" : "查找失败",
+    secondary: "重试",
+    progress: 0,
+    indeterminate: false,
+    warningSegment: false
+  };
 }
 
 export function liveJobs(state: QueueState | null | undefined): QueueJob[] {
