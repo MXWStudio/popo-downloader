@@ -745,7 +745,7 @@ test("移除终止任务只清理扩展记录且不删除下载任务或文件",
   }
 });
 
-test("进行中的同组任务不能被移除", async () => {
+test("进行中的显式重试任务不能被移除", async () => {
   const now = new Date().toISOString();
   const settings = { concurrency: 5, gopeedConnections: 1 };
   const state = {
@@ -785,6 +785,51 @@ test("进行中的同组任务不能被移除", async () => {
     assert.equal(response.ok, false);
     assert.match(response.error, /仍在进行/);
     assert.equal(harness.stored.popoState.jobs.length, 2);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("同一文件夹后来创建的独立任务不会阻止移除旧记录", async () => {
+  const now = new Date().toISOString();
+  const settings = { concurrency: 5, gopeedConnections: 1 };
+  const state = {
+    version: 4,
+    runToken: "run-dismiss-independent-same-folder",
+    jobs: [{
+      id: "job-old-cancelled",
+      key: "folder-a",
+      folderName: "母文件 A",
+      status: "cancelled",
+      createdAt: now,
+      completedAt: now,
+      counts: { files: 1, success: 0, failed: 0, cancelled: 1 },
+      cancelledRetryKeys: ["folder\u0000old.psd"]
+    }, {
+      id: "job-new-independent",
+      key: "folder-a",
+      folderName: "母文件 A",
+      status: "paused",
+      createdAt: now,
+      counts: { files: 2, success: 0, failed: 0, cancelled: 0 }
+    }],
+    activeJobId: "job-new-independent",
+    mode: "paused",
+    phase: "paused",
+    settings,
+    items: [],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    logs: []
+  };
+  const harness = createHarness({ popoSettings: settings, popoState: state });
+  try {
+    const response = await harness.send({ type: "DISMISS_JOB", jobId: "job-old-cancelled" });
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.state.jobs.map((job) => job.id), ["job-new-independent"]);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.id), ["job-new-independent"]);
   } finally {
     harness.cleanup();
   }

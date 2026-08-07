@@ -2694,13 +2694,12 @@ function linkedJobIds(jobs, target) {
   while (changed) {
     changed = false;
     for (const candidate of jobs || []) {
-      const sameFolder = Boolean(target.key) && candidate.key === target.key;
       const linkedToKnownJob = ids.has(candidate.retryOfJobId) || ids.has(candidate.restoreOfJobId);
       const knownJobLinksToCandidate = [...ids].some((id) => {
         const known = (jobs || []).find((job) => job.id === id);
         return known?.retryOfJobId === candidate.id || known?.restoreOfJobId === candidate.id;
       });
-      if ((sameFolder || linkedToKnownJob || knownJobLinksToCandidate) && !ids.has(candidate.id)) {
+      if ((linkedToKnownJob || knownJobLinksToCandidate) && !ids.has(candidate.id)) {
         ids.add(candidate.id);
         changed = true;
       }
