@@ -1,12 +1,12 @@
 {
     "schemaVersion":  1,
     "channel":  "beta",
-    "version":  "0.7.0-beta.8",
-    "chromeVersion":  "0.7.0.8",
-    "publishedAt":  "2026-08-03T17:40:45.6562314+08:00",
-    "artifact":  "POPO-Stable-Downloader-0.7.0-beta.8-win-x64.zip",
+    "version":  "0.7.0-beta.11",
+    "chromeVersion":  "0.7.0.11",
+    "publishedAt":  "2026-08-10T10:07:18.2916381+08:00",
+    "artifact":  "POPO-Stable-Downloader-0.7.0-beta.11-win-x64.zip",
     "url":  "",
-    "sha256":  "1366bf37bdac8ff1477f9f8179c85d27ba2749a0968c4f87b6adbe2701cd1f0a",
-    "size":  37805216,
-    "notes":  "Green beta downloading all user file formats recursively, preventing popup connection checks from overwriting progress, auto-recovering interrupted preparation, with verified Gopeed v1.9.3 and concurrency 5."
+    "sha256":  "8a41de1a1029760a65f6df2dd37ee3a559cc6e0d09a1e4a39c25c76c22b4a360",
+    "size":  38222621,
+    "notes":  "Green beta downloading all user file formats recursively, restoring accidentally cancelled pending files without repeating successes, rebuilding the POPO worker after pause or tab changes, with verified Gopeed v1.9.3 and concurrency 5."
 }

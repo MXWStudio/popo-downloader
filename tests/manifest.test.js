@@ -153,7 +153,7 @@ test("弹窗只展示普通用户需要的任务和保存位置", () => {
   assert.match(popupScript, /current\?\.transient \? null : current/);
 });
 
-test("POPO Logo 在弹窗和网页按钮中支持明暗主题", () => {
+test("POPO Logo 保留在弹窗和扩展图标中并支持明暗主题", () => {
   const popup = fs.readFileSync(path.join(__dirname, "..", "popup.html"), "utf8");
   const popupSource = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
   const popupCss = fs.readFileSync(path.join(__dirname, "..", "popup.css"), "utf8");
@@ -164,7 +164,10 @@ test("POPO Logo 在弹窗和网页按钮中支持明暗主题", () => {
   assert.match(popupSource, /className="brand-logo"/);
   assert.match(popupSource, /assets\/popo-logo\.svg/);
   assert.match(popupCss, /@media \(prefers-color-scheme: dark\)/);
-  assert.match(pageUi, /chrome\.runtime\.getURL\("assets\/popo-logo\.svg"\)/);
+  assert.match(pageUi, /from "lucide-react"/);
+  assert.match(pageUi, /className="popo-download-idle-icon"/);
+  assert.doesNotMatch(pageUi, /chrome\.runtime\.getURL\("assets\/popo-logo\.svg"\)/);
+  assert.doesNotMatch(pageUi, /repeating-linear-gradient/);
   assert.match(pageUi, /data-theme='dark'/);
   assert.match(logo, /@media \(prefers-color-scheme: dark\)/);
   assert.deepEqual(manifest.icons, {
@@ -189,6 +192,56 @@ test("POPO Logo 在弹窗和网页按钮中支持明暗主题", () => {
       matches: ["https://docs.popo.netease.com/*"]
     }
   ]);
+});
+
+test("网页行内按钮使用 Lucide 图标和无刻度粗进度条", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")
+  );
+  const pageUi = fs.readFileSync(path.join(__dirname, "..", "src", "page-ui.tsx"), "utf8");
+
+  assert.equal(packageJson.dependencies["lucide-react"], "1.29.0");
+  assert.match(pageUi, /popo-download-idle-icon/);
+  assert.match(pageUi, /popo-download-estimate-fill/);
+  assert.match(pageUi, /popo-download-activity-comet/);
+  assert.match(pageUi, /popo-download-injection-icon/);
+  assert.match(pageUi, /popo-download-resource-block/);
+  assert.match(pageUi, /<Folder/);
+  assert.match(pageUi, /height:8px!important/);
+  assert.match(pageUi, /flex-basis:124px!important/);
+  assert.match(pageUi, /min-width:max-content!important/);
+  assert.match(pageUi, /radial-gradient\(circle at 18% 0%/);
+  assert.doesNotMatch(pageUi, /repeating-linear-gradient/);
+  assert.doesNotMatch(pageUi, /chrome\.runtime\.getURL\("assets\/popo-logo\.svg"\)/);
+});
+
+test("网页、任务摘要、通知和弹窗共享克制的深色渐变状态系统", () => {
+  const pageUi = fs.readFileSync(path.join(__dirname, "..", "src", "page-ui.tsx"), "utf8");
+  const popupCss = fs.readFileSync(path.join(__dirname, "..", "popup.css"), "utf8");
+
+  assert.match(pageUi, /--popo-gradient-surface/);
+  assert.match(pageUi, /--popo-gradient-blue/);
+  assert.match(pageUi, /--popo-gradient-download/);
+  assert.match(pageUi, /--popo-gradient-queued/);
+  assert.match(pageUi, /--popo-gradient-paused/);
+  assert.match(pageUi, /--popo-gradient-warning/);
+  assert.match(pageUi, /--popo-gradient-failed/);
+  assert.match(pageUi, /data-status=\{primary\.status\}/);
+  assert.match(pageUi, /popo-gradient-surface-flow/);
+  assert.match(pageUi, /prefers-reduced-motion:reduce/);
+
+  assert.match(popupCss, /--gradient-surface:/);
+  assert.match(popupCss, /--gradient-blue:/);
+  assert.match(popupCss, /--gradient-download:/);
+  assert.match(popupCss, /--gradient-queued:/);
+  assert.match(popupCss, /--gradient-paused:/);
+  assert.match(popupCss, /--gradient-warning:/);
+  assert.match(popupCss, /--gradient-failed:/);
+  assert.match(popupCss, /\.popup-queue-item\[data-status="scanning"\]/);
+  assert.match(popupCss, /\.popup-queue-item\[data-status="downloading"\]/);
+  assert.match(popupCss, /@keyframes popup-surface-flow/);
+  assert.match(popupCss, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.doesNotMatch(popupCss, /repeating-linear-gradient|rainbow|particle/i);
 });
 
 test("下载由 Gopeed 统一管理并固定任务并发 5", () => {

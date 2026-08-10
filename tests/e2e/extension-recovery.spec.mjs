@@ -73,6 +73,76 @@ async function closeExtensionContext() {
   await activeContext.close().catch(() => {});
 }
 
+async function readFolderMotionFrame(button) {
+  return button.evaluate((element) => {
+    const style = (selector) => {
+      const target = element.querySelector(selector);
+      if (!target) return null;
+      const computed = getComputedStyle(target);
+      return {
+        left: computed.left,
+        opacity: computed.opacity,
+        transform: computed.transform
+      };
+    };
+    const rail = element.querySelector(".popo-download-rail");
+    const estimate = element.querySelector(".popo-download-estimate-fill");
+    const fill = element.querySelector(".popo-download-fill");
+    const progressElement = estimate || fill;
+    return {
+      progress: progressElement && rail
+        ? Number.parseFloat(progressElement.style.width)
+        : null,
+      icon: style(".popo-download-resource-block, .popo-download-state-icon-motion"),
+      comet: style(".popo-download-activity-comet"),
+      bars: Array.from(element.querySelectorAll(".popo-download-work-beat i"))
+        .map((target) => getComputedStyle(target).transform),
+      packets: Array.from(element.querySelectorAll(".popo-download-activity-packet"))
+        .map((target) => {
+          const computed = getComputedStyle(target);
+          return { left: computed.left, opacity: computed.opacity };
+        })
+    };
+  });
+}
+
+async function expectFolderIconMotionInsideSafeArea(button, selector) {
+  for (let index = 0; index < 10; index += 1) {
+    const bounds = await button.evaluate((element, movingSelector) => {
+      const clip = element.querySelector(".popo-download-content");
+      const shell = element.querySelector(".popo-download-state-icon");
+      const moving = element.querySelector(movingSelector);
+      if (!clip || !shell || !moving) return null;
+      const toBounds = (target) => {
+        const rect = target.getBoundingClientRect();
+        return { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left };
+      };
+      return { clip: toBounds(clip), shell: toBounds(shell), moving: toBounds(moving) };
+    }, selector);
+    expect(bounds).not.toBeNull();
+    expect(bounds.shell.left).toBeGreaterThanOrEqual(bounds.clip.left - .5);
+    expect(bounds.shell.right).toBeLessThanOrEqual(bounds.clip.right + .5);
+    expect(bounds.shell.top).toBeGreaterThanOrEqual(bounds.clip.top - .5);
+    expect(bounds.shell.bottom).toBeLessThanOrEqual(bounds.clip.bottom + .5);
+    expect(bounds.moving.left).toBeGreaterThanOrEqual(bounds.shell.left - .5);
+    expect(bounds.moving.right).toBeLessThanOrEqual(bounds.shell.right + .5);
+    expect(bounds.moving.top).toBeGreaterThanOrEqual(bounds.shell.top - .5);
+    expect(bounds.moving.bottom).toBeLessThanOrEqual(bounds.shell.bottom + .5);
+    await button.page().waitForTimeout(90);
+  }
+}
+
+async function expectFolderMotionToAdvance(button, { minimumProgress = null } = {}) {
+  const before = await readFolderMotionFrame(button);
+  await button.page().waitForTimeout(360);
+  const after = await readFolderMotionFrame(button);
+  if (minimumProgress != null) expect(before.progress).toBeGreaterThanOrEqual(minimumProgress);
+  expect(after.icon).not.toEqual(before.icon);
+  expect(after.comet).not.toEqual(before.comet);
+  expect(after.bars).not.toEqual(before.bars);
+  expect(after.packets).not.toEqual(before.packets);
+}
+
 test.beforeAll(async () => {
   sandboxRoot = await mkdtemp(join(tmpdir(), "popo-playwright-"));
   extensionDir = join(sandboxRoot, "extension");
@@ -175,6 +245,10 @@ test("single React page root renders project count and recycled folder-row porta
 
   await expect(page.locator("#popo-react-page-root")).toHaveCount(1);
   await expect(page.locator(".popo-react-project-count")).toHaveText("17 个项目");
+  await expect(page.locator(".popo-react-project-count")).toHaveCSS(
+    "background-image",
+    /radial-gradient.*linear-gradient/
+  );
   await expect(page.locator("button.popo-stable-download-button")).toHaveCount(2);
   await expect(page.locator("[data-item-index='2'] button.popo-stable-download-button")).toHaveCount(0);
   await expect(page.locator("[data-item-index='0'] .pageName > .popo-react-download-anchor")).toHaveCount(1);
@@ -193,10 +267,63 @@ test("single React page root renders project count and recycled folder-row porta
   const firstButton = page.locator(
     "[data-item-index='0'] button.popo-stable-download-button"
   );
+  await expect(firstButton).toHaveAttribute("data-state", "idle");
+  await expect(firstButton.locator(".popo-download-idle-icon svg.lucide-download")).toBeVisible();
+  await expect(firstButton).toHaveCSS("background-image", /linear-gradient/);
   await firstButton.click();
   await expect(firstButton).toContainText("排队中");
   await expect(firstButton).toContainText("第 1");
+  await expect(firstButton).toHaveCSS("width", "124px");
+  await expect(firstButton.locator(".popo-download-secondary")).toHaveText("第 1");
+  const firstQueueLayout = await firstButton.evaluate((element) => {
+    const content = element.querySelector(".popo-download-content");
+    const secondary = element.querySelector(".popo-download-secondary");
+    return content && secondary
+      ? {
+          contentClientWidth: content.clientWidth,
+          contentScrollWidth: content.scrollWidth,
+          secondaryClientWidth: secondary.clientWidth,
+          secondaryScrollWidth: secondary.scrollWidth
+        }
+      : null;
+  });
+  expect(firstQueueLayout).not.toBeNull();
+  expect(firstQueueLayout.contentScrollWidth).toBeLessThanOrEqual(
+    firstQueueLayout.contentClientWidth
+  );
+  expect(firstQueueLayout.secondaryScrollWidth).toBeLessThanOrEqual(
+    firstQueueLayout.secondaryClientWidth
+  );
+  await page.evaluate(() => {
+    const job = window.__popoUiTest.state.jobs[0];
+    job.queuePosition = 123;
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(firstButton.locator(".popo-download-secondary")).toHaveText("第 123");
+  const threeDigitQueueLayout = await firstButton.evaluate((element) => {
+    const content = element.querySelector(".popo-download-content");
+    const secondary = element.querySelector(".popo-download-secondary");
+    return content && secondary
+      ? {
+          contentClientWidth: content.clientWidth,
+          contentScrollWidth: content.scrollWidth,
+          secondaryClientWidth: secondary.clientWidth,
+          secondaryScrollWidth: secondary.scrollWidth
+        }
+      : null;
+  });
+  expect(threeDigitQueueLayout).not.toBeNull();
+  expect(threeDigitQueueLayout.contentScrollWidth).toBeLessThanOrEqual(
+    threeDigitQueueLayout.contentClientWidth
+  );
+  expect(threeDigitQueueLayout.secondaryScrollWidth).toBeLessThanOrEqual(
+    threeDigitQueueLayout.secondaryClientWidth
+  );
   await expect(page.locator(".popo-page-queue")).toContainText("1 个排队");
+  await expect(page.locator(".popo-page-queue")).toHaveAttribute("data-status", "queued");
+  await expect(page.locator(".popo-page-queue")).toHaveCSS("background-image", /linear-gradient/);
   await page.locator(".popo-page-queue-toggle").click();
   await expect(page.locator(".popo-page-queue")).toHaveAttribute("data-collapsed", "false");
 
@@ -209,18 +336,64 @@ test("single React page root renders project count and recycled folder-row porta
     }
   });
   await expect(firstButton).toHaveAttribute("data-state", "scanning");
+  await expect(page.locator(".popo-page-queue")).toHaveAttribute("data-status", "scanning");
+  await expect(firstButton).toHaveCSS("background-image", /linear-gradient/);
   await expect(firstButton).toContainText("查找中");
   await expect(firstButton).toContainText("已找到 383 个");
-  await expect(firstButton.locator(".popo-download-state-icon")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-state-icon")).toHaveCount(1);
+  await expect(firstButton.locator(".popo-download-state-icon svg.lucide-search")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-state-icon")).toHaveCSS("width", "20px");
+  await expect(firstButton.locator(".popo-download-state-icon")).toHaveCSS("height", "22px");
   await expect(firstButton.locator(".popo-download-rail")).toBeVisible();
-  await expect(firstButton.locator(".popo-download-wave")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-rail")).toHaveCSS("height", "8px");
+  await expect(firstButton.locator(".popo-download-estimate-fill")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-activity-comet")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-activity-packet")).toHaveCount(3);
+  await expect(firstButton.locator(".popo-download-rail")).toHaveCSS("background-image", "none");
+  const initialScanProgress = await firstButton.locator(".popo-download-estimate-fill").evaluate(
+    (element) => Number.parseFloat(element.style.width)
+  );
+  expect(initialScanProgress).toBeGreaterThanOrEqual(12);
+  await expectFolderMotionToAdvance(firstButton, { minimumProgress: 12 });
+  await expectFolderIconMotionInsideSafeArea(firstButton, ".popo-download-state-icon-motion");
+  await expect.poll(
+    () => firstButton.locator(".popo-download-estimate-fill").evaluate(
+      (element) => Number.parseFloat(element.style.width)
+    ),
+    { timeout: 2_000 }
+  ).toBeGreaterThan(initialScanProgress);
   const [buttonBox, ownerBox] = await Promise.all([
     firstButton.boundingBox(),
     page.locator("[data-item-index='0'] .ownerName").boundingBox()
   ]);
   expect(buttonBox).not.toBeNull();
   expect(ownerBox).not.toBeNull();
+  await expect(firstButton).toHaveCSS("width", "232px");
+  await expect(firstButton).toHaveCSS("height", "48px");
   expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(ownerBox.x);
+
+  await page.evaluate(() => {
+    const job = window.__popoUiTest.state.jobs[0];
+    job.status = "downloading";
+    job.counts = { files: 750, discoveredFiles: 750, success: 22, failed: 0, cancelled: 0 };
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(firstButton).toHaveAttribute("data-state", "downloading");
+  await expect(page.locator(".popo-page-queue")).toHaveAttribute("data-status", "downloading");
+  await expect(firstButton.locator(".popo-download-state-icon")).toHaveCount(1);
+  await expect(firstButton.locator(".popo-download-injection-icon svg.lucide-folder")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-resource-block")).toHaveCount(1);
+  await expect(firstButton.locator(".popo-download-fill")).toBeVisible();
+  await expect(firstButton.locator(".popo-download-activity-comet")).toHaveCount(1);
+  await expect(firstButton.locator(".popo-download-activity-comet")).toBeVisible();
+  await expect(firstButton).toHaveAttribute("aria-busy", "true");
+  await expectFolderMotionToAdvance(firstButton);
+  await expectFolderIconMotionInsideSafeArea(firstButton, ".popo-download-resource-block");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(firstButton).toHaveCSS("animation-name", "none");
+  await expect(page.locator(".popo-page-queue")).toHaveCSS("animation-name", "none");
 
   await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = true;
@@ -292,6 +465,10 @@ test("single React page root renders project count and recycled folder-row porta
     }
   });
   await expect(page.locator(".popo-toast[data-kind='error']")).toContainText("1 个未完成");
+  await expect(page.locator(".popo-toast[data-kind='error']")).toHaveCSS(
+    "background-image",
+    /linear-gradient/
+  );
   await expect(recycledButton).toHaveAttribute("data-state", "failed");
   await expect(recycledButton).toContainText("未完成 1 个");
   await expect(recycledButton).toContainText("重试");
@@ -302,6 +479,102 @@ test("single React page root renders project count and recycled folder-row porta
     ).length
   )).toBe(3);
   await expect(recycledButton).toHaveAttribute("data-state", "queued");
+});
+
+test("active folder motion starts on page load and restarts after row and UI remounts", async () => {
+  await launchExtension();
+  const page = await context.newPage();
+  await page.route("https://example.test/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<!doctype html><html><body></body></html>"
+  }));
+  await page.goto("https://example.test/team/pc/test/pageDetail/motion-recovery");
+  await page.setContent(`
+    <div data-test-id="virtuoso-scroller">
+      <div data-test-id="virtuoso-item-list">
+        <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">Motion recovery folder</span></div>
+          <div class="ownerName" style="flex:0 0 150px">Owner</div>
+        </div>
+      </div>
+    </div>
+  `);
+  await page.evaluate(() => {
+    const parentUrl = location.href;
+    const folderName = "Motion recovery folder";
+    const state = {
+      jobs: [{
+        id: "motion-job",
+        key: [parentUrl, "0", folderName.toLowerCase()].join("\u0000"),
+        status: "scanning",
+        folderName,
+        folderItemIndex: "0",
+        parentUrl,
+        startedAt: new Date(Date.now() - 8_000).toISOString(),
+        counts: { discoveredFiles: 42 }
+      }],
+      activeJobId: "motion-job",
+      mode: "scanning",
+      popupOpen: false
+    };
+    const listeners = new Set();
+    const runtime = {
+      getURL: () => "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+      sendMessage: async (message) => {
+        if (message.type === "GET_STATE") {
+          return { ok: true, state: JSON.parse(JSON.stringify(state)), settings: {} };
+        }
+        if (message.type === "CHECK_GOPEED") {
+          return { ok: true, connection: { connected: true }, settings: {} };
+        }
+        return { ok: true, state: JSON.parse(JSON.stringify(state)) };
+      },
+      onMessage: {
+        addListener: (listener) => listeners.add(listener),
+        removeListener: (listener) => listeners.delete(listener)
+      }
+    };
+    window.chrome = window.chrome || {};
+    Object.defineProperty(window.chrome, "runtime", { configurable: true, value: runtime });
+    window.__popoMotionTest = {
+      state,
+      emit() {
+        for (const listener of listeners) listener({ type: "FOLDER_TASK_STATUS" });
+      }
+    };
+  });
+  await page.addScriptTag({ path: resolve(projectRoot, "runtime/page-ui.js") });
+
+  const activeButton = page.locator(
+    '[data-item-index="0"] button.popo-stable-download-button'
+  );
+  await expect(activeButton).toHaveAttribute("data-state", "scanning");
+  await expectFolderMotionToAdvance(activeButton, { minimumProgress: 45 });
+
+  await page.evaluate(() => {
+    const row = document.querySelector('[data-item-index="0"]');
+    const replacement = row.cloneNode(true);
+    replacement.querySelector(".popo-react-download-anchor")?.remove();
+    replacement.querySelector(".pageName")?.removeAttribute("data-popo-download-host");
+    row.replaceWith(replacement);
+  });
+  await expect(activeButton).toHaveAttribute("data-state", "scanning");
+  await expectFolderMotionToAdvance(activeButton, { minimumProgress: 45 });
+
+  await page.evaluate(() => {
+    const job = window.__popoMotionTest.state.jobs[0];
+    job.status = "downloading";
+    job.counts = { files: 100, discoveredFiles: 100, success: 24, failed: 0, cancelled: 0 };
+    window.__popoMotionTest.state.mode = "downloading";
+    window.__popoMotionTest.emit();
+  });
+  await expect(activeButton).toHaveAttribute("data-state", "downloading");
+  await expectFolderMotionToAdvance(activeButton, { minimumProgress: 24 });
+
+  await page.evaluate(() => window.__POPO_REACT_PAGE_CLEANUP__?.());
+  await page.addScriptTag({ path: resolve(projectRoot, "runtime/page-ui.js") });
+  await expect(activeButton).toHaveAttribute("data-state", "downloading");
+  await expectFolderMotionToAdvance(activeButton, { minimumProgress: 24 });
 });
 
 test("popup uses simple wording and safely removes cancelled history", async () => {
@@ -377,6 +650,8 @@ test("popup uses simple wording and safely removes cancelled history", async () 
 
   await expect(popup.locator(".popup-queue-name")).toHaveText("Cancelled E2E folder");
   await expect(popup.locator(".popup-queue-status")).toHaveText("已停止");
+  await expect(popup.locator(".popup-queue-item")).toHaveAttribute("data-status", "cancelled");
+  await expect(popup.locator(".popup-queue-item")).toHaveCSS("background-image", /linear-gradient/);
   await expect(popup.getByRole("button", { name: "继续（2）" })).toBeVisible();
   await expect(popup.getByRole("button", { name: "移除" })).toBeVisible();
   await expect(popup.locator("body")).not.toContainText("隐藏工作区");
@@ -505,6 +780,8 @@ test("paused IndexedDB task survives popup refresh and browser restart", async (
   await popup.reload();
   await expect(popup.locator(".popup-queue-item")).toHaveCount(1);
   await expect(popup.locator(".popup-queue-name")).toHaveText("E2E recovery folder");
+  await expect(popup.locator(".popup-queue-item")).toHaveAttribute("data-status", "paused");
+  await expect(popup.locator(".popup-queue-item")).toHaveCSS("background-image", /linear-gradient/);
 
   await closeExtensionContext();
 

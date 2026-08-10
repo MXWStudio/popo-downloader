@@ -1,6 +1,27 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react";
 import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
+import {
+  Check,
+  CircleX,
+  Clock3,
+  Download,
+  FileQuestion,
+  Folder,
+  LoaderCircle,
+  Pause,
+  Search,
+  TriangleAlert,
+  type LucideIcon
+} from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   attentionJobs,
@@ -288,83 +309,107 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
 }
 
 function globalStyles(): string {
-  const logoUrl = chrome.runtime.getURL("assets/popo-logo.svg");
   return [
-    "[" + DOWNLOAD_HOST_ATTRIBUTE + "]{box-sizing:border-box!important;position:relative!important;padding-right:166px!important;}",
-    "." + DOWNLOAD_ANCHOR_CLASS + "{position:absolute!important;top:0!important;right:0!important;bottom:0!important;z-index:2!important;display:inline-flex!important;align-items:center!important;justify-content:flex-end!important;width:166px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "{box-sizing:border-box!important;position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 28px!important;width:28px!important;height:28px!important;overflow:visible!important;margin:0 3px!important;padding:0!important;border:1px solid #b9cce5!important;border-radius:7px!important;color:#1268e8!important;background-color:#fff!important;background-position:center!important;background-repeat:no-repeat!important;background-size:24px 24px!important;font:600 11px/1 'Segoe UI','Microsoft YaHei',sans-serif!important;white-space:nowrap!important;cursor:pointer!important;box-shadow:0 1px 3px rgba(24,61,106,.1)!important;color-scheme:light;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']{background-image:url('" + logoUrl + "')!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']::after{box-sizing:border-box!important;position:absolute!important;right:-2px!important;bottom:-2px!important;display:flex!important;align-items:center!important;justify-content:center!important;width:12px!important;height:12px!important;border:1.5px solid #fff!important;border-radius:999px!important;color:#fff!important;background:#1268e8!important;content:'↓'!important;font:700 9px/1 'Segoe UI',sans-serif!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-expanded='true']{justify-content:flex-start!important;overflow:hidden!important;padding:0 9px!important;background-image:none!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{flex-basis:86px!important;width:86px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing']{flex-basis:104px!important;width:104px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{flex-basis:154px!important;width:154px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty']{flex-basis:132px!important;width:132px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{flex-basis:158px!important;width:158px!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + ":hover{border-color:#1268e8!important;box-shadow:0 2px 7px rgba(18,104,232,.22)!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']:hover{background-color:#eaf3ff!important;}",
+    "[" + DOWNLOAD_HOST_ATTRIBUTE + "]{box-sizing:border-box!important;position:relative!important;padding-right:244px!important;}",
+    "." + DOWNLOAD_ANCHOR_CLASS + "{position:absolute!important;top:0!important;right:0!important;bottom:0!important;z-index:2!important;display:inline-flex!important;align-items:center!important;justify-content:flex-end!important;width:244px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "{--popo-gradient-surface:linear-gradient(145deg,#1d2a39 0%,#111923 100%);--popo-gradient-highlight:none;--popo-surface-border:#415267;--popo-surface-ink:#9ec9ff;box-sizing:border-box!important;position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 30px!important;width:30px!important;height:30px!important;overflow:visible!important;margin:0 3px!important;padding:0!important;border:1px solid var(--popo-surface-border)!important;border-radius:8px!important;color:var(--popo-surface-ink)!important;background-color:#111923!important;background-image:var(--popo-gradient-highlight),var(--popo-gradient-surface)!important;background-size:220% 100%,100% 100%!important;background-position:-130% 0,0 0!important;background-repeat:no-repeat!important;font:600 11px/1 'Segoe UI','Microsoft YaHei',sans-serif!important;white-space:nowrap!important;cursor:pointer!important;box-shadow:0 7px 18px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.055)!important;color-scheme:dark;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-expanded='true']{justify-content:flex-start!important;overflow:hidden!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{flex-basis:124px!important;width:124px!important;height:32px!important;padding:0 8px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing']{flex-basis:150px!important;width:150px!important;height:40px!important;padding:0 10px 8px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{flex-basis:232px!important;width:232px!important;height:48px!important;padding:0 10px 10px!important;border-radius:10px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty']{flex-basis:166px!important;width:166px!important;height:40px!important;padding:0 10px 8px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{flex-basis:196px!important;width:196px!important;height:40px!important;padding:0 10px 8px!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + ":hover{filter:brightness(1.08)!important;border-color:#5f88b8!important;box-shadow:0 9px 22px rgba(4,10,18,.3),0 0 0 1px rgba(103,170,255,.12)!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + ":disabled{cursor:wait!important;opacity:.82!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning']{color:#1268e8!important;border-color:#8db9f3!important;background:#f2f7ff!important;cursor:progress!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{color:#53657a!important;border-color:#c4cfdb!important;background:#f7f9fc!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success']{color:#087a5c!important;border-color:#87cfba!important;background:#f0fbf7!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{color:#1268e8!important;border-color:#8db9f3!important;background:#f2f7ff!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{color:#5f6e80!important;border-color:#bbc7d4!important;background:#f5f7fa!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning']{color:#946200!important;border-color:#e2bd68!important;background:#fff9e8!important;}",
-    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{color:#b4232d!important;border-color:#e5a3a8!important;background:#fff5f5!important;}",
-    ".popo-download-content{position:relative!important;z-index:1!important;display:flex!important;align-items:center!important;width:100%!important;min-width:0!important;gap:5px!important;overflow:hidden!important;}",
-    ".popo-download-state-icon{display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 12px!important;width:12px!important;height:12px!important;transform-origin:50% 50%!important;}",
-    ".popo-download-state-icon svg{display:block!important;width:12px!important;height:12px!important;overflow:visible!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning']{--popo-gradient-surface:linear-gradient(145deg,#17385a 0%,#12263b 52%,#101a27 100%);--popo-surface-border:#3e709e;--popo-surface-ink:#9ed1ff;cursor:progress!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{--popo-gradient-surface:linear-gradient(145deg,#263241 0%,#19222e 100%);--popo-surface-border:#4a596c;--popo-surface-ink:#b8c5d5;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success']{--popo-gradient-surface:linear-gradient(145deg,#173a34 0%,#10241f 100%);--popo-surface-border:#3e7566;--popo-surface-ink:#82ddc0;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{--popo-gradient-surface:linear-gradient(145deg,#153c55 0%,#123843 52%,#10251f 100%);--popo-surface-border:#398493;--popo-surface-ink:#9ee6dd;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='paused']{--popo-gradient-surface:linear-gradient(145deg,#393633 0%,#252421 100%);--popo-surface-border:#625d55;--popo-surface-ink:#d3cbc0;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning']{--popo-gradient-surface:linear-gradient(145deg,#403318 0%,#282114 100%);--popo-surface-border:#796238;--popo-surface-ink:#f1d17f;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{--popo-gradient-surface:linear-gradient(145deg,#46262c 0%,#29191e 100%);--popo-surface-border:#814c55;--popo-surface-ink:#ffadb7;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{--popo-gradient-highlight:linear-gradient(105deg,transparent 28%,rgba(255,255,255,.035) 39%,rgba(142,208,255,.17) 48%,rgba(255,255,255,.05) 57%,transparent 69%);animation:popo-gradient-surface-flow 4.8s ease-in-out infinite!important;}",
+    ".popo-download-idle-icon{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:18px!important;height:18px!important;}",
+    ".popo-download-idle-icon svg{display:block!important;width:18px!important;height:18px!important;}",
+    ".popo-download-content{position:relative!important;z-index:5!important;display:flex!important;align-items:center!important;width:100%!important;min-width:0!important;gap:6px!important;overflow:hidden!important;}",
+    ".popo-download-state-icon{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 20px!important;width:20px!important;height:22px!important;overflow:visible!important;}",
+    ".popo-download-state-icon-motion{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:14px!important;height:14px!important;transform-origin:50% 50%!important;}",
+    ".popo-download-state-icon-motion svg{display:block!important;width:14px!important;height:14px!important;overflow:visible!important;}",
+    ".popo-download-injection-icon .popo-download-folder-glyph{position:absolute!important;z-index:2!important;right:1px!important;bottom:0!important;display:block!important;width:17px!important;height:17px!important;overflow:visible!important;}",
+    ".popo-download-resource-block{position:absolute!important;z-index:1!important;top:0!important;left:7px!important;display:block!important;width:6px!important;height:6px!important;border:1px solid currentColor!important;border-radius:2px!important;background:#dff2ff!important;box-shadow:0 0 5px rgba(18,104,232,.42)!important;}",
     ".popo-download-primary{flex:none!important;font-weight:700!important;line-height:1!important;}",
     ".popo-download-secondary{min-width:0!important;margin-left:auto!important;overflow:hidden!important;color:currentColor!important;font-size:10px!important;font-weight:600!important;line-height:1!important;text-overflow:ellipsis!important;opacity:.82!important;}",
-    ".popo-download-rail{position:absolute!important;right:7px!important;bottom:2px!important;left:7px!important;height:3px!important;overflow:hidden!important;border-radius:999px!important;background:repeating-linear-gradient(90deg,rgba(70,100,138,.32) 0 4px,rgba(70,100,138,.09) 4px 8px)!important;}",
-    ".popo-download-fill{position:absolute!important;inset:0 auto 0 0!important;display:block!important;height:100%!important;border-radius:inherit!important;background:linear-gradient(90deg,#1268e8,#13a17a)!important;}",
-    ".popo-download-wave{position:absolute!important;inset:0 auto 0 0!important;display:block!important;width:36%!important;height:100%!important;border-radius:inherit!important;background:linear-gradient(90deg,transparent,rgba(55,190,255,.72) 24%,#1268e8 52%,rgba(30,195,166,.8) 76%,transparent)!important;box-shadow:0 0 7px rgba(18,104,232,.48)!important;}",
+    "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued'] .popo-download-secondary{flex:0 0 auto!important;min-width:max-content!important;overflow:visible!important;text-overflow:clip!important;opacity:.9!important;}",
+    ".popo-download-work-beat{display:inline-flex!important;align-items:flex-end!important;gap:2px!important;flex:0 0 auto!important;height:12px!important;}",
+    ".popo-download-work-beat i{display:block!important;width:2px!important;height:8px!important;border-radius:999px!important;background:currentColor!important;transform-origin:50% 100%!important;}",
+    ".popo-download-work-beat i:first-child{height:4px!important;}.popo-download-work-beat i:last-child{height:6px!important;}",
+    ".popo-download-rail{position:absolute!important;right:10px!important;bottom:5px!important;left:10px!important;height:8px!important;overflow:hidden!important;border-radius:999px!important;background:rgba(70,100,138,.16)!important;box-shadow:inset 0 0 0 1px rgba(70,100,138,.08)!important;}",
+    ".popo-download-fill,.popo-download-estimate-fill{position:absolute!important;z-index:2!important;inset:0 auto 0 0!important;display:block!important;height:100%!important;overflow:hidden!important;border-radius:inherit!important;background:linear-gradient(90deg,#1268e8,#13a17a)!important;}",
+    ".popo-download-estimate-fill{z-index:1!important;background:linear-gradient(90deg,rgba(18,104,232,.5),rgba(19,161,122,.62))!important;}",
+    ".popo-download-wave{position:absolute!important;z-index:3!important;inset:0 auto 0 0!important;display:block!important;width:36%!important;height:100%!important;border-radius:inherit!important;background:linear-gradient(90deg,transparent,rgba(55,190,255,.72) 24%,#1268e8 52%,rgba(30,195,166,.8) 76%,transparent)!important;box-shadow:0 0 7px rgba(18,104,232,.48)!important;}",
+    ".popo-download-activity-comet{position:absolute!important;z-index:3!important;top:0!important;bottom:0!important;width:30%!important;border-radius:inherit!important;background:linear-gradient(90deg,transparent,rgba(121,190,255,.82),rgba(255,255,255,.95),transparent)!important;}",
+    ".popo-download-activity-packet{position:absolute!important;z-index:4!important;top:1px!important;display:block!important;width:6px!important;height:6px!important;border-radius:50%!important;background:#dff2ff!important;box-shadow:0 0 7px rgba(120,192,255,.9)!important;}",
+    ".popo-download-activity-packet:nth-of-type(2){top:2px!important;width:4px!important;height:4px!important;}.popo-download-activity-packet:nth-of-type(3){top:1.5px!important;width:5px!important;height:5px!important;}",
     ".popo-download-warning-segment{position:absolute!important;right:0!important;bottom:0!important;width:13px!important;height:100%!important;border-radius:999px!important;background:#e6a700!important;box-shadow:-3px 0 5px rgba(230,167,0,.25)!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'] .popo-download-fill,." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'] .popo-download-fill{background:#0b9b74!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed'] .popo-download-fill{background:#d64550!important;}",
+    "@keyframes popo-gradient-surface-flow{0%,100%{background-position:-130% 0,0 0;box-shadow:0 7px 18px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.055)}50%{background-position:130% 0,0 0;box-shadow:0 10px 25px rgba(16,82,126,.3),inset 0 1px 0 rgba(255,255,255,.075)}}",
+    "@media(prefers-reduced-motion:reduce){." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{animation:none!important;background-position:50% 0,0 0!important;}.popo-download-fill,.popo-download-estimate-fill{transition:none!important;}}",
     "#" + PROJECT_COUNT_ID + "{display:contents!important;}",
-    ".popo-react-project-count{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:72px;height:32px;margin-left:10px;margin-right:auto;padding:0 10px;border:1px solid #e0e6ee;border-radius:6px;color:#59697a;background:#fff;font:500 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;}",
-    ".popo-react-project-count[data-state='loading']{color:#7b8795;}",
-    "@media(prefers-color-scheme:dark){." + DOWNLOAD_BUTTON_CLASS + "{color:#9ec9ff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='idle']::after{border-color:#222a35!important;background:#4d9aff!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='preparing'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{color:#9ec9ff!important;border-color:#466f9f!important;background:#202d3d!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='success']{color:#81d9bd!important;border-color:#3e7566!important;background:#1d302c!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='empty'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='warning']{color:#f1cc73!important;border-color:#756038!important;background:#332c1f!important;}." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed']{color:#ffabb1!important;border-color:#7d484e!important;background:#382327!important;}.popo-react-project-count{color:#b6c2d0;border-color:#3b4655;background:#202832;}}",
-    ":is(html,body).dark ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-theme='dark'] ." + DOWNLOAD_BUTTON_CLASS + ",:is(html,body)[data-color-mode='dark'] ." + DOWNLOAD_BUTTON_CLASS + "{color:#9ec9ff!important;border-color:#4d5a6b!important;background-color:#222a35!important;box-shadow:0 1px 4px rgba(0,0,0,.28)!important;color-scheme:dark;}",
-    ":is(html,body).dark .popo-react-project-count,:is(html,body)[data-theme='dark'] .popo-react-project-count,:is(html,body)[data-color-mode='dark'] .popo-react-project-count{color:#b6c2d0;border-color:#3b4655;background:#202832;}"
+    ".popo-react-project-count{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:72px;height:32px;margin-left:10px;margin-right:auto;padding:0 10px;border:1px solid #526f8f;border-radius:7px;color:#eef6ff;background-color:#132235;background-image:radial-gradient(circle at 18% 0%,rgba(111,186,255,.26),transparent 58%),linear-gradient(135deg,#2c4968 0%,#19334d 52%,#0f1a26 100%);background-size:100% 100%;box-shadow:0 6px 16px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.09);font:600 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;color-scheme:dark;}",
+    ".popo-react-project-count[data-state='loading']{color:#91a0b2;}",
+    "@media(prefers-color-scheme:dark){.popo-react-project-count{box-shadow:0 6px 16px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.05);}}",
+    ":is(html,body).dark .popo-react-project-count,:is(html,body)[data-theme='dark'] .popo-react-project-count,:is(html,body)[data-color-mode='dark'] .popo-react-project-count{color:#eef6ff;border-color:#526f8f;}"
   ].join("\n");
 }
 
 const SHADOW_STYLES = [
-  ":host{all:initial;color-scheme:light;}",
+  ":host{all:initial;color-scheme:dark;--popo-gradient-surface:linear-gradient(145deg,#1b2735 0%,#111923 100%);--popo-gradient-blue:linear-gradient(145deg,#17385a 0%,#12263b 56%,#101a27 100%);--popo-gradient-download:linear-gradient(145deg,#153c55 0%,#123843 54%,#10251f 100%);--popo-gradient-queued:linear-gradient(145deg,#263241 0%,#19222e 100%);--popo-gradient-paused:linear-gradient(145deg,#393633 0%,#252421 100%);--popo-gradient-warning:linear-gradient(145deg,#403318 0%,#282114 100%);--popo-gradient-failed:linear-gradient(145deg,#46262c 0%,#29191e 100%);--popo-gradient-success:linear-gradient(145deg,#173a34 0%,#10241f 100%);--popo-gradient-highlight:linear-gradient(105deg,transparent 29%,rgba(255,255,255,.03) 40%,rgba(140,207,255,.14) 49%,rgba(255,255,255,.045) 58%,transparent 70%);--popo-ink:#edf3fb;--popo-muted:#a5b2c2;--popo-line:#3b4a5d;--popo-control:linear-gradient(145deg,#263342,#19232f);}",
   "*{box-sizing:border-box;}",
   "button{font:600 11px/1 'Segoe UI','Microsoft YaHei',sans-serif;}",
-  ".popo-page-queue{position:fixed;left:20px;bottom:20px;z-index:2147483645;width:min(380px,calc(100vw - 40px));max-height:min(62vh,560px);overflow:hidden;border:1px solid #cfe0f7;border-radius:12px;color:#223247;background:rgba(255,255,255,.98);box-shadow:0 12px 38px rgba(24,61,106,.2);font-family:'Segoe UI','Microsoft YaHei',sans-serif;}",
+  ".popo-page-queue{--popo-current-surface:var(--popo-gradient-surface);position:fixed;left:20px;bottom:20px;z-index:2147483645;width:min(380px,calc(100vw - 40px));max-height:min(62vh,560px);overflow:hidden;border:1px solid var(--popo-line);border-radius:12px;color:var(--popo-ink);background-color:#111923;background-image:var(--popo-current-surface);background-repeat:no-repeat;box-shadow:0 16px 42px rgba(2,7,13,.42),inset 0 1px 0 rgba(255,255,255,.05);font-family:'Segoe UI','Microsoft YaHei',sans-serif;}",
+  ".popo-page-queue[data-status='queued'],.popo-page-queue[data-status='waiting_worker']{--popo-current-surface:var(--popo-gradient-queued);}",
+  ".popo-page-queue[data-status='scanning'],.popo-page-queue[data-status='scan_complete'],.popo-page-queue[data-status='awaiting_confirmation'],.popo-page-queue[data-status='starting']{--popo-current-surface:var(--popo-gradient-blue);}",
+  ".popo-page-queue[data-status='downloading']{--popo-current-surface:var(--popo-gradient-download);}",
+  ".popo-page-queue[data-status='paused'],.popo-page-queue[data-status='draining'],.popo-page-queue[data-status='draining_paused'],.popo-page-queue[data-status='cancelled']{--popo-current-surface:var(--popo-gradient-paused);}",
+  ".popo-page-queue[data-status='complete']{--popo-current-surface:var(--popo-gradient-success);}",
+  ".popo-page-queue[data-status='failed']{--popo-current-surface:var(--popo-gradient-failed);}",
+  ".popo-page-queue[data-status='scanning'],.popo-page-queue[data-status='downloading']{background-image:var(--popo-gradient-highlight),var(--popo-current-surface);background-size:220% 100%,100% 100%;animation:popo-shadow-surface-flow 5.2s ease-in-out infinite;}",
   ".popo-page-queue[data-collapsed='true']{width:min(330px,calc(100vw - 40px));}",
-  ".popo-page-queue-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;background:#f5f9ff;}",
-  ".popo-page-queue[data-collapsed='false'] .popo-page-queue-header{border-bottom:1px solid #e1e9f2;}",
-  ".popo-page-queue-heading{min-width:0;overflow:hidden;color:#1d2d42;font-size:13px;font-weight:700;text-overflow:ellipsis;white-space:nowrap;}",
-  ".popo-page-queue-summary{color:#607086;font-size:11px;font-weight:500;}",
-  ".popo-page-queue-toggle,.popo-page-action,.popo-toast-action{min-width:0;height:27px;padding:0 9px;border:1px solid #b9cce4;border-radius:6px;color:#1268e8;background:#fff;cursor:pointer;}",
+  ".popo-page-queue-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.012));}",
+  ".popo-page-queue[data-collapsed='false'] .popo-page-queue-header{border-bottom:1px solid rgba(151,174,201,.16);}",
+  ".popo-page-queue-heading{min-width:0;overflow:hidden;color:var(--popo-ink);font-size:13px;font-weight:700;text-overflow:ellipsis;white-space:nowrap;}",
+  ".popo-page-queue-summary{color:var(--popo-muted);font-size:11px;font-weight:500;}",
+  ".popo-page-queue-toggle,.popo-page-action,.popo-toast-action{min-width:0;height:27px;padding:0 9px;border:1px solid #46566a;border-radius:7px;color:#a8cdff;background-color:#1a2430;background-image:var(--popo-control);box-shadow:inset 0 1px 0 rgba(255,255,255,.045);cursor:pointer;}",
   ".popo-page-queue-toggle:disabled,.popo-page-action:disabled,.popo-toast-action:disabled{cursor:wait;opacity:.6;}",
   ".popo-page-queue-body{max-height:min(52vh,470px);overflow:auto;padding:11px 13px 13px;}",
   ".popo-page-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}",
-  ".popo-page-job-name{overflow:hidden;color:#1d2d42;font-size:13px;font-weight:650;text-overflow:ellipsis;white-space:nowrap;}",
-  ".popo-page-job-state{flex:none;color:#1268e8;font-size:11px;font-weight:650;}",
-  ".popo-page-job-detail{margin-top:5px;color:#607086;font-size:11px;line-height:1.45;}",
-  ".popo-page-queue-more{margin-top:7px;color:#607086;font-size:11px;line-height:1.45;}",
-  ".popo-page-progress{overflow:hidden;height:6px;margin-top:8px;border-radius:999px;background:#dfe8f3;}",
+  ".popo-page-job-name{overflow:hidden;color:var(--popo-ink);font-size:13px;font-weight:650;text-overflow:ellipsis;white-space:nowrap;}",
+  ".popo-page-job-state{flex:none;color:#8bc4ff;font-size:11px;font-weight:650;}",
+  ".popo-page-queue[data-status='queued'] .popo-page-job-state,.popo-page-queue[data-status='waiting_worker'] .popo-page-job-state{color:#bac6d5;}",
+  ".popo-page-queue[data-status='paused'] .popo-page-job-state,.popo-page-queue[data-status='draining'] .popo-page-job-state,.popo-page-queue[data-status='draining_paused'] .popo-page-job-state,.popo-page-queue[data-status='cancelled'] .popo-page-job-state{color:#d5cdc2;}",
+  ".popo-page-queue[data-status='complete'] .popo-page-job-state{color:#82ddc0;}",
+  ".popo-page-queue[data-status='failed'] .popo-page-job-state{color:#ffadb7;}",
+  ".popo-page-job-detail{margin-top:5px;color:var(--popo-muted);font-size:11px;line-height:1.45;}",
+  ".popo-page-queue-more{margin-top:7px;color:var(--popo-muted);font-size:11px;line-height:1.45;}",
+  ".popo-page-progress{overflow:hidden;height:7px;margin-top:8px;border-radius:999px;background:rgba(7,14,23,.44);box-shadow:inset 0 0 0 1px rgba(148,178,210,.1);}",
   ".popo-page-progress i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#1268e8,#0aa17a);transition:width .2s ease;}",
   ".popo-page-progress[data-indeterminate='true'] i{width:38%;animation:popo-react-progress 1.2s ease-in-out infinite alternate;}",
   "@keyframes popo-react-progress{from{transform:translateX(-25%)}to{transform:translateX(190%)}}",
   ".popo-page-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:6px;margin-top:9px;}",
-  ".popo-page-action[data-kind='danger']{color:#a32626;border-color:#e3a5a5;background:#fff7f7;}",
-  ".popo-page-confirm{margin-top:9px;padding:8px;border:1px solid #dfe5ec;border-radius:7px;background:#f7f9fc;}",
-  ".popo-page-confirm p{margin:0;color:#59697a;font-size:11px;line-height:1.5;}",
+  ".popo-page-action[data-kind='danger']{color:#ffafb7;border-color:#774750;background-image:var(--popo-gradient-failed);}",
+  ".popo-page-confirm{margin-top:9px;padding:8px;border:1px solid #58534d;border-radius:8px;background-image:var(--popo-gradient-paused);}",
+  ".popo-page-confirm p{margin:0;color:#c7c0b7;font-size:11px;line-height:1.5;}",
   ".popo-toast-viewport{position:fixed;right:24px;bottom:24px;z-index:2147483646;display:grid;width:min(340px,calc(100vw - 48px));gap:8px;font-family:'Segoe UI','Microsoft YaHei',sans-serif;}",
-  ".popo-toast{padding:13px 15px;border:1px solid #cfe0f7;border-radius:10px;color:#223247;background:rgba(255,255,255,.98);box-shadow:0 10px 35px rgba(24,61,106,.18);}",
-  ".popo-toast[data-kind='error']{border-color:#e7b0b0;background:#fff8f8;}",
+  ".popo-toast{padding:13px 15px;border:1px solid #3f6f62;border-radius:11px;color:var(--popo-ink);background-color:#10241f;background-image:var(--popo-gradient-success);box-shadow:0 14px 38px rgba(2,7,13,.4),inset 0 1px 0 rgba(255,255,255,.05);}",
+  ".popo-toast[data-kind='error']{border-color:#7d4a53;background-color:#29191e;background-image:var(--popo-gradient-failed);}",
   ".popo-toast strong{display:block;overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap;}",
-  ".popo-toast p{margin:4px 0 0;color:#607086;font-size:12px;line-height:1.45;}",
+  ".popo-toast p{margin:4px 0 0;color:var(--popo-muted);font-size:12px;line-height:1.45;}",
   ".popo-toast-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:8px;}",
-  ".popo-toast-action[data-kind='quiet']{color:#607086;border-color:#d7dee7;}",
-  "@media(prefers-color-scheme:dark){:host{color-scheme:dark}.popo-page-queue,.popo-toast{color:#e9eff8;border-color:#38485b;background:rgba(25,32,42,.98);box-shadow:0 12px 38px rgba(0,0,0,.42)}.popo-page-queue-header{background:#202a38}.popo-page-queue[data-collapsed='false'] .popo-page-queue-header{border-bottom-color:#33404f}.popo-page-queue-heading,.popo-page-job-name{color:#edf3fb}.popo-page-queue-summary,.popo-page-job-detail,.popo-page-queue-more,.popo-toast p,.popo-page-confirm p{color:#a4b0c0}.popo-page-job-state{color:#67aaff}.popo-page-queue-toggle,.popo-page-action,.popo-toast-action{color:#a8cdff;border-color:#465365;background:#202832}.popo-page-action[data-kind='danger']{color:#ffaaaa;border-color:#7c4a50;background:#382328}.popo-page-confirm{border-color:#38485b;background:#202832}.popo-toast[data-kind='error']{border-color:#7c4a50;background:#382328}}",
+  ".popo-toast-action[data-kind='quiet']{color:#aab6c6;border-color:#465365;}",
+  "@keyframes popo-shadow-surface-flow{0%,100%{background-position:-130% 0,0 0}50%{background-position:130% 0,0 0}}",
+  "@media(prefers-reduced-motion:reduce){.popo-page-queue[data-status='scanning'],.popo-page-queue[data-status='downloading']{animation:none;background-position:50% 0,0 0}.popo-page-progress[data-indeterminate='true'] i{animation:none;transform:translateX(80%)}.popo-page-progress i{transition:none}}",
+  "@media(prefers-color-scheme:dark){:host{color-scheme:dark}.popo-page-queue,.popo-toast{box-shadow:0 16px 44px rgba(0,0,0,.46),inset 0 1px 0 rgba(255,255,255,.05)}}",
   "@media(max-width:620px){.popo-page-queue{left:12px;bottom:12px;width:calc(100vw - 24px)}.popo-toast-viewport{right:12px;bottom:12px;width:calc(100vw - 24px)}}"
 ].join("\n");
 
@@ -630,6 +675,21 @@ function ProjectCount({ count }: { count: number | null }) {
   );
 }
 
+const FOLDER_STATE_ICONS: Partial<Record<
+  ReturnType<typeof folderButtonDisplay>["visualState"],
+  LucideIcon
+>> = {
+  queued: Clock3,
+  preparing: LoaderCircle,
+  scanning: Search,
+  ready: Check,
+  paused: Pause,
+  success: Check,
+  empty: FileQuestion,
+  warning: TriangleAlert,
+  failed: CircleX
+};
+
 function FolderButtonStateIcon({
   visualState,
   reducedMotion
@@ -637,66 +697,306 @@ function FolderButtonStateIcon({
   visualState: ReturnType<typeof folderButtonDisplay>["visualState"];
   reducedMotion: boolean | null;
 }) {
-  if (visualState !== "scanning") return null;
+  if (visualState === "downloading") {
+    return (
+      <span
+        className="popo-download-state-icon popo-download-injection-icon"
+        aria-hidden="true"
+      >
+        <Folder
+          className="popo-download-folder-glyph"
+          aria-hidden="true"
+          focusable="false"
+          strokeWidth={1.8}
+        />
+        <motion.i
+          className="popo-download-resource-block"
+          initial={reducedMotion ? false : { y: -1, opacity: 0, scale: .72, rotate: -8 }}
+          animate={reducedMotion
+            ? { y: 4, opacity: .82, scale: .9, rotate: 0 }
+            : {
+                y: [-1, 2, 7, 10],
+                opacity: [0, 1, 1, 0],
+                scale: [.72, 1, .94, .64],
+                rotate: [-8, 4, 0, 0]
+              }}
+          transition={reducedMotion
+            ? { duration: 0 }
+            : { duration: .9, ease: "easeIn" as const, repeat: Infinity }}
+        />
+      </span>
+    );
+  }
+
+  const Icon = FOLDER_STATE_ICONS[visualState];
+  if (!Icon) return null;
+
+  const activeMotion = (() => {
+    if (reducedMotion) return { initial: false, animate: {}, transition: { duration: 0 } };
+    if (visualState === "scanning") {
+      return {
+        initial: { x: -1, y: 1, rotate: -8, scale: .86, opacity: .68 },
+        animate: {
+          x: [-1, 1, -1],
+          y: [1, -2, 0, 1],
+          rotate: [-8, 7, 1, -8],
+          scale: [.86, 1.13, .96, .86],
+          opacity: [.68, 1, .84, .68]
+        },
+        transition: { duration: .92, ease: "easeInOut" as const, repeat: Infinity }
+      };
+    }
+    if (visualState === "preparing") {
+      return {
+        initial: { rotate: 0 },
+        animate: { rotate: [0, 360] },
+        transition: { duration: 1.1, ease: "linear" as const, repeat: Infinity }
+      };
+    }
+    if (visualState === "queued") {
+      return {
+        initial: { scale: .9, opacity: .65 },
+        animate: { scale: [.9, 1.08, .9], opacity: [.65, 1, .65] },
+        transition: { duration: 1.4, ease: "easeInOut" as const, repeat: Infinity }
+      };
+    }
+    return { initial: false, animate: {}, transition: { duration: 0 } };
+  })();
+
   return (
-    <motion.span
+    <span
       className="popo-download-state-icon"
       aria-hidden="true"
-      initial={false}
-      animate={reducedMotion
-        ? { x: 0, y: 0, rotate: 0 }
-        : { x: [-1, 1, -1], y: [0, -1, 0], rotate: [-8, 8, -8] }}
-      transition={reducedMotion
-        ? { duration: 0 }
-        : { duration: 1.15, ease: "easeInOut", repeat: Infinity }}
     >
-      <svg viewBox="0 0 16 16" fill="none" focusable="false">
-        <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.7" />
-        <path d="M10.25 10.25 14 14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-        <path d="M4.8 7h4.4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity=".58" />
-      </svg>
-    </motion.span>
+      <motion.span
+        className="popo-download-state-icon-motion"
+        initial={activeMotion.initial}
+        animate={activeMotion.animate}
+        transition={activeMotion.transition}
+      >
+        <Icon aria-hidden="true" focusable="false" strokeWidth={1.8} />
+      </motion.span>
+    </span>
+  );
+}
+
+function FolderWorkBeat({
+  active,
+  reducedMotion
+}: {
+  active: boolean;
+  reducedMotion: boolean | null;
+}) {
+  if (!active) return null;
+  return (
+    <span className="popo-download-work-beat" aria-hidden="true">
+      {[0, 1, 2].map((index) => (
+        <motion.i
+          key={index}
+          initial={reducedMotion ? false : { scaleY: .45, opacity: .48 }}
+          animate={reducedMotion
+            ? { scaleY: 1, opacity: .75 }
+            : { scaleY: [.45, 1.2, .55], opacity: [.48, 1, .58] }}
+          transition={reducedMotion
+            ? { duration: 0 }
+            : {
+                duration: .72,
+                delay: index * -.24,
+                ease: "easeInOut",
+                repeat: Infinity
+              }}
+        />
+      ))}
+    </span>
+  );
+}
+
+const OPTIMISTIC_SCAN_START = 12;
+const OPTIMISTIC_SCAN_LIMIT = 89;
+const OPTIMISTIC_SCAN_TIME_CONSTANT_MS = 10_700;
+
+function optimisticScanProgressAt(startedAt: string | undefined, now = Date.now()): number {
+  const parsedStartedAt = Date.parse(String(startedAt || ""));
+  const elapsed = Number.isFinite(parsedStartedAt)
+    ? Math.max(0, now - parsedStartedAt)
+    : 0;
+  const progress = OPTIMISTIC_SCAN_LIMIT -
+    (OPTIMISTIC_SCAN_LIMIT - OPTIMISTIC_SCAN_START) *
+    Math.exp(-elapsed / OPTIMISTIC_SCAN_TIME_CONSTANT_MS);
+  return Math.min(OPTIMISTIC_SCAN_LIMIT, Math.max(OPTIMISTIC_SCAN_START, progress));
+}
+
+function useOptimisticScanProgress(
+  active: boolean,
+  reducedMotion: boolean | null,
+  startedAt: string | undefined
+): number {
+  const fallbackStartedAt = useRef(Date.now());
+  const wasActive = useRef(active);
+  const [progress, setProgress] = useState(
+    active ? optimisticScanProgressAt(startedAt) : 0
+  );
+  useEffect(() => {
+    if (!active) {
+      wasActive.current = false;
+      fallbackStartedAt.current = Date.now();
+      setProgress(0);
+      return;
+    }
+    const parsedStartedAt = Date.parse(String(startedAt || ""));
+    if (!Number.isFinite(parsedStartedAt) && !wasActive.current) {
+      fallbackStartedAt.current = Date.now();
+    }
+    wasActive.current = true;
+    const progressStartedAt = Number.isFinite(parsedStartedAt)
+      ? startedAt
+      : new Date(fallbackStartedAt.current).toISOString();
+    if (reducedMotion) {
+      setProgress(optimisticScanProgressAt(progressStartedAt));
+      return;
+    }
+    const update = () => setProgress(optimisticScanProgressAt(progressStartedAt));
+    update();
+    const timer = window.setInterval(update, 120);
+    return () => window.clearInterval(timer);
+  }, [active, reducedMotion, startedAt]);
+  return progress;
+}
+
+function FolderProgressFill({
+  className,
+  progress,
+  reducedMotion,
+  transitionMs
+}: {
+  className: string;
+  progress: number;
+  reducedMotion: boolean | null;
+  transitionMs: number;
+}) {
+  const [transitionEnabled, setTransitionEnabled] = useState(false);
+  useLayoutEffect(() => {
+    if (reducedMotion) return;
+    const frame = window.requestAnimationFrame(() => setTransitionEnabled(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [reducedMotion]);
+  return (
+    <span
+      className={className}
+      style={{
+        width: `${progress}%`,
+        transition: transitionEnabled && !reducedMotion
+          ? `width ${transitionMs}ms cubic-bezier(.22,.78,.24,1)`
+          : "none"
+      }}
+    />
   );
 }
 
 function FolderButtonRail({
   display,
-  reducedMotion
+  reducedMotion,
+  motionKey,
+  scanStartedAt
 }: {
   display: ReturnType<typeof folderButtonDisplay>;
   reducedMotion: boolean | null;
+  motionKey: string;
+  scanStartedAt: string | undefined;
 }) {
+  const scanning = display.visualState === "scanning";
+  const downloading = display.visualState === "downloading";
+  const working = scanning || downloading;
+  const estimatedProgress = useOptimisticScanProgress(
+    scanning,
+    reducedMotion,
+    scanStartedAt
+  );
   const visible = display.indeterminate || display.progress != null;
   return (
-    <AnimatePresence initial={false}>
+    <AnimatePresence>
       {visible && (
         <motion.span
           key={display.indeterminate ? "indeterminate" : "determinate"}
           className="popo-download-rail"
           aria-hidden="true"
-          initial={reducedMotion ? false : { opacity: 0 }}
+          initial={false}
           animate={{ opacity: 1 }}
           exit={{ opacity: reducedMotion ? 1 : 0 }}
           transition={{ duration: reducedMotion ? 0 : 0.16 }}
         >
-          {display.indeterminate ? (
+          {scanning ? (
+            <FolderProgressFill
+              key={`estimate:${motionKey}`}
+              className="popo-download-estimate-fill"
+              progress={estimatedProgress}
+              reducedMotion={reducedMotion}
+              transitionMs={180}
+            />
+          ) : display.indeterminate && !downloading ? (
             <motion.span
+              key={`wave:${motionKey}`}
               className="popo-download-wave"
-              initial={false}
+              initial={reducedMotion ? false : { x: "-120%" }}
               animate={reducedMotion ? { x: "70%" } : { x: ["-120%", "260%"] }}
               transition={reducedMotion
                 ? { duration: 0 }
                 : { duration: 1.15, ease: "easeInOut", repeat: Infinity }}
             />
-          ) : (
-            <motion.span
+          ) : display.progress != null ? (
+            <FolderProgressFill
+              key={`fill:${motionKey}`}
               className="popo-download-fill"
-              initial={false}
-              animate={{ width: `${display.progress || 0}%` }}
-              transition={reducedMotion
-                ? { duration: 0 }
-                : { type: "spring", stiffness: 360, damping: 34 }}
+              progress={display.progress || 0}
+              reducedMotion={reducedMotion}
+              transitionMs={240}
             />
+          ) : null}
+          {working && (
+            <>
+              <motion.span
+                key={`comet:${motionKey}`}
+                className="popo-download-activity-comet"
+                initial={reducedMotion
+                  ? false
+                  : { left: "-30%", opacity: 0, scaleX: .55 }}
+                animate={reducedMotion
+                  ? { left: "72%", opacity: .7, scaleX: 1 }
+                  : {
+                      left: ["-30%", "70%", "74%", "108%"],
+                      opacity: [0, 1, .72, 0],
+                      scaleX: [.55, 1.22, .7, 1]
+                    }}
+                transition={reducedMotion
+                  ? { duration: 0 }
+                  : { duration: 1.22, ease: "easeInOut", repeat: Infinity }}
+              />
+              {[0, 1, 2].map((index) => (
+                <motion.i
+                  key={`${motionKey}:packet:${index}`}
+                  className="popo-download-activity-packet"
+                  initial={reducedMotion
+                    ? false
+                    : { left: "-6%", y: 0, opacity: 0, scale: .55 }}
+                  animate={reducedMotion
+                    ? { left: `${32 + index * 18}%`, opacity: .72, scale: 1 }
+                    : {
+                        left: ["-6%", "38%", "43%", "103%"],
+                        y: [0, -1, 1, 0],
+                        opacity: [0, 1, .75, 0],
+                        scale: [.55, 1.3, .7, 1.05]
+                      }}
+                  transition={reducedMotion
+                    ? { duration: 0 }
+                    : {
+                        duration: 1.88,
+                        delay: index * -.62,
+                        ease: "easeInOut",
+                        repeat: Infinity
+                      }}
+                />
+              ))}
+            </>
           )}
           {display.warningSegment && (
             <motion.span
@@ -737,6 +1037,7 @@ function FolderDownloadButton({
     : null;
   const visibleJob = activeJob || transitionOutcome || outcome;
   const display = folderButtonDisplay(visibleJob, starting);
+  const motionKey = `${visibleJob?.id || "transient"}:${display.visualState}`;
   const terminalJob = visibleJob && jobIsTerminal(visibleJob) ? visibleJob : null;
   const statusText = [display.primary, display.secondary].filter(Boolean).join("，");
   const title = starting
@@ -842,14 +1143,28 @@ function FolderDownloadButton({
       disabled={starting}
       title={title}
       aria-label={`${item.name}：${title}`}
-      aria-busy={display.indeterminate || undefined}
+      aria-busy={[
+        "preparing",
+        "scanning",
+        "downloading"
+      ].includes(display.visualState) || undefined}
       onMouseDown={(event) => event.stopPropagation()}
       onClick={(event) => void handleClick(event)}
     >
-      <AnimatePresence initial={false} mode="popLayout">
+      {display.visualState === "idle" && (
+        <motion.span
+          className="popo-download-idle-icon"
+          aria-hidden="true"
+          initial={false}
+          whileHover={reducedMotion ? {} : { y: 1, scale: 1.08 }}
+        >
+          <Download aria-hidden="true" focusable="false" strokeWidth={1.8} />
+        </motion.span>
+      )}
+      <AnimatePresence mode="popLayout">
         {display.primary && (
           <motion.span
-            key={`${display.visualState}:${visibleJob?.status || "starting"}`}
+            key={`${visibleJob?.id || "transient"}:${display.visualState}:${visibleJob?.status || "starting"}`}
             className="popo-download-content"
             initial={reducedMotion ? false : { opacity: 0, y: 3 }}
             animate={{ opacity: 1, y: 0 }}
@@ -861,13 +1176,22 @@ function FolderDownloadButton({
               reducedMotion={reducedMotion}
             />
             <span className="popo-download-primary">{display.primary}</span>
+            <FolderWorkBeat
+              active={["scanning", "downloading"].includes(display.visualState)}
+              reducedMotion={reducedMotion}
+            />
             {display.secondary && (
               <span className="popo-download-secondary">{display.secondary}</span>
             )}
           </motion.span>
         )}
       </AnimatePresence>
-      <FolderButtonRail display={display} reducedMotion={reducedMotion} />
+      <FolderButtonRail
+        display={display}
+        reducedMotion={reducedMotion}
+        motionKey={motionKey}
+        scanStartedAt={visibleJob?.startedAt}
+      />
     </motion.button>
   );
 }
@@ -939,6 +1263,7 @@ function QueueDock({
     <aside
       className="popo-page-queue"
       data-collapsed={expanded ? "false" : "true"}
+      data-status={primary.status}
       aria-label="POPO 下载任务"
     >
       <div className="popo-page-queue-header">

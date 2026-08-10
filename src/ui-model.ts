@@ -41,6 +41,7 @@ export interface QueueJob {
   cancelledRetryKeys?: string[] | undefined;
   failureRetryKeys?: string[] | undefined;
   createdAt?: string | undefined;
+  startedAt?: string | undefined;
   updatedAt?: string | undefined;
   completedAt?: string | undefined;
 }
