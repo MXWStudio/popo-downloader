@@ -1,7 +1,7 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase } from "idb";
 
 const DATABASE_NAME = "popo-stable-downloader";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 
 interface ItemChunkRecord {
   key: string;
@@ -22,6 +22,30 @@ interface GenerationRecord {
   updatedAt: string;
 }
 
+interface WorkflowCheckpointRecord {
+  jobId: string;
+  version: number;
+  sequence: number;
+  hash: string;
+  snapshot: unknown;
+  updatedAt: string;
+}
+
+type OperationStatus = "reserved" | "accepted" | "success" | "failed" | "cancelled";
+
+interface OperationRecord {
+  key: string;
+  jobId: string;
+  itemId: string;
+  taskKey: string;
+  status: OperationStatus;
+  taskId: string;
+  reservedAt: string;
+  acceptedAt: string;
+  completedAt: string;
+  updatedAt: string;
+}
+
 interface PopoTaskDatabase extends DBSchema {
   itemChunks: {
     key: string;
@@ -36,6 +60,18 @@ interface PopoTaskDatabase extends DBSchema {
     value: GenerationRecord;
     indexes: {
       "by-job": string;
+    };
+  };
+  workflowCheckpoints: {
+    key: string;
+    value: WorkflowCheckpointRecord;
+  };
+  operations: {
+    key: string;
+    value: OperationRecord;
+    indexes: {
+      "by-job": string;
+      "by-job-status": [string, OperationStatus];
     };
   };
 }
@@ -58,16 +94,49 @@ function chunkKey(jobId: string, generation: string, index: number) {
   return `${generationKey(jobId, generation)}\u0000${String(index).padStart(8, "0")}`;
 }
 
+function assertOpaqueIdentifier(value: unknown, field: string) {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized.length > 131072) throw new Error(`IndexedDB ${field} 无效`);
+  return normalized;
+}
+
+function operationKey(jobId: string, itemId: string) {
+  return JSON.stringify([jobId, itemId]);
+}
+
+function hashSerializable(value: unknown) {
+  const json = JSON.stringify(value);
+  if (json === undefined) throw new Error("IndexedDB 工作流快照不可序列化");
+  let hash = 2166136261;
+  for (let index = 0; index < json.length; index += 1) {
+    hash ^= json.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+
 function database() {
   if (!isAvailable()) throw new Error("当前环境不支持 IndexedDB");
   if (!databasePromise) {
     databasePromise = openDB<PopoTaskDatabase>(DATABASE_NAME, DATABASE_VERSION, {
       upgrade(db) {
-        const chunks = db.createObjectStore("itemChunks", { keyPath: "key" });
-        chunks.createIndex("by-job", "jobId");
-        chunks.createIndex("by-job-generation", ["jobId", "generation"]);
-        const generations = db.createObjectStore("generations", { keyPath: "key" });
-        generations.createIndex("by-job", "jobId");
+        if (!db.objectStoreNames.contains("itemChunks")) {
+          const chunks = db.createObjectStore("itemChunks", { keyPath: "key" });
+          chunks.createIndex("by-job", "jobId");
+          chunks.createIndex("by-job-generation", ["jobId", "generation"]);
+        }
+        if (!db.objectStoreNames.contains("generations")) {
+          const generations = db.createObjectStore("generations", { keyPath: "key" });
+          generations.createIndex("by-job", "jobId");
+        }
+        if (!db.objectStoreNames.contains("workflowCheckpoints")) {
+          db.createObjectStore("workflowCheckpoints", { keyPath: "jobId" });
+        }
+        if (!db.objectStoreNames.contains("operations")) {
+          const operations = db.createObjectStore("operations", { keyPath: "key" });
+          operations.createIndex("by-job", "jobId");
+          operations.createIndex("by-job-status", ["jobId", "status"]);
+        }
       },
       blocking(_currentVersion, _blockedVersion, event) {
         (event.target as IDBDatabase | null)?.close();
@@ -238,6 +307,171 @@ export async function inspectJobStorage(jobIdValue: unknown) {
     generationCount: generations.length,
     chunkCount: generations.reduce((total, record) => total + record.chunkCount, 0)
   };
+}
+
+export async function writeWorkflowCheckpoint(input: { jobId: unknown; snapshot: unknown }) {
+  const jobId = assertIdentifier(input.jobId, "jobId");
+  const snapshot = structuredClone(input.snapshot);
+  const sequence = Number((snapshot as { sequence?: unknown } | null)?.sequence);
+  if (!Number.isInteger(sequence) || sequence < 0) {
+    throw new Error("IndexedDB 工作流序号无效");
+  }
+  const version = Number((snapshot as { version?: unknown } | null)?.version);
+  if (!Number.isInteger(version) || version < 1) {
+    throw new Error("IndexedDB 工作流版本无效");
+  }
+  const hash = hashSerializable(snapshot);
+  const db = await database();
+  const tx = db.transaction("workflowCheckpoints", "readwrite");
+  const store = tx.objectStore("workflowCheckpoints");
+  const existing = await store.get(jobId);
+  if (existing && existing.sequence > sequence) {
+    await tx.done;
+    return { written: false, stale: true, sequence: existing.sequence };
+  }
+  if (existing && existing.sequence === sequence && existing.hash === hash) {
+    await tx.done;
+    return { written: false, stale: false, sequence };
+  }
+  await store.put({
+    jobId,
+    version,
+    sequence,
+    hash,
+    snapshot,
+    updatedAt: new Date().toISOString()
+  });
+  await tx.done;
+  return { written: true, stale: false, sequence };
+}
+
+export async function readWorkflowCheckpoint(jobIdValue: unknown) {
+  const jobId = assertIdentifier(jobIdValue, "jobId");
+  const db = await database();
+  const record = await db.get("workflowCheckpoints", jobId);
+  if (!record) return null;
+  if (hashSerializable(record.snapshot) !== record.hash) {
+    throw new Error("IndexedDB 工作流快照与摘要不一致");
+  }
+  return structuredClone(record.snapshot);
+}
+
+export async function reserveOperation(input: {
+  jobId: unknown;
+  itemId: unknown;
+  taskKey: unknown;
+  reopen?: boolean;
+}) {
+  const jobId = assertIdentifier(input.jobId, "jobId");
+  const itemId = assertOpaqueIdentifier(input.itemId, "itemId");
+  const taskKey = assertIdentifier(input.taskKey, "taskKey");
+  const key = operationKey(jobId, itemId);
+  const db = await database();
+  const tx = db.transaction("operations", "readwrite");
+  const store = tx.objectStore("operations");
+  const existing = await store.get(key);
+  if (existing && existing.taskKey !== taskKey) {
+    throw new Error("IndexedDB 同一文件的任务身份不一致");
+  }
+  if (existing && !(input.reopen && ["failed", "cancelled"].includes(existing.status))) {
+    await tx.done;
+    return structuredClone(existing);
+  }
+  const now = new Date().toISOString();
+  const record: OperationRecord = {
+    key,
+    jobId,
+    itemId,
+    taskKey,
+    status: "reserved",
+    taskId: input.reopen ? "" : existing?.taskId || "",
+    reservedAt: existing?.reservedAt || now,
+    acceptedAt: input.reopen ? "" : existing?.acceptedAt || "",
+    completedAt: "",
+    updatedAt: now
+  };
+  await store.put(record);
+  await tx.done;
+  return structuredClone(record);
+}
+
+async function updateOperation(
+  jobIdValue: unknown,
+  itemIdValue: unknown,
+  update: (record: OperationRecord, now: string) => void
+) {
+  const jobId = assertIdentifier(jobIdValue, "jobId");
+  const itemId = assertOpaqueIdentifier(itemIdValue, "itemId");
+  const db = await database();
+  const tx = db.transaction("operations", "readwrite");
+  const store = tx.objectStore("operations");
+  const key = operationKey(jobId, itemId);
+  const record = await store.get(key);
+  if (!record) throw new Error("IndexedDB 中没有找到文件操作预约");
+  const now = new Date().toISOString();
+  update(record, now);
+  record.updatedAt = now;
+  await store.put(record);
+  await tx.done;
+  return structuredClone(record);
+}
+
+export async function markOperationAccepted(input: { jobId: unknown; itemId: unknown; taskId: unknown }) {
+  const taskId = assertIdentifier(input.taskId, "taskId");
+  return updateOperation(input.jobId, input.itemId, (record, now) => {
+    record.status = "accepted";
+    record.taskId = taskId;
+    record.acceptedAt = now;
+    record.completedAt = "";
+  });
+}
+
+export async function reopenOperation(input: { jobId: unknown; itemId: unknown }) {
+  return updateOperation(input.jobId, input.itemId, (record) => {
+    record.status = "reserved";
+    record.taskId = "";
+    record.acceptedAt = "";
+    record.completedAt = "";
+  });
+}
+
+export async function completeOperation(input: {
+  jobId: unknown;
+  itemId: unknown;
+  status: "success" | "failed" | "cancelled";
+}) {
+  if (!["success", "failed", "cancelled"].includes(input.status)) {
+    throw new Error("IndexedDB 文件操作完成状态无效");
+  }
+  return updateOperation(input.jobId, input.itemId, (record, now) => {
+    record.status = input.status;
+    record.completedAt = now;
+  });
+}
+
+export async function readOperation(input: { jobId: unknown; itemId: unknown }) {
+  const jobId = assertIdentifier(input.jobId, "jobId");
+  const itemId = assertOpaqueIdentifier(input.itemId, "itemId");
+  const db = await database();
+  const record = await db.get("operations", operationKey(jobId, itemId));
+  return record ? structuredClone(record) : null;
+}
+
+export async function listJobOperations(jobIdValue: unknown) {
+  const jobId = assertIdentifier(jobIdValue, "jobId");
+  const db = await database();
+  return structuredClone(await db.getAllFromIndex("operations", "by-job", jobId));
+}
+
+export async function deleteJobWorkflow(jobIdValue: unknown) {
+  const jobId = assertIdentifier(jobIdValue, "jobId");
+  const db = await database();
+  const operations = await db.getAllFromIndex("operations", "by-job", jobId);
+  const tx = db.transaction(["workflowCheckpoints", "operations"], "readwrite");
+  await tx.objectStore("workflowCheckpoints").delete(jobId);
+  for (const operation of operations) await tx.objectStore("operations").delete(operation.key);
+  await tx.done;
+  return operations.length;
 }
 
 export async function closeDatabase() {

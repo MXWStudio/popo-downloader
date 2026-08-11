@@ -1114,7 +1114,9 @@
         diagnostics: {
           explicitEmpty: true,
           initialRowCount: 0,
-          renderedItemCount: 0
+          renderedItemCount: 0,
+          expectedItemCount: 0,
+          countVerified: true
         },
         items: []
       };
@@ -1122,6 +1124,7 @@
     scroller = ready.scroller || scroller;
     moveScroller(scroller, 0);
     await delay(120);
+    const expectedItemCountAtStart = currentVirtualListItemCount();
 
     const items = new Map();
     let stableBottomRounds = 0;
@@ -1152,6 +1155,18 @@
       );
     }
 
+    moveScroller(scroller, Math.max(0, scroller.scrollHeight - scroller.clientHeight));
+    await delay(350);
+    for (const { item } of renderedEntries(scroller)) {
+      items.set(`${item.type}\u0000${item.itemIndex}\u0000${item.name}`, item);
+    }
+    const expectedItemCountAtEnd = currentVirtualListItemCount();
+    const expectedItemCount = Number.isInteger(expectedItemCountAtEnd)
+      ? expectedItemCountAtEnd
+      : Number.isInteger(expectedItemCountAtStart)
+        ? expectedItemCountAtStart
+        : null;
+
     return {
       directoryName: currentDirectoryName(),
       url: location.href,
@@ -1159,6 +1174,10 @@
         explicitEmpty: false,
         initialRowCount: ready.initialRowCount,
         renderedItemCount: items.size,
+        expectedItemCount,
+        countVerified: expectedItemCount == null ? null : expectedItemCount === items.size,
+        expectedItemCountAtStart,
+        expectedItemCountAtEnd,
         scrollHeight: scroller.scrollHeight,
         clientHeight: scroller.clientHeight
       },

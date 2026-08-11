@@ -11,11 +11,13 @@ import {
   liveJobs,
   MODE_LABELS,
   modeBadgeLabel,
+  networkHealthSummary,
   recoverableCount,
   summarizeLiveJobs,
   userFacingError,
   type GopeedConnection,
   type GopeedSettings,
+  type NetworkHealth,
   type QueueJob,
   type QueueState
 } from "./ui-model";
@@ -27,6 +29,11 @@ interface StateResponse {
 
 interface GopeedResponse {
   connection: GopeedConnection;
+  settings: GopeedSettings;
+}
+
+interface ConcurrencyResponse {
+  state: QueueState;
   settings: GopeedSettings;
 }
 
@@ -330,6 +337,52 @@ function TaskSection({
   );
 }
 
+function NetworkNoticeCard({
+  health,
+  refresh,
+  showError
+}: {
+  health: NetworkHealth;
+  refresh: () => Promise<void>;
+  showError: (error: unknown) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async (type: "SNOOZE_NETWORK_REMINDER" | "MUTE_NETWORK_REMINDER_TODAY") => {
+    setBusy(true);
+    try {
+      await callExtension({ type });
+      await refresh();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const label = health.status === "severe"
+    ? "严重低速"
+    : health.status === "slow"
+      ? "速度偏低"
+      : "高发时段";
+
+  return (
+    <section className="network-notice-card" role="status">
+      <div className="engine-heading">
+        <strong>本地网络提醒</strong>
+        <span>{label}</span>
+      </div>
+      <p>{networkHealthSummary(health)}。下载仍在继续，与代理设置无关。</p>
+      <div className="popup-queue-actions">
+        <button type="button" disabled={busy} onClick={() => void run("SNOOZE_NETWORK_REMINDER")}>
+          15 分钟后提醒
+        </button>
+        <button type="button" disabled={busy} onClick={() => void run("MUTE_NETWORK_REMINDER_TODAY")}>
+          今日不再提醒
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ServiceSettings({
   connection,
   settings,
@@ -347,6 +400,7 @@ function ServiceSettings({
 }) {
   const [busy, setBusy] = useState(false);
   const selectedPath = String(settings.gopeedDownloadDirOverride || "").trim();
+  const concurrency = Math.min(5, Math.max(1, Number(settings.concurrency) || 5));
   const status = connection == null
     ? { label: "检查中", state: "checking" }
     : connection.connected
@@ -391,6 +445,21 @@ function ServiceSettings({
     }
   };
 
+  const saveConcurrency = async (value: number) => {
+    setBusy(true);
+    try {
+      const response = await callExtension<ConcurrencyResponse>({
+        type: "SET_DOWNLOAD_CONCURRENCY",
+        concurrency: value
+      });
+      setSettings(response.settings || {});
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="engine-card" data-connected={connection?.connected ? "true" : "false"}>
       {connection?.connected === false && (
@@ -418,6 +487,20 @@ function ServiceSettings({
                 ? "运行正常。"
                 : "正在恢复，请稍后再试。"}
           </p>
+          <div className="concurrency-setting">
+            <label htmlFor="downloadConcurrency">并行下载数</label>
+            <select
+              id="downloadConcurrency"
+              value={concurrency}
+              disabled={busy}
+              onChange={(event) => void saveConcurrency(Number(event.target.value))}
+            >
+              {[1, 2, 3, 4, 5].map((value) => (
+                <option key={value} value={value}>{value}</option>
+              ))}
+            </select>
+            <p>同时下载的文件数量，最高 5。降低后不会暂停已开始的任务。</p>
+          </div>
           <div className="folder-picker-setting">
             <span>保存位置</span>
             <output
@@ -469,6 +552,14 @@ function PopupApp() {
   const attention = useMemo(() => attentionJobs(state), [state]);
   const completed = useMemo(() => completedJobs(state).slice(0, 3), [state]);
   const hasOpenTasks = active.length > 0 || attention.length > 0;
+  const networkHealth = state.networkHealth;
+  const showNetworkNotice = Boolean(
+    hasOpenTasks &&
+    networkHealth &&
+    !networkHealth.suppressed &&
+    networkHealth.activeTasks > 0 &&
+    (networkHealth.highProbabilityWindow || ["slow", "severe"].includes(networkHealth.status))
+  );
   const version = chrome.runtime.getManifest().version_name ||
     chrome.runtime.getManifest().version;
 
@@ -516,6 +607,9 @@ function PopupApp() {
             <strong>下载任务</strong>
             <span id="queueSummary">{summarizeLiveJobs(active)}</span>
           </div>
+          {showNetworkNotice && networkHealth && (
+            <NetworkNoticeCard health={networkHealth} refresh={refresh} showError={showError} />
+          )}
           <div id="popupQueueList" className="popup-queue-list">
             <TaskSection
               title="进行中"

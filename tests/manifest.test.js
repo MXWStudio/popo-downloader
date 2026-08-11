@@ -244,9 +244,14 @@ test("网页、任务摘要、通知和弹窗共享克制的深色渐变状态�
   assert.doesNotMatch(popupCss, /repeating-linear-gradient|rainbow|particle/i);
 });
 
-test("下载由 Gopeed 统一管理并固定任务并发 5", () => {
+test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", () => {
   const background = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+  const popup = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
   assert.match(background, /concurrency:\s*5/);
+  assert.match(background, /MAX_DOWNLOAD_CONCURRENCY\s*=\s*5/);
+  assert.match(background, /SET_DOWNLOAD_CONCURRENCY/);
+  assert.match(popup, /id="downloadConcurrency"/);
+  assert.match(popup, /\[1, 2, 3, 4, 5\]/);
   assert.match(background, /gopeedConnections:\s*1/);
   assert.match(background, /version:\s*4/);
   assert.match(background, /activeJobId/);

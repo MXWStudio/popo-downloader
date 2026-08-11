@@ -10,7 +10,8 @@ const {
   isSystemMetadataFile,
   looksLikeFileTitle,
   previewTitleMatchesFile,
-  validateRuntimeMessage
+  validateRuntimeMessage,
+  verifyDirectoryItemCount
 } = PopoCore;
 const {
   buildTaskIdentityLabels: buildGopeedTaskIdentityLabels,
@@ -48,11 +49,15 @@ const ITEM_STORAGE_PREFIX = "popoItems";
 const MAX_RETAINED_TERMINAL_JOBS = 20;
 const WORKER_UNAVAILABLE_CODE = "POPO_WORKER_UNAVAILABLE";
 const POPUP_UI_PORT_NAME = "popo-popup-ui";
+const MIN_DOWNLOAD_CONCURRENCY = 1;
+const MAX_DOWNLOAD_CONCURRENCY = 5;
 const workerFrameWaiters = new Map();
 const popupUiPorts = new Set();
 const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
 const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
+const runtimeNetworkMonitor = globalThis.PopoRuntime?.networkMonitor || null;
 const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
+const runtimeWorkflow = globalThis.PopoRuntime?.workflow || null;
 
 function enforceRuntimeCommandContract(command) {
   if (typeof runtimeContracts?.parseRuntimeCommand !== "function") return command;
@@ -75,6 +80,166 @@ function sanitizeStoredJobs(jobs) {
 
 function indexedDbTaskStoreAvailable() {
   return typeof runtimeTaskStore?.isAvailable === "function" && runtimeTaskStore.isAvailable();
+}
+
+function newPersistentWorkflow() {
+  if (typeof runtimeWorkflow?.createPersistentWorkflow === "function") {
+    return runtimeWorkflow.createPersistentWorkflow();
+  }
+  return {
+    version: 1,
+    sequence: 0,
+    value: { scan: "idle", handoff: "idle", transfer: "idle" },
+    nextAction: "scan",
+    reservedItemId: "",
+    counts: {
+      discovered: 0,
+      selected: 0,
+      skipped: 0,
+      pending: 0,
+      preparing: 0,
+      transferring: 0,
+      success: 0,
+      failed: 0,
+      cancelled: 0,
+      handedOff: 0,
+      verifiedDirectories: 0,
+      unverifiedDirectories: 0,
+      scanRetries: 0
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function newNetworkHealth() {
+  if (typeof runtimeNetworkMonitor?.createNetworkHealth === "function") {
+    return runtimeNetworkMonitor.createNetworkHealth();
+  }
+  return {
+    version: 1,
+    jobId: "",
+    status: "idle",
+    activeTasks: 0,
+    medianSpeed: 0,
+    baselineSpeed: 20 * 1024 * 1024,
+    observedAt: new Date().toISOString(),
+    highProbabilityWindow: false,
+    peakNoticeSequence: 0,
+    noticeSequence: 0,
+    suppressed: false
+  };
+}
+
+function normalizeNetworkHealth(value) {
+  if (typeof runtimeNetworkMonitor?.normalizeNetworkHealth === "function") {
+    return runtimeNetworkMonitor.normalizeNetworkHealth(value);
+  }
+  return { ...newNetworkHealth(), ...(value && typeof value === "object" ? value : {}) };
+}
+
+function refreshNetworkHealth(state) {
+  const previous = normalizeNetworkHealth(state.networkHealth);
+  const speeds = (state.activeTransfers || []).flatMap((transfer) => {
+    const item = state.items.find((candidate) => candidate.id === transfer.itemId);
+    if (item?.status !== "transferring") return [];
+    const speed = Number(item.gopeedProgress?.speed);
+    return Number.isFinite(speed) && speed >= 0 ? [speed] : [];
+  });
+  state.networkHealth = typeof runtimeNetworkMonitor?.updateNetworkHealth === "function"
+    ? runtimeNetworkMonitor.updateNetworkHealth(previous, {
+      jobId: activeJob(state)?.id || "",
+      speeds
+    })
+    : { ...previous, activeTasks: speeds.length };
+
+  if (state.networkHealth.peakNoticeSequence > previous.peakNoticeSequence) {
+    pushRuntimeEvent(
+      state,
+      "NETWORK_CONGESTION_WINDOW",
+      "info",
+      "已进入本地网络慢速高发时段",
+      "16:30–18:30 仅为概率提示，实际速度会继续监测",
+      { jobId: activeJob(state)?.id || "" }
+    );
+  }
+  if (state.networkHealth.noticeSequence > previous.noticeSequence) {
+    pushRuntimeEvent(
+      state,
+      state.networkHealth.status === "severe" ? "NETWORK_SPEED_SEVERE" : "NETWORK_SPEED_SLOW",
+      "warn",
+      state.networkHealth.status === "severe"
+        ? "多个下载任务速度接近停滞"
+        : "多个下载任务速度明显低于近期常态",
+      `medianSpeed=${Math.round(state.networkHealth.medianSpeed)}; activeTasks=${state.networkHealth.activeTasks}`,
+      { jobId: activeJob(state)?.id || "" }
+    );
+  }
+  return state.networkHealth;
+}
+
+function normalizePersistentWorkflow(value) {
+  if (typeof runtimeWorkflow?.normalizePersistentWorkflow === "function") {
+    return runtimeWorkflow.normalizePersistentWorkflow(value);
+  }
+  return { ...newPersistentWorkflow(), ...(value && typeof value === "object" ? value : {}) };
+}
+
+function updatePersistentWorkflow(state, patch = {}) {
+  if (typeof runtimeWorkflow?.updatePersistentWorkflow === "function") {
+    state.workflow = runtimeWorkflow.updatePersistentWorkflow(state.workflow, patch);
+    return state.workflow;
+  }
+  const current = normalizePersistentWorkflow(state.workflow);
+  state.workflow = {
+    ...current,
+    ...patch,
+    value: { ...current.value, ...(patch.value || {}) },
+    counts: { ...current.counts, ...(patch.counts || {}) },
+    sequence: current.sequence + 1,
+    updatedAt: new Date().toISOString()
+  };
+  return state.workflow;
+}
+
+function transitionPersistentWorkflow(state, event, patch = {}) {
+  if (typeof runtimeWorkflow?.transitionPersistentWorkflow === "function") {
+    state.workflow = runtimeWorkflow.transitionPersistentWorkflow(state.workflow, event, patch);
+    return state.workflow;
+  }
+  return updatePersistentWorkflow(state, patch);
+}
+
+function refreshPersistentWorkflowCounts(state) {
+  state.workflow = normalizePersistentWorkflow(state.workflow);
+  const items = Array.isArray(state.items) ? state.items : [];
+  const selected = items.filter((item) => item.selected);
+  const count = (status) => selected.filter((item) => item.status === status).length;
+  const transferring = selected.filter((item) => ["transferring", "paused"].includes(item.status)).length;
+  const previous = state.workflow.counts;
+  const handedOffNow = selected.filter((item) => item.gopeedTaskId || item.status === "success").length;
+  updatePersistentWorkflow(state, {
+    counts: {
+      discovered: items.length,
+      selected: selected.length,
+      skipped: items.length - selected.length,
+      pending: count("pending"),
+      preparing: count("preparing"),
+      transferring,
+      success: count("success"),
+      failed: count("failed"),
+      cancelled: count("cancelled"),
+      handedOff: Math.max(previous.handedOff || 0, handedOffNow)
+    }
+  });
+  return state.workflow.counts;
+}
+
+function quantityReconciliation(state) {
+  const counts = refreshPersistentWorkflowCounts(state);
+  const discoveredBalanced = counts.discovered === counts.selected + counts.skipped;
+  const selectedBalanced = counts.selected === counts.pending + counts.preparing +
+    counts.transferring + counts.success + counts.failed + counts.cancelled;
+  return { ok: discoveredBalanced && selectedBalanced, counts };
 }
 
 async function restrictLocalStorageAccess() {
@@ -216,6 +381,8 @@ function newState() {
     preparingItemId: null,
     activeTransfers: [],
     activeItemId: null,
+    pauseOrigin: "",
+    pauseResumeMode: "",
     gopeedDownloadDir: "",
     gopeedConnected: false,
     gopeedLastError: "",
@@ -223,6 +390,8 @@ function newState() {
     completedAt: "",
     updatedAt: new Date().toISOString(),
     lastMessage: "请在 POPO 文件夹页面开始扫描",
+    networkHealth: newNetworkHealth(),
+    workflow: newPersistentWorkflow(),
     runtimeHealth: newRuntimeHealth(),
     itemStorageBackend: "",
     itemStorageGeneration: "",
@@ -272,6 +441,8 @@ function migrateStoredState(storedState, settings) {
       teamSpaceKey,
       teamSpaceId: storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "",
       jobs: checkedJobs.jobs,
+      networkHealth: normalizeNetworkHealth(storedState.networkHealth),
+      workflow: normalizePersistentWorkflow(storedState.workflow),
       runtimeHealth: normalizeRuntimeHealth(storedState.runtimeHealth)
     };
     if (checkedJobs.rejected > 0) {
@@ -291,7 +462,9 @@ function migrateStoredState(storedState, settings) {
     runToken: createId("run"),
     settings,
     jobs: [],
-    activeJobId: null
+    activeJobId: null,
+    networkHealth: normalizeNetworkHealth(storedState.networkHealth),
+    workflow: normalizePersistentWorkflow(storedState.workflow)
   };
   state.teamSpaceKey = storedState.teamSpaceKey || storedState.teamSpaceId || "";
   state.teamSpaceId = storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "";
@@ -333,6 +506,8 @@ async function getStored({ loadItems = true } = {}) {
   state.settings = settings;
   state.activeTransfers = Array.isArray(state.activeTransfers) ? state.activeTransfers : [];
   state.items = Array.isArray(state.items) ? state.items : [];
+  state.networkHealth = normalizeNetworkHealth(state.networkHealth);
+  state.workflow = normalizePersistentWorkflow(state.workflow);
   state._itemsLoaded = loadItems;
   if (loadItems && data.popoState?.version === 4 && state.itemStorageJobId && state.itemChunkCount > 0) {
     if (state.itemStorageBackend === "indexeddb") {
@@ -368,6 +543,19 @@ async function getStored({ loadItems = true } = {}) {
           state.runtimeHealth.storage.backend = "chrome-storage-fallback";
         }
       }
+    }
+  }
+  if (state.activeJobId && indexedDbTaskStoreAvailable() &&
+      typeof runtimeTaskStore?.readWorkflowCheckpoint === "function") {
+    try {
+      const checkpoint = await runtimeTaskStore.readWorkflowCheckpoint(state.activeJobId);
+      const checkpointSequence = Number(checkpoint?.sequence) || 0;
+      const storedSequence = Number(state.workflow?.sequence) || 0;
+      if (checkpoint && checkpointSequence > storedSequence) {
+        state.workflow = normalizePersistentWorkflow(checkpoint);
+      }
+    } catch (error) {
+      recordItemStorageFailure(state, "read", `工作流检查点读取失败：${String(error)}`);
     }
   }
   return { state, settings };
@@ -453,6 +641,10 @@ async function migrateLegacyItemsToIndexedDb(state, legacyKeys = []) {
 }
 
 function mergeSettings(input) {
+  const requestedConcurrency = Number(input?.concurrency);
+  const concurrency = Number.isInteger(requestedConcurrency)
+    ? Math.min(MAX_DOWNLOAD_CONCURRENCY, Math.max(MIN_DOWNLOAD_CONCURRENCY, requestedConcurrency))
+    : DEFAULT_SETTINGS.concurrency;
   return {
     ...structuredClone(DEFAULT_SETTINGS),
     ...input,
@@ -463,8 +655,7 @@ function mergeSettings(input) {
     includeKeywords: "",
     excludeKeywords: "",
     preserveStructure: true,
-    // 并发数是扩展的固定稳定策略；覆盖旧版本保存在 storage 中的值。
-    concurrency: 5,
+    concurrency,
     gopeedConnections: 1,
     timeouts: {
       ...DEFAULT_SETTINGS.timeouts,
@@ -535,6 +726,11 @@ function syncActiveJobSummary(state) {
       state.scannedFolderCount,
       state.scanFailures?.length
     );
+    const workflowCounts = refreshPersistentWorkflowCounts(state);
+    job.counts.handedOff = workflowCounts.handedOff;
+    job.counts.verifiedDirectories = workflowCounts.verifiedDirectories;
+    job.counts.unverifiedDirectories = workflowCounts.unverifiedDirectories;
+    job.counts.scanRetries = workflowCounts.scanRetries;
     job.failurePreview = (state.items || [])
       .filter((item) => item.status === "failed")
       .slice(0, 6)
@@ -580,15 +776,15 @@ function publicState(state) {
   return snapshot;
 }
 
-function processedJobCount(job) {
+function completedJobCount(job) {
   const counts = job?.counts || {};
-  return (counts.success || 0) + (counts.failed || 0) + (counts.cancelled || 0);
+  return counts.success || 0;
 }
 
 function jobProgressPercent(job) {
   const total = Number(job?.counts?.files) || 0;
   if (!total) return null;
-  return Math.max(0, Math.min(100, Math.round(processedJobCount(job) * 100 / total)));
+  return Math.max(0, Math.min(100, Math.round(completedJobCount(job) * 100 / total)));
 }
 
 async function updateActionIndicator(state) {
@@ -603,12 +799,12 @@ async function updateActionIndicator(state) {
   if (job) {
     const percent = jobProgressPercent(job);
     const total = Number(job.counts?.files) || 0;
-    const processed = processedJobCount(job);
+    const completed = completedJobCount(job);
     const queued = liveJobs.filter((candidate) => candidate.status === "queued").length;
     text = percent == null ? (liveJobs.length > 9 ? "9+" : String(liveJobs.length)) : `${percent}%`;
     title = percent == null
       ? `${job.folderName || "下载任务"}：${job.lastMessage || "正在准备"}；${queued} 个排队`
-      : `${job.folderName || "下载任务"}：${processed}/${total}（${percent}%）；失败 ${job.counts?.failed || 0}；排队 ${queued}`;
+      : `${job.folderName || "下载任务"}：${completed}/${total}（${percent}%）；失败 ${job.counts?.failed || 0}；排队 ${queued}`;
   } else {
     const latest = [...jobs].reverse().find((candidate) => isJobTerminal(candidate.status));
     if ((latest?.counts?.failed || 0) > 0) {
@@ -682,6 +878,9 @@ async function cleanupCommittedItemStorage(previousStorage, state) {
     }
     if (previousStorage.jobId && previousStorage.jobId !== state.itemStorageJobId) {
       await runtimeTaskStore.deleteJobItems(previousStorage.jobId);
+      if (typeof runtimeTaskStore.deleteJobWorkflow === "function") {
+        await runtimeTaskStore.deleteJobWorkflow(previousStorage.jobId);
+      }
       if (chrome.storage.local.remove) {
         const legacyKeys = Array.from(
           { length: previousStorage.chunkCount },
@@ -741,6 +940,17 @@ async function saveStateUnlocked(state, force = false) {
   delete metadata.items;
   delete metadata._itemsLoaded;
   await chrome.storage.local.set({ popoState: metadata });
+  if (state.activeJobId && indexedDbTaskStoreAvailable() &&
+      typeof runtimeTaskStore?.writeWorkflowCheckpoint === "function") {
+    try {
+      await runtimeTaskStore.writeWorkflowCheckpoint({
+        jobId: state.activeJobId,
+        snapshot: state.workflow
+      });
+    } catch (error) {
+      recordItemStorageFailure(state, "write", `工作流检查点写入失败：${String(error)}`);
+    }
+  }
   await cleanupCommittedItemStorage(previousStorage, state);
   await updateActionIndicator(state);
   return true;
@@ -765,6 +975,31 @@ async function saveSettings(settings) {
   state.settings = merged;
   await saveState(state);
   return merged;
+}
+
+async function setDownloadConcurrency(value) {
+  const concurrency = Math.min(
+    MAX_DOWNLOAD_CONCURRENCY,
+    Math.max(MIN_DOWNLOAD_CONCURRENCY, Number(value) || DEFAULT_SETTINGS.concurrency)
+  );
+  const { state, settings } = await getStored({ loadItems: false });
+  const previous = settings.concurrency;
+  const merged = mergeSettings({ ...settings, concurrency });
+  await chrome.storage.local.set({ popoSettings: merged });
+  state.settings = merged;
+  if (previous !== concurrency) {
+    pushRuntimeEvent(
+      state,
+      "DOWNLOAD_CONCURRENCY_CHANGED",
+      "info",
+      `并行下载数已调整为 ${concurrency}`,
+      "已开始的下载保持不变，新任务按新的并行上限调度",
+      { previous: Number(previous) || DEFAULT_SETTINGS.concurrency, concurrency }
+    );
+  }
+  await saveState(state);
+  if (["scanning", "downloading", "draining"].includes(state.mode)) schedulePump(100);
+  return { state: publicState(state), settings: merged };
 }
 
 async function saveGopeedSettings(message) {
@@ -912,6 +1147,65 @@ function gopeedTaskIdentityLabels(state, item) {
     jobId: activeJob(state)?.id,
     taskIdentity
   });
+}
+
+async function reserveDownloadOperation(state, item) {
+  const jobId = activeJob(state)?.id || "";
+  if (!jobId || !indexedDbTaskStoreAvailable() ||
+      typeof runtimeTaskStore?.reserveOperation !== "function") return null;
+  const labels = gopeedTaskIdentityLabels(state, item);
+  return runtimeTaskStore.reserveOperation({
+    jobId,
+    itemId: item.id,
+    taskKey: labels.popoTaskKey || item.id
+  });
+}
+
+async function acceptDownloadOperation(state, item, taskId) {
+  const jobId = activeJob(state)?.id || "";
+  if (!jobId || !indexedDbTaskStoreAvailable() ||
+      typeof runtimeTaskStore?.markOperationAccepted !== "function") return null;
+  try {
+    return await runtimeTaskStore.markOperationAccepted({ jobId, itemId: item.id, taskId });
+  } catch (error) {
+    if (/没有找到文件操作预约/.test(String(error))) {
+      try {
+        await reserveDownloadOperation(state, item);
+        return await runtimeTaskStore.markOperationAccepted({ jobId, itemId: item.id, taskId });
+      } catch (retryError) {
+        recordItemStorageFailure(state, "write", `文件操作接管记录失败：${String(retryError)}`);
+        return null;
+      }
+    }
+    recordItemStorageFailure(state, "write", `文件操作接管记录失败：${String(error)}`);
+    return null;
+  }
+}
+
+async function reopenDownloadOperation(state, item) {
+  const jobId = activeJob(state)?.id || "";
+  if (!jobId || !indexedDbTaskStoreAvailable() ||
+      typeof runtimeTaskStore?.reopenOperation !== "function") return null;
+  try {
+    return await runtimeTaskStore.reopenOperation({ jobId, itemId: item.id });
+  } catch (error) {
+    if (/没有找到文件操作预约/.test(String(error))) return null;
+    recordItemStorageFailure(state, "write", `文件操作重试记录失败：${String(error)}`);
+    return null;
+  }
+}
+
+async function completeDownloadOperation(state, item, status) {
+  const jobId = activeJob(state)?.id || "";
+  if (!jobId || !indexedDbTaskStoreAvailable() ||
+      typeof runtimeTaskStore?.completeOperation !== "function") return null;
+  try {
+    return await runtimeTaskStore.completeOperation({ jobId, itemId: item.id, status });
+  } catch (error) {
+    if (/没有找到文件操作预约/.test(String(error))) return null;
+    recordItemStorageFailure(state, "write", `文件操作完成记录失败：${String(error)}`);
+    return null;
+  }
 }
 
 function gopeedTaskDefinition(state, item, url) {
@@ -1333,11 +1627,14 @@ function clearEngineFields(state) {
   state.preparingItemId = null;
   state.activeTransfers = [];
   state.activeItemId = null;
+  state.pauseOrigin = "";
+  state.pauseResumeMode = "";
   state.rootUrl = "";
   state.teamSpaceKey = "";
   state.teamSpaceId = "";
   state.startedAt = "";
   state.completedAt = "";
+  state.workflow = newPersistentWorkflow();
 }
 
 function prepareJobForExecution(state, job, reuseWorker) {
@@ -1378,6 +1675,7 @@ function prepareJobForExecution(state, job, reuseWorker) {
     state.phase = "waiting_worker";
     state.workerDeadline = Date.now() + state.settings.timeouts.directoryLoad;
   }
+  transitionPersistentWorkflow(state, "SCAN_START", { nextAction: "scan" });
   setJobStatus(job, state.mode, {
     startedAt: job.startedAt || state.startedAt,
     lastMessage: reuseWorker ? "开始读取文件夹" : "正在准备隐藏工作区"
@@ -1524,6 +1822,10 @@ async function finalizeActiveJob(state, status, message, notification = null, fo
 async function processScanStep(state) {
   const settings = state.settings;
   state.phase = "scanning";
+  state.workflow = normalizePersistentWorkflow(state.workflow);
+  if (state.workflow.value.scan !== "running") {
+    transitionPersistentWorkflow(state, "SCAN_START", { nextAction: "scan" });
+  }
   if (state.triggerMode === "folder_button" && state.workerFrameId == null) {
     await waitForWorkerReconnect(
       state,
@@ -1546,6 +1848,21 @@ async function processScanStep(state) {
         type: "SCAN_DIRECTORY",
         timeoutMs: settings.timeouts.scanList
       }, settings.timeouts.scanList + 5000, "扫描目录");
+
+      const countCheck = verifyDirectoryItemCount(
+        result.diagnostics?.expectedItemCount,
+        result.items.length
+      );
+      const expectedItemCount = countCheck.expected;
+      if (!countCheck.matches) {
+        throw Object.assign(new Error(
+          `目录数量核对不一致：页面预计 ${expectedItemCount} 项，实际稳定扫描到 ${result.items.length} 项`
+        ), {
+          scanCountMismatch: true,
+          expectedItemCount,
+          actualItemCount: result.items.length
+        });
+      }
 
       const directoryPath = entry.path.length ? entry.path : [result.directoryName];
       if (
@@ -1616,6 +1933,13 @@ async function processScanStep(state) {
         });
       }
       state.scanQueue.shift();
+      const workflowCounts = state.workflow.counts;
+      updatePersistentWorkflow(state, {
+        nextAction: selectedPendingItem(state) ? "handoff" : "scan",
+        counts: countCheck.verified
+          ? { verifiedDirectories: workflowCounts.verifiedDirectories + 1 }
+          : { unverifiedDirectories: workflowCounts.unverifiedDirectories + 1 }
+      });
       pushLog(
         state,
         "info",
@@ -1630,6 +1954,31 @@ async function processScanStep(state) {
         );
         return;
       }
+      if (error?.scanCountMismatch) {
+        entry.countRetries = Math.max(0, Number(entry.countRetries) || 0) + 1;
+        const workflowCounts = state.workflow.counts;
+        updatePersistentWorkflow(state, {
+          nextAction: "scan",
+          counts: { scanRetries: workflowCounts.scanRetries + 1 }
+        });
+        if (entry.countRetries <= 2) {
+          pushRuntimeEvent(
+            state,
+            "DIRECTORY_COUNT_RETRY",
+            "warn",
+            `目录数量不一致，正在自动重扫（${entry.countRetries}/2）`,
+            String(error),
+            {
+              expected: error.expectedItemCount,
+              actual: error.actualItemCount,
+              jobId: activeJob(state)?.id || ""
+            }
+          );
+          await saveState(state);
+          schedulePump(300);
+          return;
+        }
+      }
       state.scanFailures.push({
         url: entry.url,
         path: entry.path,
@@ -1638,12 +1987,17 @@ async function processScanStep(state) {
         at: new Date().toISOString()
       });
       state.scanQueue.shift();
+      const workflowCounts = state.workflow.counts;
+      updatePersistentWorkflow(state, {
+        nextAction: selectedPendingItem(state) ? "handoff" : "scan",
+        counts: { unverifiedDirectories: workflowCounts.unverifiedDirectories + 1 }
+      });
       pushLog(state, "error", `${FAILURE.DIRECTORY_LOAD_FAILED}：${entry.path.join("/") || entry.url}`, String(error));
     }
     await saveState(state);
     await notifySource(state, {
       type: "FOLDER_TASK_STATUS",
-      message: `已发现 ${state.items.filter((item) => item.selected).length} 个可下载文件，继续读取子文件夹…`
+      message: `已发现 ${state.items.filter((item) => item.selected).length} 个可下载文件，已交付 ${state.workflow.counts.handedOff} 个，继续读取子文件夹…`
     });
     schedulePump();
     return;
@@ -1675,6 +2029,9 @@ async function processScanStep(state) {
         path: [...folder.parentPath, folder.name]
       });
       state.resolveQueue.shift();
+      updatePersistentWorkflow(state, {
+        nextAction: selectedPendingItem(state) ? "handoff" : "scan"
+      });
     } catch (error) {
       if (isWorkerUnavailableError(error)) {
         await waitForWorkerReconnect(
@@ -1691,6 +2048,9 @@ async function processScanStep(state) {
         at: new Date().toISOString()
       });
       state.resolveQueue.shift();
+      updatePersistentWorkflow(state, {
+        nextAction: selectedPendingItem(state) ? "handoff" : "scan"
+      });
       pushLog(state, "error", `${FAILURE.DIRECTORY_LOAD_FAILED}：${folder.name}`, String(error));
     }
     await saveState(state);
@@ -1701,6 +2061,13 @@ async function processScanStep(state) {
   state.mode = "scan_complete";
   state.phase = "ready";
   state.completedAt = new Date().toISOString();
+  transitionPersistentWorkflow(
+    state,
+    state.scanFailures.length || state.workflow.counts.unverifiedDirectories > 0
+      ? "SCAN_INCOMPLETE"
+      : "SCAN_COMPLETE",
+    { nextAction: selectedPendingItem(state) ? "handoff" : "scan" }
+  );
   if (!settings.recursive && state.items.length === 0 && state.scannedFolderCount > 0) {
     pushLog(
       state,
@@ -1711,7 +2078,7 @@ async function processScanStep(state) {
     pushLog(
       state,
       "info",
-      `扫描完成：共 ${state.items.length} 个文件、${state.scannedFolderCount} 个文件夹，${state.items.filter((item) => item.selected).length} 个待下载`
+      `扫描完成：共 ${state.items.length} 个文件、${state.scannedFolderCount} 个文件夹，${state.items.filter((item) => item.selected).length} 个待下载；已核对 ${state.workflow.counts.verifiedDirectories} 个目录，未核对 ${state.workflow.counts.unverifiedDirectories} 个目录`
     );
   }
   if (state.triggerMode !== "folder_button") await closeWorkTab(state);
@@ -1823,11 +2190,17 @@ async function reconcileInterruptedGopeedTask(state) {
     item.gopeedTaskId ||= existingTransfer.taskId;
     item.status = state.mode === "paused" ? "paused" : "transferring";
     item.stage = state.mode === "paused" ? "已暂停" : "Gopeed 传输中";
+    await acceptDownloadOperation(state, item, existingTransfer.taskId);
     recordGopeedReconciliation(state, "linked", {
       code: "GOPEED_TASK_LINK_CONFIRMED",
       message: `已确认现有 Gopeed 任务关联：${item.name}`,
       context: { taskKey, taskId: existingTransfer.taskId }
     });
+    transitionPersistentWorkflow(state, "HANDOFF_ACCEPT", {
+      reservedItemId: "",
+      nextAction: "scan"
+    });
+    transitionPersistentWorkflow(state, "TRANSFER_START");
     return { handled: true, delayMs: 100 };
   }
 
@@ -1855,6 +2228,11 @@ async function reconcileInterruptedGopeedTask(state) {
       level: "warn",
       message: `Gopeed 中未找到中断任务，按原流程重新处理：${item.name}`,
       context: { taskKey }
+    });
+    await reopenDownloadOperation(state, item);
+    transitionPersistentWorkflow(state, "HANDOFF_RESET", {
+      reservedItemId: "",
+      nextAction: "scan"
     });
     return { handled: false };
   }
@@ -1890,6 +2268,7 @@ async function reconcileInterruptedGopeedTask(state) {
 
   const now = new Date().toISOString();
   const status = classifyGopeedTaskStatus(selection.task.status);
+  await acceptDownloadOperation(state, item, taskId);
   state.preparingItemId = null;
   item.reconciledAt = now;
   item.gopeedTaskId = taskId;
@@ -1907,6 +2286,7 @@ async function reconcileInterruptedGopeedTask(state) {
     item.error = "";
     item.completedAt = now;
     removeActiveTransfer(state, item.id);
+    await completeDownloadOperation(state, item, "success");
   } else if (status === "failed") {
     markAttemptFailure(
       state,
@@ -1915,6 +2295,8 @@ async function reconcileInterruptedGopeedTask(state) {
       "对账找到的 Gopeed 任务已失败；将刷新临时地址后继续原任务",
       taskId
     );
+    if (item.status === "pending") await reopenDownloadOperation(state, item);
+    else await completeDownloadOperation(state, item, "failed");
   } else {
     state.activeTransfers = (state.activeTransfers || [])
       .filter((transfer) => transfer.itemId !== item.id);
@@ -1930,12 +2312,20 @@ async function reconcileInterruptedGopeedTask(state) {
     item.stage = status === "paused" ? "已在 Gopeed 暂停" : "Gopeed 传输中（已恢复关联）";
     item.transferDeadline = Date.now() + state.settings.timeouts.transfer;
     if (status === "paused") {
-      state.mode = activeJob(state)?.cancelRequested ? "draining_paused" : "paused";
-      state.phase = state.mode;
+      if (state.mode !== "scanning") {
+        state.mode = activeJob(state)?.cancelRequested ? "draining_paused" : "paused";
+        state.phase = state.mode;
+      }
     } else {
-      state.phase = "downloading";
+      state.phase = state.mode === "scanning" ? "scanning_and_downloading" : "downloading";
     }
   }
+
+  transitionPersistentWorkflow(state, "HANDOFF_ACCEPT", {
+    reservedItemId: "",
+    nextAction: "scan"
+  });
+  if (state.activeTransfers.length) transitionPersistentWorkflow(state, "TRANSFER_START");
 
   recordGopeedReconciliation(state, "recovered", {
     code: "GOPEED_TASK_RECONCILED",
@@ -2005,6 +2395,30 @@ async function beginDownload(state, item, url) {
   item.stage = item.retryTaskId ? "更新下载地址" : "建立 Gopeed 任务";
   await saveState(state);
   const previousTaskId = item.retryTaskId;
+  const operation = await reserveDownloadOperation(state, item);
+  if (operation?.status === "success") {
+    item.status = "success";
+    item.stage = "成功（已从持久化账本恢复）";
+    item.completedAt ||= operation.completedAt || new Date().toISOString();
+    state.preparingItemId = null;
+    transitionPersistentWorkflow(state, "HANDOFF_ACCEPT", {
+      reservedItemId: "",
+      nextAction: "scan"
+    });
+    await saveState(state);
+    schedulePump(100);
+    return;
+  }
+  if (operation?.status === "accepted" && operation.taskId && !previousTaskId) {
+    item.stage = "Gopeed 任务待对账";
+    transitionPersistentWorkflow(state, "HANDOFF_RECONCILE", {
+      reservedItemId: item.id,
+      nextAction: "handoff"
+    });
+    await saveState(state);
+    schedulePump(100);
+    return;
+  }
   const started = await startOrReplaceGopeedTask(
     state.settings,
     previousTaskId,
@@ -2022,11 +2436,13 @@ async function beginDownload(state, item, url) {
     );
   }
   if (!taskId) throw new Error("Gopeed 没有返回任务 ID");
+  await acceptDownloadOperation(state, item, taskId);
 
   const fresh = (await getStored()).state;
   const freshItem = fresh.items.find((candidate) => candidate.id === item.id);
   if (!freshItem || TERMINAL_STATUSES.has(freshItem.status)) {
     try { await deleteGopeedTask(state.settings, taskId, { timeoutMs: 8000 }); } catch {}
+    if (freshItem) await completeDownloadOperation(fresh, freshItem, "cancelled");
     return;
   }
   fresh.activeTransfers = (fresh.activeTransfers || [])
@@ -2044,6 +2460,11 @@ async function beginDownload(state, item, url) {
   freshItem.status = fresh.mode === "paused" ? "paused" : "transferring";
   freshItem.stage = fresh.mode === "paused" ? "已暂停" : "Gopeed 传输中";
   freshItem.transferDeadline = Date.now() + fresh.settings.timeouts.transfer;
+  transitionPersistentWorkflow(fresh, "HANDOFF_ACCEPT", {
+    reservedItemId: "",
+    nextAction: "scan"
+  });
+  transitionPersistentWorkflow(fresh, "TRANSFER_START");
   if (fresh.mode === "paused") {
     try { await pauseGopeedTask(fresh.settings, taskId); } catch {}
   }
@@ -2115,6 +2536,14 @@ async function requestDirectDownloadUrl(state, pageId) {
 
 async function syncGopeedTransfers(state) {
   let connectionProblem = false;
+  const observed = {
+    active: 0,
+    paused: 0,
+    success: 0,
+    failed: 0,
+    unknown: 0,
+    pausedItemIds: []
+  };
   for (const transfer of [...(state.activeTransfers || [])]) {
     const item = state.items.find((candidate) => candidate.id === transfer.itemId);
     if (!item) {
@@ -2132,6 +2561,7 @@ async function syncGopeedTransfers(state) {
         status: task?.status || ""
       };
       const status = classifyGopeedTaskStatus(task?.status);
+      observed[status] += 1;
       if (status === "success") {
         item.status = "success";
         item.stage = "成功";
@@ -2140,6 +2570,7 @@ async function syncGopeedTransfers(state) {
         item.completedAt = new Date().toISOString();
         item.retryTaskId = null;
         removeActiveTransfer(state, item.id);
+        await completeDownloadOperation(state, item, "success");
         pushRuntimeEvent(
           state,
           "GOPEED_TASK_COMPLETED",
@@ -2156,12 +2587,41 @@ async function syncGopeedTransfers(state) {
           "Gopeed 报告传输失败；将刷新 POPO 临时地址后继续原任务",
           transfer.taskId
         );
+        if (item.status === "pending") await reopenDownloadOperation(state, item);
+        else await completeDownloadOperation(state, item, "failed");
       } else if (status === "paused") {
+        observed.pausedItemIds.push(item.id);
+        const newlyPaused = item.status !== "paused" || !transfer.externalPaused;
         item.status = "paused";
         item.stage = "已在 Gopeed 暂停";
-        state.mode = activeJob(state)?.cancelRequested ? "draining_paused" : "paused";
-        state.phase = state.mode;
-        pushLog(state, "info", `Gopeed 任务已暂停：${item.name}`);
+        transfer.externalPaused = state.pauseOrigin !== "popo";
+        if (newlyPaused && transfer.externalPaused) {
+          pushRuntimeEvent(
+            state,
+            "GOPEED_TASK_PAUSED_EXTERNALLY",
+            "info",
+            `检测到 Gopeed 任务被手动暂停：${item.name}`,
+            `taskId=${transfer.taskId}`,
+            { jobId: activeJob(state)?.id || "", taskId: transfer.taskId }
+          );
+        }
+      } else if (status === "active") {
+        const resumedExternally = item.status === "paused" || transfer.externalPaused;
+        if (!TERMINAL_STATUSES.has(item.status)) {
+          item.status = "transferring";
+          item.stage = "Gopeed 传输中";
+        }
+        if (resumedExternally && transfer.externalPaused) {
+          pushRuntimeEvent(
+            state,
+            "GOPEED_TASK_RESUMED_EXTERNALLY",
+            "info",
+            `检测到 Gopeed 任务已手动继续：${item.name}`,
+            `taskId=${transfer.taskId}`,
+            { jobId: activeJob(state)?.id || "", taskId: transfer.taskId }
+          );
+        }
+        transfer.externalPaused = false;
       } else if (status === "unknown") {
         transfer.pollFailures = (transfer.pollFailures || 0) + 1;
         if (transfer.pollFailures >= 5) {
@@ -2172,6 +2632,8 @@ async function syncGopeedTransfers(state) {
             `Gopeed 返回未知任务状态：${task?.status || "空"}`,
             transfer.taskId
           );
+          if (item.status === "pending") await reopenDownloadOperation(state, item);
+          else await completeDownloadOperation(state, item, "failed");
         }
       }
     } catch (error) {
@@ -2183,6 +2645,8 @@ async function syncGopeedTransfers(state) {
           FAILURE.DOWNLOAD_NOT_ESTABLISHED,
           "Gopeed 中已找不到该任务，将重新建立下载"
         );
+        if (item.status === "pending") await reopenDownloadOperation(state, item);
+        else await completeDownloadOperation(state, item, "failed");
         continue;
       }
       connectionProblem = true;
@@ -2199,6 +2663,8 @@ async function syncGopeedTransfers(state) {
           `${detail}；连续 5 次无法读取任务状态`,
           transfer.taskId
         );
+        if (item.status === "pending") await reopenDownloadOperation(state, item);
+        else await completeDownloadOperation(state, item, "failed");
       }
     }
   }
@@ -2212,18 +2678,67 @@ async function syncGopeedTransfers(state) {
       { jobId: activeJob(state)?.id || "" }
     );
   }
+  refreshNetworkHealth(state);
+  if (state.activeTransfers.length) transitionPersistentWorkflow(state, "TRANSFER_START");
+  else transitionPersistentWorkflow(state, "TRANSFER_IDLE");
+  return observed;
 }
 
-async function processDownloadStep(state) {
+function isUnownedPausedState(state) {
+  return ["paused", "draining_paused"].includes(state.mode) &&
+    state.pauseOrigin !== "popo" &&
+    Boolean(activeJob(state));
+}
+
+async function reconcileUnownedPausedState(state) {
+  if (!isUnownedPausedState(state)) return false;
+  const transferCountBefore = (state.activeTransfers || []).length;
+  if (!transferCountBefore) return false;
+
+  const observed = await syncGopeedTransfers(state);
+  const gopeedMovedForward = observed.active > 0 || observed.success > 0 || observed.failed > 0 ||
+    state.activeTransfers.length < transferCountBefore;
+  if (!gopeedMovedForward) {
+    await saveState(state);
+    return false;
+  }
+
+  const cancelRequested = Boolean(activeJob(state)?.cancelRequested);
+  const requestedMode = state.pauseResumeMode === "scanning" ? "scanning" : "downloading";
+  state.mode = cancelRequested ? "draining" : requestedMode;
+  state.phase = "reconciling_gopeed";
+  state.pauseOrigin = "";
+  state.pauseResumeMode = "";
+  pushRuntimeEvent(
+    state,
+    "GOPEED_PROJECT_RECONCILED",
+    "info",
+    "检测到 Gopeed 任务已恢复或完成，POPO 项目已自动接续",
+    `active=${observed.active}; success=${observed.success}; failed=${observed.failed}`,
+    { jobId: activeJob(state)?.id || "" }
+  );
+  await saveState(state);
+  schedulePump(100);
+  return true;
+}
+
+async function processDownloadStep(state, { duringScan = false, skipTransferSync = false } = {}) {
   state.activeTransfers = Array.isArray(state.activeTransfers) ? state.activeTransfers : [];
-  await syncGopeedTransfers(state);
+  if (!skipTransferSync) await syncGopeedTransfers(state);
   if (!state.gopeedConnected) {
     const connection = await checkGopeedConnection(state.settings, state);
     if (!connection.connected) {
-      state.phase = "waiting_gopeed";
-      pushLog(state, "warn", "等待 Gopeed 恢复连接", connection.error);
-      await saveState(state);
-      schedulePump(2000);
+      if (duringScan && state.mode === "scanning") {
+        state.phase = "scanning";
+        updatePersistentWorkflow(state, { nextAction: "scan" });
+        pushLog(state, "warn", "Gopeed 暂未连接，继续查找文件", connection.error);
+        await processScanStep(state);
+      } else {
+        state.phase = "waiting_gopeed";
+        pushLog(state, "warn", "等待 Gopeed 恢复连接", connection.error);
+        await saveState(state);
+        schedulePump(2000);
+      }
       return;
     }
   }
@@ -2246,11 +2761,16 @@ async function processDownloadStep(state) {
     );
     return;
   }
-  if (state.mode !== "downloading") {
+  if ((!duringScan && state.mode !== "downloading") ||
+      (duringScan && state.mode !== "scanning")) {
     await saveState(state);
     return;
   }
   if (state.preparingItemId) {
+    transitionPersistentWorkflow(state, "HANDOFF_RECONCILE", {
+      reservedItemId: state.preparingItemId,
+      nextAction: "handoff"
+    });
     const reconciliation = await reconcileInterruptedGopeedTask(state);
     if (reconciliation.handled) {
       await saveState(state);
@@ -2278,6 +2798,10 @@ async function processDownloadStep(state) {
     }
     state.preparingItemId = null;
     state.activeItemId = state.activeTransfers[0]?.itemId ?? null;
+    transitionPersistentWorkflow(state, "HANDOFF_RESET", {
+      reservedItemId: "",
+      nextAction: "scan"
+    });
     await saveState(state);
     schedulePump(100);
     return;
@@ -2290,12 +2814,22 @@ async function processDownloadStep(state) {
     return;
   }
   if (state.activeTransfers.length >= state.settings.concurrency) {
-    await saveState(state);
-    schedulePump(1000);
+    if (duringScan) {
+      updatePersistentWorkflow(state, { nextAction: "scan" });
+      await processScanStep(state);
+    } else {
+      await saveState(state);
+      schedulePump(1000);
+    }
     return;
   }
   const item = selectedPendingItem(state);
   if (!item) {
+    if (duringScan) {
+      updatePersistentWorkflow(state, { nextAction: "scan" });
+      await processScanStep(state);
+      return;
+    }
     if (state.activeTransfers.length) {
       await saveState(state);
       schedulePump(1000);
@@ -2303,10 +2837,33 @@ async function processDownloadStep(state) {
     }
     const successCount = state.items.filter((entry) => entry.status === "success").length;
     const failedCount = state.items.filter((entry) => entry.status === "failed").length;
+    const reconciliation = quantityReconciliation(state);
+    if (!reconciliation.ok) {
+      await finalizeActiveJob(
+        state,
+        "failed",
+        "数量核对失败：文件状态合计与已发现数量不一致，已停止静默完成",
+        { type: "FOLDER_TASK_ERROR", message: "数量核对失败，请重试任务" }
+      );
+      return;
+    }
+    pushRuntimeEvent(
+      state,
+      "QUANTITY_RECONCILED",
+      "info",
+      "文件数量核对通过",
+      `discovered=${reconciliation.counts.discovered}; selected=${reconciliation.counts.selected}`,
+      { jobId: activeJob(state)?.id || "" }
+    );
+    const scanWarning = state.scanFailures.length
+      ? `；${state.scanFailures.length} 个目录读取失败`
+      : state.workflow.counts.unverifiedDirectories
+        ? `；${state.workflow.counts.unverifiedDirectories} 个目录未能独立核对数量`
+        : "";
     await finalizeActiveJob(
       state,
       "complete",
-      `下载结束：成功 ${successCount}，失败 ${failedCount}`,
+      `下载结束：成功 ${successCount}，失败 ${failedCount}${scanWarning}`,
       { type: "FOLDER_TASK_FINISHED", successCount, failedCount }
     );
     return;
@@ -2319,6 +2876,11 @@ async function processDownloadStep(state) {
   item.startedAt ||= new Date().toISOString();
   item.failureStage = "";
   item.error = "";
+  transitionPersistentWorkflow(state, "HANDOFF_RESERVE", {
+    reservedItemId: item.id,
+    nextAction: "handoff"
+  });
+  transitionPersistentWorkflow(state, "HANDOFF_PREPARE");
 
   try {
     item.stage = "加载父目录";
@@ -2388,6 +2950,10 @@ async function processDownloadStep(state) {
       item.attempts = Math.max(0, item.attempts - 1);
       item.workerInterruptions = (item.workerInterruptions || 0) + 1;
       removeActiveTransfer(state, item.id);
+      transitionPersistentWorkflow(state, "HANDOFF_RESET", {
+        reservedItemId: "",
+        nextAction: "scan"
+      });
       await waitForWorkerReconnect(
         state,
         `POPO 页面刷新中：${item.name} 稍后自动继续，本次不计失败`
@@ -2401,9 +2967,40 @@ async function processDownloadStep(state) {
             item.stage === "等待预览" ? FAILURE.PREVIEW_LOAD_TIMEOUT :
               FAILURE.DOWNLOAD_NOT_ESTABLISHED);
     markAttemptFailure(state, item, failureStage, error);
+    if (item.status === "pending") await reopenDownloadOperation(state, item);
+    else await completeDownloadOperation(state, item, "failed");
+    transitionPersistentWorkflow(state, "HANDOFF_RESET", {
+      reservedItemId: "",
+      nextAction: "scan"
+    });
     await saveState(state);
     schedulePump();
   }
+}
+
+async function processPersistentWorkflowStep(state) {
+  state.workflow = normalizePersistentWorkflow(state.workflow);
+  await syncGopeedTransfers(state);
+  const action = typeof runtimeWorkflow?.choosePersistentWorkflowAction === "function"
+    ? runtimeWorkflow.choosePersistentWorkflowAction({
+      workflow: state.workflow,
+      hasPending: Boolean(selectedPendingItem(state)),
+      hasPreparing: Boolean(state.preparingItemId),
+      activeTransfers: state.activeTransfers.length,
+      concurrency: state.settings.concurrency
+    })
+    : (Boolean(state.preparingItemId) || (
+      state.workflow.nextAction === "handoff" &&
+      state.activeTransfers.length < state.settings.concurrency &&
+      selectedPendingItem(state)
+    ))
+      ? "handoff"
+      : "scan";
+  if (action === "handoff") {
+    await processDownloadStep(state, { duringScan: true, skipTransferSync: true });
+    return;
+  }
+  await processScanStep(state);
 }
 
 async function pump() {
@@ -2412,7 +3009,8 @@ async function pump() {
   try {
     const { state } = await getStored();
     if (await repairQueueState(state)) return;
-    if (state.mode === "scanning") await processScanStep(state);
+    if (await reconcileUnownedPausedState(state)) return;
+    if (state.mode === "scanning") await processPersistentWorkflowStep(state);
     else if (["downloading", "draining", "draining_paused"].includes(state.mode)) {
       await processDownloadStep(state);
     }
@@ -2448,6 +3046,7 @@ async function startScan(message) {
   state.teamSpaceId = "";
   state.scanQueue = [{ url: url.href, path: [] }];
   state.startedAt = new Date().toISOString();
+  transitionPersistentWorkflow(state, "SCAN_START", { nextAction: "scan" });
   pushLog(state, "info", "扫描任务已创建；用户当前标签页不会被切换");
   await saveState(state);
   schedulePump(100);
@@ -2520,8 +3119,34 @@ async function startScannedDownload(state, { automatic = false } = {}) {
   if (!["scan_complete", "awaiting_confirmation", "complete"].includes(state.mode)) {
     throw new Error("请先完成文件数量检查");
   }
-  const pending = state.items.filter((item) => item.selected && !["success", "cancelled"].includes(item.status));
+  const selected = state.items.filter((item) => item.selected);
+  const pending = selected.filter((item) =>
+    ["pending", "preparing", "transferring", "paused"].includes(item.status)
+  );
   if (!pending.length) {
+    const successCount = selected.filter((item) => item.status === "success").length;
+    const failedCount = selected.filter((item) => item.status === "failed").length;
+    if (selected.length && successCount + failedCount === selected.length) {
+      const reconciliation = quantityReconciliation(state);
+      const scanWarning = state.scanFailures.length
+        ? `；${state.scanFailures.length} 个目录读取失败`
+        : state.workflow.counts.unverifiedDirectories
+          ? `；${state.workflow.counts.unverifiedDirectories} 个目录未能独立核对数量`
+          : "";
+      await finalizeActiveJob(
+        state,
+        reconciliation.ok ? "complete" : "failed",
+        reconciliation.ok
+          ? `下载结束：成功 ${successCount}，失败 ${failedCount}${scanWarning}`
+          : "数量核对失败：文件状态合计与已发现数量不一致",
+        {
+          type: reconciliation.ok ? "FOLDER_TASK_FINISHED" : "FOLDER_TASK_ERROR",
+          successCount,
+          failedCount
+        }
+      );
+      return state;
+    }
     const message = state.scanFailures.length
       ? `没有可下载文件；${state.scanFailures.length} 个目录读取失败`
       : `当前目录没有可下载文件（${state.rootProjectCount ?? 0} 个项目）`;
@@ -2547,6 +3172,14 @@ async function startScannedDownload(state, { automatic = false } = {}) {
   const connection = await checkGopeedConnection(state.settings, state);
   if (!connection.connected) {
     const message = `Gopeed 未连接：${connection.error}。请重新运行测试包中的 START-HERE.cmd 后再试。`;
+    if ((state.activeTransfers || []).length || state.preparingItemId) {
+      state.mode = "downloading";
+      state.phase = "waiting_gopeed";
+      pushLog(state, "warn", "扫描已结束；已开始任务继续等待 Gopeed 恢复", connection.error);
+      await saveState(state);
+      schedulePump(2000);
+      return state;
+    }
     if (automatic && state.triggerMode === "folder_button") {
       await finalizeActiveJob(state, "failed", message, { type: "FOLDER_TASK_ERROR", message });
       return state;
@@ -2557,19 +3190,17 @@ async function startScannedDownload(state, { automatic = false } = {}) {
     throw new Error(message);
   }
   for (const item of pending) {
-    if (item.status === "failed") continue;
-    if (item.status !== "success") item.status = "pending";
+    if (!["preparing", "transferring", "paused"].includes(item.status)) item.status = "pending";
   }
   state.mode = "downloading";
   state.phase = "starting";
   state.completedAt = "";
-  state.preparingItemId = null;
-  state.activeTransfers = [];
-  state.activeItemId = null;
+  state.activeTransfers = Array.isArray(state.activeTransfers) ? state.activeTransfers : [];
+  state.activeItemId = state.preparingItemId || state.activeTransfers[0]?.itemId || null;
   pushLog(
     state,
     "info",
-    `开始下载 ${pending.filter((item) => item.status === "pending").length} 个文件；Gopeed 任务并发 ${state.settings.concurrency}`,
+    `扫描结束后继续下载：待处理 ${pending.filter((item) => item.status === "pending").length} 个，已交付 ${state.workflow?.counts?.handedOff || 0} 个；Gopeed 任务并发 ${state.settings.concurrency}`,
     `downloadDir=${connection.downloadDir}`
   );
   const saved = await saveState(state);
@@ -2585,9 +3216,12 @@ async function startDownload() {
 
 async function pauseTask() {
   const { state } = await getStored();
-  if (state.mode !== "downloading") return state;
-  state.mode = "paused";
-  state.phase = "paused";
+  if (!["scanning", "downloading", "draining"].includes(state.mode)) return state;
+  const resumeMode = state.mode;
+  state.pauseOrigin = "popo";
+  state.pauseResumeMode = resumeMode;
+  state.mode = resumeMode === "draining" ? "draining_paused" : "paused";
+  state.phase = state.mode;
   rotateRunToken(state);
   await saveState(state, true);
   for (const transfer of state.activeTransfers || []) {
@@ -2608,6 +3242,28 @@ async function pauseTask() {
   return state;
 }
 
+async function snoozeNetworkReminder() {
+  const { state } = await getStored();
+  state.networkHealth = typeof runtimeNetworkMonitor?.snoozeNetworkReminder === "function"
+    ? runtimeNetworkMonitor.snoozeNetworkReminder(state.networkHealth, 15)
+    : { ...normalizeNetworkHealth(state.networkHealth), suppressed: true };
+  pushRuntimeEvent(state, "NETWORK_NOTICE_SNOOZED", "info", "网络慢速提醒已稍后 15 分钟");
+  await saveState(state);
+  await notifySource(state, { type: "FOLDER_TASK_STATUS", message: "网络提醒已稍后 15 分钟" });
+  return state;
+}
+
+async function muteNetworkReminderToday() {
+  const { state } = await getStored();
+  state.networkHealth = typeof runtimeNetworkMonitor?.muteNetworkReminderToday === "function"
+    ? runtimeNetworkMonitor.muteNetworkReminderToday(state.networkHealth)
+    : { ...normalizeNetworkHealth(state.networkHealth), suppressed: true };
+  pushRuntimeEvent(state, "NETWORK_NOTICE_MUTED_TODAY", "info", "今日不再提醒网络慢速");
+  await saveState(state);
+  await notifySource(state, { type: "FOLDER_TASK_STATUS", message: "今日不再提醒网络慢速" });
+  return state;
+}
+
 async function resumeTask() {
   const { state } = await getStored();
   if (state.mode === "downloading") {
@@ -2618,13 +3274,19 @@ async function resumeTask() {
     return state;
   }
   if (!["paused", "draining_paused"].includes(state.mode)) return state;
+  const observed = await syncGopeedTransfers(state);
+  const pausedItemIds = new Set(observed.pausedItemIds || []);
   const cancelRequested = Boolean(activeJob(state)?.cancelRequested);
-  state.mode = cancelRequested ? "draining" : "downloading";
+  const resumeMode = state.pauseResumeMode === "scanning" ? "scanning" : "downloading";
+  state.mode = cancelRequested ? "draining" : resumeMode;
   state.phase = "resuming";
+  state.pauseOrigin = "";
+  state.pauseResumeMode = "";
   rotateRunToken(state);
   await saveState(state, true);
   for (const transfer of [...(state.activeTransfers || [])]) {
     const item = state.items.find((candidate) => candidate.id === transfer.itemId);
+    if (!item || !pausedItemIds.has(item.id)) continue;
     try { await continueGopeedTask(state.settings, transfer.taskId); } catch (error) {
       if (item) markAttemptFailure(state, item, FAILURE.TRANSFER_INTERRUPTED, error, transfer.taskId);
     }
@@ -2645,11 +3307,11 @@ async function resumeTask() {
 
 async function cancelTask() {
   const { state } = await getStored();
-  return cancelJob(state.activeJobId);
+  return cancelJob(state.activeJobId, state);
 }
 
-async function cancelJob(jobId) {
-  const { state } = await getStored();
+async function cancelJob(jobId, currentState = null) {
+  const state = currentState || (await getStored()).state;
   const job = (state.jobs || []).find((candidate) => candidate.id === jobId);
   if (!job) throw new Error("没有找到要取消的下载任务");
   if (isJobTerminal(job.status)) return state;
@@ -2665,6 +3327,7 @@ async function cancelJob(jobId) {
     return state;
   }
 
+  await syncGopeedTransfers(state);
   job.cancelRequested = true;
   rotateRunToken(state);
   const cancellation = applyCancelPolicy(state.items, state.activeTransfers);
@@ -2904,6 +3567,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function runWatchdog() {
   const { state } = await getStored();
   if (await repairQueueState(state)) return;
+  if (await reconcileUnownedPausedState(state)) return;
   if (state.mode === "waiting_worker" && state.workerDeadline && Date.now() > state.workerDeadline) {
     await finalizeActiveJob(
       state,
@@ -2995,6 +3659,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const result = await chooseDownloadDirectory(command);
         return { ok: true, ...result };
       }
+      case "SET_DOWNLOAD_CONCURRENCY": {
+        const result = await withControlMutation(
+          () => setDownloadConcurrency(command.concurrency)
+        );
+        return { ok: true, ...result };
+      }
       case "SAVE_SETTINGS":
         return { ok: true, settings: await saveSettings(command.settings) };
       case "START_SCAN":
@@ -3033,12 +3703,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const state = await startDownload();
         return { ok: true, state: publicState(state) };
       }
+      case "SNOOZE_NETWORK_REMINDER": {
+        const state = await withControlMutation(() => snoozeNetworkReminder());
+        return { ok: true, state: publicState(state) };
+      }
+      case "MUTE_NETWORK_REMINDER_TODAY": {
+        const state = await withControlMutation(() => muteNetworkReminderToday());
+        return { ok: true, state: publicState(state) };
+      }
       case "PAUSE": {
-        const state = await pauseTask();
+        const state = await withControlMutation(() => pauseTask());
         return { ok: true, state: publicState(state) };
       }
       case "RESUME": {
-        const state = await resumeTask();
+        const state = await withControlMutation(() => resumeTask());
         return { ok: true, state: publicState(state) };
       }
       case "CANCEL": {

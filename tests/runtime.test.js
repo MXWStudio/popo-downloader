@@ -35,8 +35,51 @@ test("TypeScript + Zod 运行时契约拒绝未知命令和非法任务状态", 
 test("XState 作业状态机只允许声明过的迁移", () => {
   assert.equal(runtime.workflow.canTransition("queued", "scanning"), true);
   assert.equal(runtime.workflow.canTransition("downloading", "paused"), true);
+  assert.equal(runtime.workflow.canTransition("scanning", "paused"), true);
+  assert.equal(runtime.workflow.canTransition("paused", "scanning"), true);
   assert.equal(runtime.workflow.canTransition("complete", "downloading"), false);
   assert.equal(runtime.workflow.canTransition("queued", "made_up"), false);
+});
+
+test("XState 持久化工作流可独立恢复扫描、交付和传输区域", () => {
+  let snapshot = runtime.workflow.createPersistentWorkflow("2026-08-10T00:00:00.000Z");
+  snapshot = runtime.workflow.transitionPersistentWorkflow(snapshot, "SCAN_START", {
+    nextAction: "handoff",
+    counts: { discovered: 12, selected: 11, skipped: 1 }
+  });
+  snapshot = runtime.workflow.transitionPersistentWorkflow(snapshot, "HANDOFF_RESERVE", {
+    reservedItemId: "parent\u0000file.mp4"
+  });
+  snapshot = runtime.workflow.transitionPersistentWorkflow(snapshot, "HANDOFF_PREPARE");
+  snapshot = runtime.workflow.transitionPersistentWorkflow(snapshot, "TRANSFER_START");
+
+  const restored = runtime.workflow.normalizePersistentWorkflow(JSON.parse(JSON.stringify(snapshot)));
+  assert.deepEqual(restored.value, {
+    scan: "running",
+    handoff: "preparing",
+    transfer: "active"
+  });
+  assert.equal(restored.reservedItemId, "parent\u0000file.mp4");
+  assert.equal(restored.counts.discovered, 12);
+  assert.equal(restored.sequence, 4);
+
+  const completed = runtime.workflow.transitionPersistentWorkflow(restored, "SCAN_COMPLETE");
+  assert.equal(completed.value.scan, "complete");
+  assert.equal(completed.value.transfer, "active");
+  assert.equal(runtime.workflow.choosePersistentWorkflowAction({
+    workflow: restored,
+    hasPending: true,
+    hasPreparing: false,
+    activeTransfers: 2,
+    concurrency: 5
+  }), "handoff");
+  assert.equal(runtime.workflow.choosePersistentWorkflowAction({
+    workflow: restored,
+    hasPending: true,
+    hasPreparing: false,
+    activeTransfers: 5,
+    concurrency: 5
+  }), "scan");
 });
 
 test("Gopeed 官方 SDK 创建任务并由 Zod 校验返回数据", async () => {

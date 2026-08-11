@@ -36,6 +36,9 @@ import {
   jobProgress,
   liveJobs,
   MODE_LABELS,
+  networkHealthSummary,
+  networkReminderVisible,
+  nextNetworkNotice,
   nextServiceNotice,
   notificationForTransition,
   recoverableCount,
@@ -43,6 +46,7 @@ import {
   userFacingError,
   type QueueJob,
   type QueueState,
+  type NetworkNoticeTracker,
   type ServiceNoticeTracker,
   type GopeedConnection,
   type UiNotification
@@ -391,6 +395,9 @@ const SHADOW_STYLES = [
   ".popo-page-queue[data-status='complete'] .popo-page-job-state{color:#82ddc0;}",
   ".popo-page-queue[data-status='failed'] .popo-page-job-state{color:#ffadb7;}",
   ".popo-page-job-detail{margin-top:5px;color:var(--popo-muted);font-size:11px;line-height:1.45;}",
+  ".popo-network-notice{margin-top:9px;padding:9px;border:1px solid #756039;border-radius:8px;color:#f1d17f;background:var(--popo-gradient-warning);font-size:11px;line-height:1.45;}",
+  ".popo-network-notice strong{display:block;margin-bottom:3px;color:#ffe2a0;font-size:11px;}",
+  ".popo-network-notice .popo-page-actions{margin-top:7px;}",
   ".popo-page-queue-more{margin-top:7px;color:var(--popo-muted);font-size:11px;line-height:1.45;}",
   ".popo-page-progress{overflow:hidden;height:7px;margin-top:8px;border-radius:999px;background:rgba(7,14,23,.44);box-shadow:inset 0 0 0 1px rgba(148,178,210,.1);}",
   ".popo-page-progress i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#1268e8,#0aa17a);transition:width .2s ease;}",
@@ -404,6 +411,8 @@ const SHADOW_STYLES = [
   ".popo-toast{padding:13px 15px;border:1px solid #3f6f62;border-radius:11px;color:var(--popo-ink);background-color:#10241f;background-image:var(--popo-gradient-success);box-shadow:0 14px 38px rgba(2,7,13,.4),inset 0 1px 0 rgba(255,255,255,.05);}",
   ".popo-toast[data-kind='error']{border-color:#7d4a53;background-color:#29191e;background-image:var(--popo-gradient-failed);}",
   ".popo-toast strong{display:block;overflow:hidden;font-size:13px;text-overflow:ellipsis;white-space:nowrap;}",
+  ".popo-toast[data-kind='warning']{border-color:#756039;background-image:var(--popo-gradient-warning);}",
+  ".popo-toast[data-kind='warning'] strong{color:#ffe2a0;}",
   ".popo-toast p{margin:4px 0 0;color:var(--popo-muted);font-size:12px;line-height:1.45;}",
   ".popo-toast-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:8px;}",
   ".popo-toast-action[data-kind='quiet']{color:#aab6c6;border-color:#465365;}",
@@ -658,6 +667,31 @@ function useDownloadServiceNotifications(
       window.clearInterval(timer);
     };
   }, [enabled, onNotification]);
+}
+
+function useNetworkNotifications(
+  state: QueueState | null,
+  onNotification: (notification: UiNotification) => void,
+  suppressed: boolean
+): void {
+  const tracker = useRef<NetworkNoticeTracker>({
+    peakNoticeSequence: 0,
+    noticeSequence: 0
+  });
+
+  useEffect(() => {
+    const result = nextNetworkNotice(tracker.current, state?.networkHealth, suppressed);
+    tracker.current = result.tracker;
+    if (!result.notification) return;
+    const storageKey = `popo-network-notice:${result.notification.id}`;
+    try {
+      if (window.sessionStorage.getItem(storageKey)) return;
+      window.sessionStorage.setItem(storageKey, "1");
+    } catch {
+      // Session storage can be blocked by page policy; in-memory tracking still de-duplicates.
+    }
+    onNotification(result.notification);
+  }, [onNotification, state?.networkHealth, suppressed]);
 }
 
 function ProjectCount({ count }: { count: number | null }) {
@@ -1241,10 +1275,13 @@ function QueueDock({
   const otherQueuedCount = active.filter(
     (job) => job.status === "queued" && job.id !== primary.id
   ).length;
+  const networkVisible = networkReminderVisible(state?.networkHealth) &&
+    state?.networkHealth?.jobId === primary.id;
 
-  const summary = active.length
+  const baseSummary = active.length
     ? summarizeLiveJobs(active)
     : attention.length + " 个需要处理";
+  const summary = networkVisible ? `${baseSummary} · 网络慢` : baseSummary;
 
   const run = async (message: Record<string, unknown>) => {
     setBusy(true);
@@ -1290,6 +1327,30 @@ function QueueDock({
             </span>
           </div>
           <div className="popo-page-job-detail">{jobDetail(primary)}</div>
+          {networkVisible && (
+            <div className="popo-network-notice" role="status">
+              <strong>本地线路可能拥堵</strong>
+              <span>{networkHealthSummary(state?.networkHealth)}。下载仍在继续，与代理设置无关。</span>
+              <div className="popo-page-actions">
+                <button
+                  type="button"
+                  className="popo-page-action"
+                  disabled={busy}
+                  onClick={() => void run({ type: "SNOOZE_NETWORK_REMINDER" })}
+                >
+                  15 分钟后提醒
+                </button>
+                <button
+                  type="button"
+                  className="popo-page-action"
+                  disabled={busy}
+                  onClick={() => void run({ type: "MUTE_NETWORK_REMINDER_TODAY" })}
+                >
+                  今日不再提醒
+                </button>
+              </div>
+            </div>
+          )}
           {primary.status !== "queued" && <ProgressBar job={primary} />}
           {otherQueuedCount > 0 && (
             <div className="popo-page-queue-more">另有 {otherQueuedCount} 个排队</div>
@@ -1392,11 +1453,13 @@ function QueueDock({
 function ToastItem({
   toast,
   onDismiss,
-  onInspect
+  onInspect,
+  onNetworkSnooze
 }: {
   toast: ToastRecord;
   onDismiss: (id: string) => void;
   onInspect: (jobId: string) => void;
+  onNetworkSnooze: () => Promise<void>;
 }) {
   useEffect(() => {
     if (toast.timeoutMs == null) return;
@@ -1409,6 +1472,19 @@ function ToastItem({
       <strong>{toast.title}</strong>
       <p>{toast.message}</p>
       <div className="popo-toast-actions">
+        {toast.source === "network" && (
+          <button
+            type="button"
+            className="popo-toast-action"
+            onClick={() => {
+              void onNetworkSnooze()
+                .then(() => onDismiss(toast.id))
+                .catch(() => undefined);
+            }}
+          >
+            15 分钟后提醒
+          </button>
+        )}
         {toast.kind === "error" && toast.jobId && (
           <button
             type="button"
@@ -1426,9 +1502,9 @@ function ToastItem({
           className="popo-toast-action"
           data-kind="quiet"
           onClick={() => onDismiss(toast.id)}
-          aria-label="关闭提示"
+          aria-label={toast.source === "network" ? "继续下载并关闭提示" : "关闭提示"}
         >
-          关闭
+          {toast.source === "network" ? "继续下载" : "关闭"}
         </button>
       </div>
     </aside>
@@ -1438,11 +1514,13 @@ function ToastItem({
 function ToastViewport({
   toasts,
   onDismiss,
-  onInspect
+  onInspect,
+  onNetworkSnooze
 }: {
   toasts: ToastRecord[];
   onDismiss: (id: string) => void;
   onInspect: (jobId: string) => void;
+  onNetworkSnooze: () => Promise<void>;
 }) {
   if (!toasts.length) return null;
   return (
@@ -1453,6 +1531,7 @@ function ToastViewport({
           toast={toast}
           onDismiss={onDismiss}
           onInspect={onInspect}
+          onNetworkSnooze={onNetworkSnooze}
         />
       ))}
     </div>
@@ -1469,6 +1548,7 @@ function PageEnhancerApp() {
   const popupOpen = Boolean(state?.popupOpen);
 
   useDownloadServiceNotifications(pushToast, popupOpen, state != null);
+  useNetworkNotifications(state, pushToast, popupOpen);
 
   useEffect(() => {
     if (popupOpen) setExpanded(false);
@@ -1489,6 +1569,16 @@ function PageEnhancerApp() {
       timeoutMs: null
     });
   }, [pushToast]);
+
+  const snoozeNetworkReminder = useCallback(async () => {
+    try {
+      await callExtension({ type: "SNOOZE_NETWORK_REMINDER" });
+      await refresh();
+    } catch (error) {
+      showActionError("网络提醒", error);
+      throw error;
+    }
+  }, [refresh, showActionError]);
 
   const portals = useMemo<ReactNode[]>(() => {
     const values: ReactNode[] = [];
@@ -1538,6 +1628,7 @@ function PageEnhancerApp() {
         toasts={popupOpen ? [] : toasts}
         onDismiss={dismissToast}
         onInspect={inspectJob}
+        onNetworkSnooze={snoozeNetworkReminder}
       />
     </>
   );

@@ -26,7 +26,7 @@ const SettingsSchema = z.strictObject({
   gopeedEndpoint: z.string().max(2048).optional(),
   gopeedToken: z.string().max(4096).optional(),
   gopeedDownloadDirOverride: z.string().max(32768).optional(),
-  concurrency: z.number().int().min(1).max(32).optional(),
+  concurrency: z.number().int().min(1).max(5).optional(),
   gopeedConnections: z.number().int().min(1).max(16).optional(),
   maxRetries: z.number().int().min(0).max(10).optional(),
   recursive: z.boolean().optional(),
@@ -42,6 +42,8 @@ const SimpleCommandSchema = z.strictObject({
     "START_DOWNLOAD",
     "PAUSE",
     "RESUME",
+    "SNOOZE_NETWORK_REMINDER",
+    "MUTE_NETWORK_REMINDER_TODAY",
     "CANCEL",
     "RETRY_FAILED",
     "RESET"
@@ -72,6 +74,10 @@ export const RuntimeCommandSchema = z.union([
   z.strictObject({
     type: z.literal("CHOOSE_DOWNLOAD_DIRECTORY"),
     initialPath: z.string().max(32768)
+  }),
+  z.strictObject({
+    type: z.literal("SET_DOWNLOAD_CONCURRENCY"),
+    concurrency: z.number().int().min(1).max(5)
   }),
   z.strictObject({ type: z.literal("SAVE_SETTINGS"), settings: SettingsSchema }),
   z.strictObject({

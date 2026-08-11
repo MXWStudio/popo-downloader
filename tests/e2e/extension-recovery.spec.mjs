@@ -396,6 +396,54 @@ test("single React page root renders project count and recycled folder-row porta
   await expect(page.locator(".popo-page-queue")).toHaveCSS("animation-name", "none");
 
   await page.evaluate(() => {
+    window.__popoUiTest.state.networkHealth = {
+      version: 1,
+      jobId: "job-1",
+      status: "slow",
+      activeTasks: 5,
+      medianSpeed: 2.5 * 1024 * 1024,
+      baselineSpeed: 20 * 1024 * 1024,
+      observedAt: new Date().toISOString(),
+      sessionStartedAt: new Date(Date.now() - 180_000).toISOString(),
+      lowSince: new Date(Date.now() - 90_000).toISOString(),
+      severeSince: "",
+      recoverySince: "",
+      statusChangedAt: new Date().toISOString(),
+      highProbabilityWindow: false,
+      peakNoticeSequence: 0,
+      peakNotifiedDate: "",
+      noticeSequence: 1,
+      lastNoticeAt: new Date().toISOString(),
+      snoozedUntil: "",
+      snoozeReminderPending: false,
+      mutedDate: "",
+      suppressed: false
+    };
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(page.locator(".popo-network-notice")).toContainText("本地线路可能拥堵");
+  await expect(page.locator(".popo-toast[data-kind='warning']")).toContainText("当前下载速度明显偏低");
+  await page.locator(".popo-toast[data-kind='warning']").getByRole("button", {
+    name: "15 分钟后提醒"
+  }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__popoUiTest.calls.filter(
+      (message) => message.type === "SNOOZE_NETWORK_REMINDER"
+    ).length
+  )).toBe(1);
+  await expect(page.locator(".popo-toast[data-kind='warning']")).toHaveCount(0);
+  await page.evaluate(() => {
+    window.__popoUiTest.state.networkHealth.status = "normal";
+    window.__popoUiTest.state.networkHealth.suppressed = true;
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(page.locator(".popo-network-notice")).toHaveCount(0);
+
+  await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = true;
     for (const listener of window.__popoUiTest.listeners) {
       listener({ type: "POPUP_VISIBILITY_CHANGED", open: true });
@@ -657,6 +705,26 @@ test("popup uses simple wording and safely removes cancelled history", async () 
   await expect(popup.locator("body")).not.toContainText("隐藏工作区");
   await expect(popup.locator("body")).not.toContainText("Gopeed");
   await expect(popup.locator("body")).not.toContainText("API");
+
+  const settingsPanel = popup.locator(".engine-settings");
+  if (await settingsPanel.getAttribute("open") == null) {
+    await settingsPanel.locator(":scope > summary").click();
+  }
+  const concurrencySelect = popup.locator("#downloadConcurrency");
+  await expect(concurrencySelect).toBeVisible();
+  await expect(concurrencySelect).toHaveValue("5");
+  await concurrencySelect.selectOption("2");
+  await expect(concurrencySelect).toHaveValue("2");
+  await expect.poll(() => session.worker.evaluate(async () => {
+    const { popoSettings, popoState } = await chrome.storage.local.get([
+      "popoSettings",
+      "popoState"
+    ]);
+    return {
+      saved: popoSettings?.concurrency,
+      active: popoState?.settings?.concurrency
+    };
+  })).toEqual({ saved: 2, active: 2 });
 
   await popup.getByRole("button", { name: "移除" }).click();
   await expect(popup.locator(".popup-remove-note")).toHaveText("只从列表移除，不会删除已下载文件。");

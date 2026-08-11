@@ -184,6 +184,8 @@
     "START_DOWNLOAD",
     "PAUSE",
     "RESUME",
+    "SNOOZE_NETWORK_REMINDER",
+    "MUTE_NETWORK_REMINDER_TODAY",
     "CANCEL",
     "RETRY_FAILED",
     "RESET"
@@ -204,7 +206,7 @@
     gopeedDownloadDirOverride: 32768
   });
   const SETTINGS_NUMBER_LIMITS = Object.freeze({
-    concurrency: [1, 32],
+    concurrency: [1, 5],
     gopeedConnections: [1, 16],
     maxRetries: [0, 10]
   });
@@ -362,6 +364,12 @@
             optional: true
           })
         };
+      case "SET_DOWNLOAD_CONCURRENCY":
+        if (!Number.isInteger(message.concurrency) ||
+            message.concurrency < 1 || message.concurrency > 5) {
+          throw runtimeMessageError("concurrency");
+        }
+        return { type, concurrency: message.concurrency };
       case "SAVE_SETTINGS":
         return { type, settings: sanitizeSettingsInput(message.settings) };
       case "START_SCAN":
@@ -390,6 +398,20 @@
   function csvEscape(value) {
     const text = String(value == null ? "" : value);
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function verifyDirectoryItemCount(expectedValue, actualValue) {
+    const actual = Number(actualValue);
+    if (!Number.isInteger(actual) || actual < 0) {
+      throw new Error("目录实际项目数无效");
+    }
+    const expected = expectedValue == null || expectedValue === ""
+      ? Number.NaN
+      : Number(expectedValue);
+    if (!Number.isInteger(expected) || expected < 0) {
+      return { verified: false, matches: true, expected: null, actual };
+    }
+    return { verified: true, matches: expected === actual, expected, actual };
   }
 
   function makeCsv(items) {
@@ -435,7 +457,8 @@
     sanitizePathSegment,
     selectVirtualListMatch,
     splitTokens,
-    validateRuntimeMessage
+    validateRuntimeMessage,
+    verifyDirectoryItemCount
   };
 
   root.PopoCore = api;

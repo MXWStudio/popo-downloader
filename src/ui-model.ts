@@ -25,6 +25,11 @@ export interface JobCounts {
   success?: number | undefined;
   failed?: number | undefined;
   cancelled?: number | undefined;
+  active?: number | undefined;
+  handedOff?: number | undefined;
+  verifiedDirectories?: number | undefined;
+  unverifiedDirectories?: number | undefined;
+  scanRetries?: number | undefined;
 }
 
 export interface QueueJob {
@@ -54,12 +59,14 @@ export interface QueueState {
   workerFrameId?: number | null | undefined;
   gopeedConnected?: boolean | undefined;
   popupOpen?: boolean | undefined;
+  networkHealth?: NetworkHealth | undefined;
 }
 
 export interface GopeedSettings {
   gopeedEndpoint?: string | undefined;
   gopeedToken?: string | undefined;
   gopeedDownloadDirOverride?: string | undefined;
+  concurrency?: number | undefined;
 }
 
 export interface GopeedConnection {
@@ -68,7 +75,7 @@ export interface GopeedConnection {
   error?: string | undefined;
 }
 
-export type NotificationKind = "success" | "error";
+export type NotificationKind = "success" | "error" | "warning";
 
 export interface UiNotification {
   id: string;
@@ -77,12 +84,18 @@ export interface UiNotification {
   title: string;
   message: string;
   timeoutMs: number | null;
+  source?: "network" | undefined;
 }
 
 export interface ServiceNoticeTracker {
   connected: boolean | null;
   outageSequence: number;
   outageNotified: boolean;
+}
+
+export interface NetworkNoticeTracker {
+  peakNoticeSequence: number;
+  noticeSequence: number;
 }
 
 export const MODE_LABELS: Readonly<Record<JobStatus | "idle", string>> = {
@@ -150,7 +163,11 @@ export function jobDetail(job: QueueJob): string {
     return position > 0 ? `排队第 ${position}` : "排队中";
   }
   if (["waiting_worker", "scanning"].includes(job.status)) {
-    return `已找到 ${Number(counts.discoveredFiles) || 0} 个文件`;
+    const discovered = Number(counts.discoveredFiles) || 0;
+    const handedOff = Number(counts.handedOff) || 0;
+    return handedOff
+      ? `边查找边下载 · 已找到 ${discovered} 个 · 已交付 ${handedOff} 个`
+      : `已找到 ${discovered} 个文件`;
   }
   const success = Number(counts.success) || 0;
   const failed = Number(counts.failed) || 0;
@@ -162,7 +179,10 @@ export function jobDetail(job: QueueJob): string {
   if (job.status === "failed") {
     return failed ? `已完成 ${success} 个 · ${failed} 个未完成` : "未能开始，请打开 POPO 后重试";
   }
-  if (job.status === "complete") return `已完成 ${success || total} 个文件`;
+  if (job.status === "complete") {
+    const completed = Object.prototype.hasOwnProperty.call(counts, "success") ? success : total;
+    return `已完成 ${completed} 个文件`;
+  }
   if (!total) return "正在准备文件";
   const paused = ["paused", "draining_paused"].includes(job.status) ? "已暂停 · " : "";
   return `${paused}已完成 ${success} / ${total}`;
@@ -173,10 +193,8 @@ export function jobProgress(job: QueueJob): number | null {
   const counts = job.counts || {};
   const total = Number(counts.files ?? counts.total) || 0;
   if (!total) return jobIsTerminal(job) ? 0 : null;
-  const finished = (Number(counts.success) || 0) +
-    (Number(counts.failed) || 0) +
-    (Number(counts.cancelled) || 0);
-  return Math.max(0, Math.min(100, Math.round(finished * 100 / total)));
+  const success = Number(counts.success) || 0;
+  return Math.max(0, Math.min(100, Math.round(success * 100 / total)));
 }
 
 export type FolderButtonVisualState =
@@ -236,7 +254,10 @@ export function folderButtonDisplay(
   const success = countValue(counts.success);
   const failed = countValue(counts.failed);
   const scanFailures = countValue(counts.scanFailures);
-  const warningSegment = scanFailures > 0;
+  const unverifiedDirectories = countValue(counts.unverifiedDirectories);
+  const scanIssueCount = scanFailures + unverifiedDirectories;
+  const warningSegment = scanIssueCount > 0;
+  const handedOff = countValue(counts.handedOff);
 
   if (job.status === "queued") {
     const position = countValue(job.queuePosition);
@@ -262,19 +283,23 @@ export function folderButtonDisplay(
   if (job.status === "scanning") {
     return {
       visualState: "scanning",
-      primary: "查找中",
-      secondary: `已找到 ${discovered} 个`,
+      primary: handedOff ? "边找边下" : "查找中",
+      secondary: handedOff
+        ? `找到 ${discovered} · 已交付 ${handedOff}`
+        : `已找到 ${discovered} 个`,
       progress: null,
       indeterminate: true,
       warningSegment: false
     };
   }
   if (["scan_complete", "awaiting_confirmation", "starting"].includes(job.status)) {
-    if (scanFailures > 0) {
+    if (scanIssueCount > 0) {
       return {
         visualState: "warning",
         primary: `找到 ${discovered} 个`,
-        secondary: `遗漏 ${scanFailures} 处`,
+        secondary: scanFailures
+          ? `遗漏 ${scanFailures} 处`
+          : `${unverifiedDirectories} 处未核对`,
         progress: 100,
         indeterminate: false,
         warningSegment: true
@@ -300,33 +325,33 @@ export function folderButtonDisplay(
     };
   }
   if (["downloading", "draining"].includes(job.status)) {
-    const finished = success + failed + countValue(counts.cancelled);
     return {
       visualState: "downloading",
       primary: job.status === "draining" ? "正在停止" : "下载中",
-      secondary: total ? `${finished} / ${total}` : "",
+      secondary: total ? `${success} / ${total}` : "",
       progress: jobProgress(job),
       indeterminate: jobProgress(job) == null,
       warningSegment
     };
   }
   if (["paused", "draining_paused"].includes(job.status)) {
-    const finished = success + failed + countValue(counts.cancelled);
     return {
       visualState: "paused",
       primary: "已暂停",
-      secondary: total ? `${finished} / ${total}` : "",
+      secondary: total ? `${success} / ${total}` : "",
       progress: jobProgress(job),
       indeterminate: false,
       warningSegment
     };
   }
   if (job.status === "complete") {
-    if (scanFailures > 0) {
+    if (scanIssueCount > 0) {
       return {
         visualState: "warning",
         primary: `找到 ${discovered} 个`,
-        secondary: `遗漏 ${scanFailures} 处`,
+        secondary: scanFailures
+          ? `遗漏 ${scanFailures} 处`
+          : `${unverifiedDirectories} 处未核对`,
         progress: 100,
         indeterminate: false,
         warningSegment: true
@@ -337,7 +362,7 @@ export function folderButtonDisplay(
         visualState: "warning",
         primary: `完成 ${success} 个`,
         secondary: `未完成 ${failed} 个`,
-        progress: 100,
+        progress: jobProgress(job),
         indeterminate: false,
         warningSegment: true
       };
@@ -543,6 +568,90 @@ export function nextServiceNotice(
   };
 }
 
+export function formatNetworkSpeed(bytesPerSecond: unknown): string {
+  const speed = Math.max(0, Number(bytesPerSecond) || 0);
+  if (speed >= 1024 * 1024) {
+    const value = speed / (1024 * 1024);
+    return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} MB/s`;
+  }
+  if (speed >= 1024) return `${(speed / 1024).toFixed(0)} KB/s`;
+  return `${Math.round(speed)} B/s`;
+}
+
+export function networkReminderVisible(health: NetworkHealth | null | undefined): boolean {
+  return Boolean(
+    health &&
+    !health.suppressed &&
+    health.activeTasks >= 3 &&
+    ["slow", "severe"].includes(health.status)
+  );
+}
+
+export function networkHealthSummary(health: NetworkHealth | null | undefined): string {
+  if (!health) return "";
+  const speed = formatNetworkSpeed(health.medianSpeed);
+  const baseline = formatNetworkSpeed(health.baselineSpeed);
+  if (health.status === "severe") {
+    return `多个任务接近停滞 · 当前中位速度 ${speed} · 平时约 ${baseline}`;
+  }
+  if (health.status === "slow") {
+    return `多个任务明显低速 · 当前中位速度 ${speed} · 平时约 ${baseline}`;
+  }
+  if (health.highProbabilityWindow && health.activeTasks > 0) {
+    return `16:30–18:30 是本地线路慢速高发时段 · 当前中位速度 ${speed}`;
+  }
+  if (health.activeTasks >= 3 && ["warming", "normal"].includes(health.status)) {
+    return `网络速度正常 · 当前中位速度 ${speed}`;
+  }
+  return "正在等待足够的并行任务判断本地网络";
+}
+
+export function nextNetworkNotice(
+  tracker: NetworkNoticeTracker,
+  health: NetworkHealth | null | undefined,
+  suppressed = false
+): { tracker: NetworkNoticeTracker; notification: UiNotification | null } {
+  if (!health) return { tracker, notification: null };
+  const nextTracker = {
+    peakNoticeSequence: Math.max(tracker.peakNoticeSequence, health.peakNoticeSequence || 0),
+    noticeSequence: Math.max(tracker.noticeSequence, health.noticeSequence || 0)
+  };
+  if (suppressed || health.suppressed) return { tracker: nextTracker, notification: null };
+
+  if ((health.noticeSequence || 0) > tracker.noticeSequence &&
+      ["slow", "severe"].includes(health.status)) {
+    return {
+      tracker: nextTracker,
+      notification: {
+        id: `network-speed:${health.jobId || "active"}:${health.noticeSequence}`,
+        jobId: health.jobId || "",
+        kind: "warning",
+        source: "network",
+        title: health.status === "severe" ? "当前下载接近停滞" : "当前下载速度明显偏低",
+        message: `${networkHealthSummary(health)}。可能是本地网络拥堵，下载仍在继续，与代理设置无关。`,
+        timeoutMs: 10_000
+      }
+    };
+  }
+
+  if ((health.peakNoticeSequence || 0) > tracker.peakNoticeSequence) {
+    return {
+      tracker: nextTracker,
+      notification: {
+        id: `network-window:${health.peakNotifiedDate || health.peakNoticeSequence}`,
+        jobId: health.jobId || "",
+        kind: "warning",
+        source: "network",
+        title: "进入本地线路慢速高发时段",
+        message: "16:30–18:30 出现慢速的概率较高；下载会继续，只有实际持续低速时才会再次提醒。",
+        timeoutMs: 8_000
+      }
+    };
+  }
+
+  return { tracker: nextTracker, notification: null };
+}
+
 export function inferVirtualListItemCount(input: {
   indices?: Array<string | null> | undefined;
   knownSizes?: Array<string | null> | undefined;
@@ -575,3 +684,6 @@ export function userFacingError(error: unknown): string {
   if (/请先打开|POPO 页面|页面已关闭/.test(detail)) return "请先打开 POPO 页面，再试一次。";
   return "操作没有完成，请稍后重试。";
 }
+import type { NetworkHealth } from "./network-monitor";
+
+export type { NetworkHealth, NetworkHealthStatus } from "./network-monitor";

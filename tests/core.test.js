@@ -16,7 +16,8 @@ const {
   previewTitleMatchesFile,
   sanitizePathSegment,
   selectVirtualListMatch,
-  validateRuntimeMessage
+  validateRuntimeMessage,
+  verifyDirectoryItemCount
 } = require("../core.js");
 
 test("后台命令在分发前规范化字段并丢弃无关数据", () => {
@@ -35,10 +36,45 @@ test("后台命令在分发前规范化字段并丢弃无关数据", () => {
   assert.deepEqual(validateRuntimeMessage({ type: "GET_STATE", ignored: { large: true } }), {
     type: "GET_STATE"
   });
+  assert.deepEqual(validateRuntimeMessage({ type: "SNOOZE_NETWORK_REMINDER" }), {
+    type: "SNOOZE_NETWORK_REMINDER"
+  });
+  assert.deepEqual(validateRuntimeMessage({ type: "MUTE_NETWORK_REMINDER_TODAY" }), {
+    type: "MUTE_NETWORK_REMINDER_TODAY"
+  });
+  assert.deepEqual(validateRuntimeMessage({
+    type: "SET_DOWNLOAD_CONCURRENCY",
+    concurrency: 3
+  }), {
+    type: "SET_DOWNLOAD_CONCURRENCY",
+    concurrency: 3
+  });
   assert.deepEqual(validateRuntimeMessage({ type: "DISMISS_JOB", jobId: "job-a" }), {
     type: "DISMISS_JOB",
     jobId: "job-a"
   });
+});
+
+test("逐目录数量核对区分已验证、数量不一致和无法独立推导", () => {
+  assert.deepEqual(verifyDirectoryItemCount(383, 383), {
+    verified: true,
+    matches: true,
+    expected: 383,
+    actual: 383
+  });
+  assert.deepEqual(verifyDirectoryItemCount(383, 380), {
+    verified: true,
+    matches: false,
+    expected: 383,
+    actual: 380
+  });
+  assert.deepEqual(verifyDirectoryItemCount(null, 12), {
+    verified: false,
+    matches: true,
+    expected: null,
+    actual: 12
+  });
+  assert.throws(() => verifyDirectoryItemCount(3, -1), /实际项目数无效/);
 });
 
 test("后台命令拒绝越界字段、未知设置和非 POPO 页面", () => {
@@ -69,6 +105,10 @@ test("后台命令拒绝越界字段、未知设置和非 POPO 页面", () => {
     type: "SAVE_GOPEED_SETTINGS",
     gopeedToken: "x".repeat(4097)
   }), /gopeedToken/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "SET_DOWNLOAD_CONCURRENCY",
+    concurrency: 6
+  }), /concurrency/);
 });
 
 test("旧版设置命令只保留已知且范围有效的配置", () => {

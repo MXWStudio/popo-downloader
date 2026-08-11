@@ -20,9 +20,30 @@ test("共享 React 界面模型统一任务摘要、详情和进度", () => {
 
   assert.equal(uiModel.summarizeLiveJobs([running, queued]), "1 个进行中 · 1 个排队");
   assert.equal(uiModel.jobDetail(running), "已完成 4 / 10");
-  assert.equal(uiModel.jobProgress(running), 50);
+  assert.equal(uiModel.jobProgress(running), 40);
+  assert.equal(uiModel.folderButtonDisplay(running).secondary, "4 / 10");
   assert.equal(uiModel.jobDetail(queued), "排队第 2");
   assert.equal(uiModel.jobProgress(queued), null);
+});
+
+test("网页行内和任务详情只把成功下载计入完成数量", () => {
+  const paused = {
+    id: "job-paused",
+    status: "paused",
+    counts: { files: 11, success: 1, failed: 3, cancelled: 4 }
+  };
+
+  assert.equal(uiModel.jobDetail(paused), "已暂停 · 已完成 1 / 11");
+  assert.equal(uiModel.folderButtonDisplay(paused).secondary, "1 / 11");
+  assert.equal(uiModel.jobProgress(paused), 9);
+
+  const finishedWithFailure = {
+    id: "job-finished-with-failure",
+    status: "complete",
+    counts: { files: 3, success: 2, failed: 1, cancelled: 0 }
+  };
+  assert.equal(uiModel.jobDetail(finishedWithFailure), "已完成 2 个文件");
+  assert.equal(uiModel.folderButtonDisplay(finishedWithFailure).progress, 67);
 });
 
 test("网页行按钮用真实数量区分查找、空结果、遗漏和失败", () => {
@@ -40,6 +61,44 @@ test("网页行按钮用真实数量区分查找、空结果、遗漏和失败",
       indeterminate: true,
       warningSegment: false
     }
+  );
+
+  assert.equal(
+    uiModel.folderButtonDisplay({
+      id: "unverified",
+      status: "complete",
+      counts: {
+        files: 12,
+        discoveredFiles: 12,
+        success: 12,
+        unverifiedDirectories: 1
+      }
+    }).secondary,
+    "1 处未核对"
+  );
+
+  assert.deepEqual(
+    uiModel.folderButtonDisplay({
+      id: "pipeline",
+      status: "scanning",
+      counts: { discoveredFiles: 383, handedOff: 27 }
+    }),
+    {
+      visualState: "scanning",
+      primary: "边找边下",
+      secondary: "找到 383 · 已交付 27",
+      progress: null,
+      indeterminate: true,
+      warningSegment: false
+    }
+  );
+  assert.equal(
+    uiModel.jobDetail({
+      id: "pipeline",
+      status: "scanning",
+      counts: { discoveredFiles: 383, handedOff: 27 }
+    }),
+    "边查找边下载 · 已找到 383 个 · 已交付 27 个"
   );
 
   assert.deepEqual(
@@ -145,6 +204,54 @@ test("下载服务每次断开只提醒一次且恢复后允许再次提醒", ()
   tracker = result.tracker;
   result = uiModel.nextServiceNotice(tracker, false);
   assert.equal(result.notification.id, "download-service-disconnected:2");
+});
+
+test("网络提醒区分高发时段和实际持续低速并支持去重", () => {
+  let tracker = { peakNoticeSequence: 0, noticeSequence: 0 };
+  const health = {
+    version: 1,
+    jobId: "job-network",
+    status: "normal",
+    activeTasks: 5,
+    medianSpeed: 18.7 * 1024 * 1024,
+    baselineSpeed: 20 * 1024 * 1024,
+    observedAt: "2026-08-11T08:31:00.000Z",
+    sessionStartedAt: "2026-08-11T08:30:00.000Z",
+    lowSince: "",
+    severeSince: "",
+    recoverySince: "",
+    statusChangedAt: "2026-08-11T08:30:00.000Z",
+    highProbabilityWindow: true,
+    peakNoticeSequence: 1,
+    peakNotifiedDate: "2026-08-11",
+    noticeSequence: 0,
+    lastNoticeAt: "",
+    snoozedUntil: "",
+    snoozeReminderPending: false,
+    mutedDate: "",
+    suppressed: false
+  };
+  let result = uiModel.nextNetworkNotice(tracker, health);
+  tracker = result.tracker;
+  assert.equal(result.notification.kind, "warning");
+  assert.match(result.notification.message, /16:30–18:30/);
+
+  result = uiModel.nextNetworkNotice(tracker, health);
+  assert.equal(result.notification, null);
+
+  result = uiModel.nextNetworkNotice(tracker, {
+    ...health,
+    status: "slow",
+    medianSpeed: 2.5 * 1024 * 1024,
+    noticeSequence: 1
+  });
+  assert.equal(result.notification.source, "network");
+  assert.match(result.notification.message, /本地网络拥堵/);
+  assert.equal(uiModel.networkReminderVisible({
+    ...health,
+    status: "slow",
+    noticeSequence: 1
+  }), true);
 });
 
 test("弹窗打开期间确认到的服务断开不会延后重复弹出", () => {

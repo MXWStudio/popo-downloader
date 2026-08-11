@@ -23,6 +23,7 @@
     queued: new Set(["waiting_worker", "scanning", "cancelled", "failed"]),
     waiting_worker: new Set(["scanning", "cancelled", "failed"]),
     scanning: new Set([
+      "paused",
       "scan_complete",
       "awaiting_confirmation",
       "starting",
@@ -48,7 +49,7 @@
       "cancelled",
       "failed"
     ]),
-    paused: new Set(["downloading", "draining", "draining_paused", "cancelled", "failed"]),
+    paused: new Set(["scanning", "downloading", "draining", "draining_paused", "cancelled", "failed"]),
     draining: new Set(["draining_paused", "complete", "cancelled", "failed"]),
     draining_paused: new Set(["draining", "downloading", "cancelled", "failed"]),
     complete: new Set(),

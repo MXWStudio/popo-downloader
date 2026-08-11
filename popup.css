@@ -302,6 +302,30 @@ h2 {
   font-size: 10px;
 }
 
+.network-notice-card {
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid var(--warning-line);
+  border-radius: 8px;
+  color: var(--warning-ink);
+  background-color: var(--warning-soft);
+  background-image: var(--gradient-warning);
+  box-shadow: var(--surface-shadow);
+}
+
+.network-notice-card .engine-heading span {
+  color: #ffe2a0;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.network-notice-card p {
+  margin: 5px 0 0;
+  color: #dfc98e;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
 .popup-job-progress {
   overflow: hidden;
   height: 6px;
@@ -507,6 +531,33 @@ h2 {
   margin-top: 4px;
   color: var(--muted);
   font-size: 10px;
+}
+
+.concurrency-setting {
+  display: grid;
+  grid-template-columns: 1fr 72px;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 9px;
+  color: var(--field-copy);
+  font-size: 10px;
+}
+
+.concurrency-setting select {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--control-line);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--surface-input);
+}
+
+.concurrency-setting p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 details { margin-top: 7px; }
