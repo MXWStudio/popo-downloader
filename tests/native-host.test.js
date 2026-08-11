@@ -13,6 +13,14 @@ test("本机助手只提供系统文件夹选择并使用 Native Messaging 二�
   assert.match(source, /FolderBrowserDialog/);
   assert.match(source, /String\.Equals\(action, "ping"/);
   assert.match(source, /String\.Equals\(action, "ensure_gopeed"/);
+  assert.match(source, /String\.Equals\(action, "check_update"/);
+  assert.match(source, /String\.Equals\(action, "apply_update"/);
+  assert.match(source, /String\.Equals\(action, "update_status"/);
+  assert.match(source, /UpdateSigningPublicKeyBase64/);
+  assert.match(source, /VerifyData/);
+  assert.match(source, /SHA-256/);
+  assert.match(source, /ZipArchive/);
+  assert.match(source, /--apply-update/);
   assert.match(source, /Process\.Start/);
   assert.match(source, /FindListeningPorts/);
   assert.match(source, /\/api\/v1\/config/);

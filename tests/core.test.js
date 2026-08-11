@@ -36,6 +36,9 @@ test("后台命令在分发前规范化字段并丢弃无关数据", () => {
   assert.deepEqual(validateRuntimeMessage({ type: "GET_STATE", ignored: { large: true } }), {
     type: "GET_STATE"
   });
+  assert.deepEqual(validateRuntimeMessage({ type: "GET_UPDATE_STATUS", ignored: true }), {
+    type: "GET_UPDATE_STATUS"
+  });
   assert.deepEqual(validateRuntimeMessage({ type: "SNOOZE_NETWORK_REMINDER" }), {
     type: "SNOOZE_NETWORK_REMINDER"
   });

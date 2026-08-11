@@ -12,9 +12,9 @@
 
 POPO 原来的“三个点 → 下载”保持不变，仍然可以用于服务器打包 ZIP。
 
-## 绿色测试包安装
+## 正式绿色版安装
 
-测试 ZIP 已包含官方 Gopeed v1.9.3 便携版、Windows 本机助手和绿色安装助手。测试者不需要单独安装 Gopeed，也不需要设置 TCP 端口：
+正式 ZIP 已包含官方 Gopeed v1.9.3 便携版、Windows 本机助手和绿色安装助手。使用者不需要单独安装 Gopeed，也不需要设置 TCP 端口：
 
 1. 解压整个 ZIP。
 2. 双击 `POPO-Setup.exe`（绿色版安装助手）。
@@ -33,13 +33,15 @@ POPO 原来的“三个点 → 下载”保持不变，仍然可以用于服务�
 powershell -ExecutionPolicy Bypass -File .\native-host\install.ps1 -BundledGopeedRoot .\Gopeed
 ```
 
-## 测试版打包
+## 正式版打包
 
 ```powershell
-npm run build:test-package
+npm run build:release-package
 ```
 
-输出位于 `dist`，包含测试 ZIP、SHA-256 校验文件和可上传到更新服务的 `latest-beta.json`。
+输出位于 `dist`，包含正式 ZIP、SHA-256 校验文件和上传到腾讯云 COS 的 `latest.json`。构建时使用 Windows DPAPI 保护的仓库外发布私钥为更新清单签名。
+
+已安装 0.7.0 的电脑会在 Chrome 启动后和每 6 小时检查正式通道。没有活动下载任务时，本机助手下载并验证完整候选包，调用现有事务安装器切换版本，成功后自动重新加载扩展；失败则保留旧版本。
 
 ## 稳定下载行为
 

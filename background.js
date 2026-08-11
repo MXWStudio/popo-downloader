@@ -42,6 +42,7 @@ const {
 } = PopoQueue;
 const PUMP_ALARM = "popo-stable-downloader-pump";
 const WATCHDOG_ALARM = "popo-stable-downloader-watchdog";
+const UPDATE_ALARM = "popo-stable-downloader-update";
 const FOLDER_PICKER_HOST = "com.popo.stable_downloader.folder_picker";
 const TERMINAL_STATUSES = new Set(["success", "failed", "cancelled", "skipped"]);
 const ITEM_CHUNK_SIZE = 200;
@@ -54,10 +55,12 @@ const MAX_DOWNLOAD_CONCURRENCY = 5;
 const workerFrameWaiters = new Map();
 const popupUiPorts = new Set();
 const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
+const UPDATE_CHECK_PERIOD_MINUTES = 6 * 60;
 const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
 const runtimeNetworkMonitor = globalThis.PopoRuntime?.networkMonitor || null;
 const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
 const runtimeWorkflow = globalThis.PopoRuntime?.workflow || null;
+let automaticUpdateLocked = false;
 
 function enforceRuntimeCommandContract(command) {
   if (typeof runtimeContracts?.parseRuntimeCommand !== "function") return command;
@@ -3545,23 +3548,121 @@ async function restoreCancelledJob(jobId, preferredSourceTabId = null) {
   return state;
 }
 
+async function saveAutomaticUpdateStatus(status) {
+  const normalized = {
+    state: String(status?.state || "idle"),
+    currentVersion: String(status?.currentVersion || chrome.runtime.getManifest().version_name ||
+      chrome.runtime.getManifest().version || ""),
+    targetVersion: String(status?.targetVersion || status?.version || ""),
+    message: String(status?.message || status?.error || ""),
+    updatedAt: String(status?.updatedAt || new Date().toISOString())
+  };
+  await chrome.storage.local.set({ popoUpdateStatus: normalized });
+  return normalized;
+}
+
+function updateBlockedByActiveJobs(state) {
+  return (state?.jobs || []).some((job) => !isJobTerminal(job.status));
+}
+
+async function runAutomaticUpdateCheck() {
+  if (automaticUpdateLocked) return;
+  automaticUpdateLocked = true;
+  const currentVersion = chrome.runtime.getManifest().version_name ||
+    chrome.runtime.getManifest().version;
+  try {
+    const { state } = await getStored({ loadItems: false });
+    if (updateBlockedByActiveJobs(state)) {
+      await saveAutomaticUpdateStatus({
+        state: "deferred",
+        currentVersion,
+        message: "有下载任务正在处理，已延后自动更新。"
+      });
+      return;
+    }
+
+    const check = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+      action: "check_update",
+      currentVersion
+    });
+    if (!check?.ok) throw new Error(check?.error || "无法读取签名更新清单");
+    if (!check.available) {
+      await saveAutomaticUpdateStatus({
+        state: "up_to_date",
+        currentVersion,
+        targetVersion: check.version,
+        message: "当前已是最新正式版。"
+      });
+      return;
+    }
+
+    await saveAutomaticUpdateStatus({
+      state: "starting",
+      currentVersion,
+      targetVersion: check.version,
+      message: "发现新正式版，正在启动安全更新。"
+    });
+    const started = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+      action: "apply_update",
+      currentVersion
+    });
+    if (!started?.ok) throw new Error(started?.error || "无法启动自动更新");
+    if (!started.started) return;
+
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const updateStatus = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+        action: "update_status"
+      });
+      if (!updateStatus?.ok) continue;
+      await saveAutomaticUpdateStatus(updateStatus);
+      if (updateStatus.state === "succeeded") {
+        chrome.runtime.reload();
+        return;
+      }
+      if (updateStatus.state === "failed") {
+        throw new Error(updateStatus.message || "自动更新失败，已保留当前版本");
+      }
+    }
+    throw new Error("自动更新等待超时，稍后会重新检查");
+  } catch (error) {
+    await saveAutomaticUpdateStatus({
+      state: "failed",
+      currentVersion,
+      message: String(error?.message || error).replace(/^Error:\s*/, "")
+    });
+  } finally {
+    automaticUpdateLocked = false;
+  }
+}
+
+function scheduleAutomaticUpdates(delayInMinutes) {
+  chrome.alarms.create(UPDATE_ALARM, {
+    delayInMinutes,
+    periodInMinutes: UPDATE_CHECK_PERIOD_MINUTES
+  });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const data = await chrome.storage.local.get(["popoSettings", "popoState"]);
   // 更新时一并清除旧版本保存过的文件格式和关键词筛选。
   await chrome.storage.local.set({ popoSettings: mergeSettings(data.popoSettings || {}) });
   if (!data.popoState) await chrome.storage.local.set({ popoState: newState() });
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  scheduleAutomaticUpdates(5);
   schedulePump(1000);
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  scheduleAutomaticUpdates(2);
   schedulePump(1000);
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === PUMP_ALARM) void pump();
   if (alarm.name === WATCHDOG_ALARM) void runWatchdog();
+  if (alarm.name === UPDATE_ALARM) void runAutomaticUpdateCheck();
 });
 
 async function runWatchdog() {
@@ -3640,6 +3741,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await repairQueueState(state);
         }
         return { ok: true, state: publicState(state), settings };
+      }
+      case "GET_UPDATE_STATUS": {
+        const data = await chrome.storage.local.get("popoUpdateStatus");
+        return {
+          ok: true,
+          updateStatus: data.popoUpdateStatus || {
+            state: "idle",
+            currentVersion: chrome.runtime.getManifest().version_name ||
+              chrome.runtime.getManifest().version,
+            targetVersion: "",
+            message: "",
+            updatedAt: ""
+          }
+        };
       }
       case "CHECK_GOPEED": {
         const { settings } = await getStored({ loadItems: false });

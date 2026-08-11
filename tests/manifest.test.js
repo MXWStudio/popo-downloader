@@ -10,8 +10,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.0.11");
-  assert.equal(manifest.version_name, "0.7.0-beta.11");
+  assert.equal(manifest.version, "0.7.0");
+  assert.equal(manifest.version_name, "0.7.0");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";
   const extensionId = [...digest.subarray(0, 16)]
@@ -274,6 +274,11 @@ test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", 
   assert.match(background, /gopeedDownloadDirOverride/);
   assert.match(background, /sendNativeMessage\(FOLDER_PICKER_HOST/);
   assert.match(background, /action: "ensure_gopeed"/);
+  assert.match(background, /UPDATE_ALARM/);
+  assert.match(background, /action: "check_update"/);
+  assert.match(background, /action: "apply_update"/);
+  assert.match(background, /action: "update_status"/);
+  assert.match(background, /chrome\.runtime\.reload\(\)/);
   assert.match(background, /CHOOSE_DOWNLOAD_DIRECTORY/);
   assert.match(background, /startScannedDownload\(state, \{ automatic: true \}\)/);
   assert.match(background, /rootProjectCount/);

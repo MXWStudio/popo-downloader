@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json')) | ConvertFrom-Json
 $versionName = [string]$manifest.version_name
@@ -12,7 +13,9 @@ $packageName = "POPO-Stable-Downloader-$versionName-win-x64"
 $stagingRoot = Join-Path $distRoot $packageName
 $zipPath = Join-Path $distRoot "$packageName.zip"
 $checksumPath = "$zipPath.sha256.txt"
-$channelManifestPath = Join-Path $distRoot 'latest-beta.json'
+$channelManifestPath = Join-Path $distRoot 'latest.json'
+$updateBaseUrl = 'https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable'
+$signingKeyPath = Join-Path $env:LOCALAPPDATA 'POPORelease\release-signing-key.dpapi'
 $gopeedVendorRoot = Join-Path $repoRoot 'vendor\gopeed\v1.9.3'
 $gopeedPortableRoot = Join-Path $gopeedVendorRoot 'portable'
 $gopeedSourceArchive = Join-Path $gopeedVendorRoot 'Gopeed-v1.9.3-source.zip'
@@ -23,6 +26,7 @@ $setupExecutableName = 'POPO-Setup.exe'
 $compileRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
   ("popo-package-compile-" + [Guid]::NewGuid().ToString('N'))
 $nativeExecutable = Join-Path $compileRoot 'PopoFolderPickerHost.exe'
+$nativeVersion = (Get-FileHash -LiteralPath $nativeSource -Algorithm SHA256).Hash.ToLowerInvariant()
 $setupExecutable = Join-Path $compileRoot $setupExecutableName
 
 & npm run build:runtime --prefix $repoRoot
@@ -35,6 +39,8 @@ New-Item -ItemType Directory -Path $compileRoot -Force | Out-Null
 & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
   /reference:System.Windows.Forms.dll `
   /reference:System.Drawing.dll `
+  /reference:System.IO.Compression.dll `
+  /reference:System.IO.Compression.FileSystem.dll `
   /reference:System.Web.Extensions.dll `
   /out:$nativeExecutable $nativeSource
 if ($LASTEXITCODE -ne 0) { throw 'The native host failed to compile.' }
@@ -101,6 +107,11 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\FolderPickerHost.cs') -
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\install.ps1') -Destination $nativeHostRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\uninstall.ps1') -Destination $nativeHostRoot
 Copy-Item -LiteralPath $nativeExecutable -Destination (Join-Path $nativeHostRoot 'bin')
+[System.IO.File]::WriteAllText(
+  (Join-Path $nativeHostRoot 'bin\.popo-native-version'),
+  $nativeVersion,
+  (New-Object System.Text.UTF8Encoding($false))
+)
 Copy-Item -LiteralPath $setupExecutable -Destination (Join-Path $stagingRoot $setupExecutableName)
 Copy-Item -LiteralPath (Join-Path $repoRoot 'TESTING.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md') -Destination $stagingRoot
@@ -125,17 +136,56 @@ $size = (Get-Item -LiteralPath $zipPath).Length
   (New-Object System.Text.UTF8Encoding($false))
 )
 
+$artifactName = [System.IO.Path]::GetFileName($zipPath)
+$publishedAt = [DateTimeOffset]::Now.ToString('o')
+$downloadUrl = "$updateBaseUrl/$artifactName"
+$canonical = @(
+  '1',
+  'stable',
+  $versionName,
+  [string]$manifest.version,
+  $publishedAt,
+  $artifactName,
+  $downloadUrl,
+  $hash,
+  [string]$size
+) -join "`n"
+
+if (-not (Test-Path -LiteralPath $signingKeyPath)) {
+  throw "Release signing key was not found. Run scripts/Initialize-ReleaseSigningKey.ps1 first: $signingKeyPath"
+}
+$entropy = [System.Text.Encoding]::UTF8.GetBytes('POPO stable release signing key v1')
+$protectedKey = [System.IO.File]::ReadAllBytes($signingKeyPath)
+$privateKeyBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+  $protectedKey,
+  $entropy,
+  [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+)
+$rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider
+try {
+  $rsa.FromXmlString([System.Text.Encoding]::UTF8.GetString($privateKeyBytes))
+  $signature = [Convert]::ToBase64String($rsa.SignData(
+    [System.Text.Encoding]::UTF8.GetBytes($canonical),
+    [System.Security.Cryptography.CryptoConfig]::MapNameToOID('SHA256')
+  ))
+}
+finally {
+  $rsa.Dispose()
+  [Array]::Clear($privateKeyBytes, 0, $privateKeyBytes.Length)
+}
+
 $channelManifest = [ordered]@{
   schemaVersion = 1
-  channel = 'beta'
+  channel = 'stable'
   version = $versionName
   chromeVersion = [string]$manifest.version
-  publishedAt = [DateTimeOffset]::Now.ToString('o')
-  artifact = [System.IO.Path]::GetFileName($zipPath)
-  url = ''
+  publishedAt = $publishedAt
+  artifact = $artifactName
+  url = $downloadUrl
   sha256 = $hash
   size = $size
-  notes = 'Green beta downloading all user file formats recursively, restoring accidentally cancelled pending files without repeating successes, rebuilding the POPO worker after pause or tab changes, with verified Gopeed v1.9.3 and concurrency 5.'
+  signature = $signature
+  notes = 'First stable green release with signed COS updates, verified candidate installation, automatic rollback, Gopeed v1.9.3, and download concurrency 5.'
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(

@@ -13,6 +13,10 @@ const buildSource = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "build-test-package.ps1"),
   "utf8"
 );
+const releaseVerifier = fs.readFileSync(
+  path.join(__dirname, "..", "scripts", "verify-release-package.ps1"),
+  "utf8"
+);
 
 test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册表", () => {
   assert.match(setupSource, /ComputeExtensionId/);
@@ -31,6 +35,8 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(setupSource, /PackagedDirectoryMatches/);
   assert.match(setupSource, /previous installation was restored/);
   assert.match(setupSource, /updateMode", "verified-candidate"/);
+  assert.match(setupSource, /\.popo-native-version/);
+  assert.match(setupSource, /nativeCodeVersionMatches/);
   assert.doesNotMatch(setupSource, /CopyDirectory\(sourceExtension, extensionRoot\)/);
   assert.doesNotMatch(setupSource, /InstallGopeed\(sourceGopeed, gopeedRoot, nativeRoot\)/);
   assert.match(setupSource, /OpenChromeExtensions/);
@@ -43,9 +49,16 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(setupSource, /"runtime", "popup\.js"/);
   assert.match(setupSource, /"runtime", "page-ui\.js"/);
   assert.match(buildSource, /POPO-Setup\.exe/);
+  assert.match(buildSource, /latest\.json/);
+  assert.match(buildSource, /channel = 'stable'/);
+  assert.match(buildSource, /ProtectedData/);
+  assert.match(buildSource, /signature = \$signature/);
   assert.match(buildSource, /popo-package-compile-/);
   assert.match(buildSource, /GetTempPath/);
   assert.match(buildSource, /'queue\.js'/);
   assert.match(buildSource, /Join-Path \$repoRoot 'assets'/);
   assert.doesNotMatch(buildSource, /Copy-Item[^\n]+START-HERE\.cmd/);
+  assert.match(releaseVerifier, /VerifyData/);
+  assert.match(releaseVerifier, /Get-FileHash/);
+  assert.match(releaseVerifier, /\.popo-native-version/);
 });

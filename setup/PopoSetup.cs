@@ -33,10 +33,17 @@ internal static class PopoSetup
                 "bin",
                 "PopoFolderPickerHost.exe"
             );
+            string sourceNativeVersion = Path.Combine(
+                packageRoot,
+                "native-host",
+                "bin",
+                ".popo-native-version"
+            );
             RequireFile(Path.Combine(sourceExtension, "manifest.json"));
             RequireFile(Path.Combine(sourceGopeed, "gopeed.exe"));
             RequireFile(Path.Combine(sourceGopeed, "libgopeed.dll"));
             RequireFile(sourceNativeHost);
+            RequireFile(sourceNativeVersion);
 
             Dictionary<string, object> manifest = Json.Deserialize<Dictionary<string, object>>(
                 File.ReadAllText(Path.Combine(sourceExtension, "manifest.json"), Encoding.UTF8)
@@ -67,6 +74,7 @@ internal static class PopoSetup
                 sourceExtension,
                 sourceGopeed,
                 sourceNativeHost,
+                sourceNativeVersion,
                 extensionId,
                 versionName,
                 !skipRegister,
@@ -169,6 +177,7 @@ internal static class PopoSetup
         string sourceExtension,
         string sourceGopeed,
         string sourceNativeHost,
+        string sourceNativeVersion,
         string extensionId,
         string versionName,
         bool registerNativeHost,
@@ -186,6 +195,7 @@ internal static class PopoSetup
         string candidateNative = Path.Combine(candidateRoot, "NativeHost");
         string candidateGopeed = Path.Combine(candidateNative, "Gopeed");
         string candidateNativeHost = Path.Combine(candidateNative, "PopoFolderPickerHost.exe");
+        string candidateNativeVersion = Path.Combine(candidateNative, ".popo-native-version");
 
         string extensionRoot = Path.Combine(productRoot, "Extension");
         string nativeRoot = Path.Combine(productRoot, "NativeHost");
@@ -217,6 +227,7 @@ internal static class PopoSetup
             CopyDirectory(sourceExtension, candidateExtension);
             CopyDirectory(sourceGopeed, candidateGopeed);
             File.Copy(sourceNativeHost, candidateNativeHost, true);
+            File.Copy(sourceNativeVersion, candidateNativeVersion, true);
             InstallNativeManifest(
                 candidateNative,
                 installedNativeHost,
@@ -227,6 +238,7 @@ internal static class PopoSetup
                 sourceExtension,
                 sourceGopeed,
                 sourceNativeHost,
+                sourceNativeVersion,
                 candidateRoot,
                 extensionId,
                 versionName
@@ -237,10 +249,15 @@ internal static class PopoSetup
             // Gopeed may create helper files next to its packaged payload at runtime.
             // Compare every packaged file, but do not treat those extra runtime files
             // as a native update that would unnecessarily interrupt the live session.
+            bool nativeCodeVersionMatches = FilesMatch(
+                candidateNativeVersion,
+                Path.Combine(nativeRoot, ".popo-native-version")
+            );
             nativeChanged = !PackagedDirectoryMatches(
                 candidateNative,
                 nativeRoot,
-                Path.Combine("Gopeed", "storage")
+                Path.Combine("Gopeed", "storage"),
+                nativeCodeVersionMatches ? "PopoFolderPickerHost.exe" : ""
             );
             if (nativeChanged && IsProcessRunningAt(Path.Combine(gopeedRoot, "gopeed.exe")))
             {
@@ -398,6 +415,7 @@ internal static class PopoSetup
         string sourceExtension,
         string sourceGopeed,
         string sourceNativeHost,
+        string sourceNativeVersion,
         string candidateRoot,
         string extensionId,
         string versionName
@@ -417,6 +435,7 @@ internal static class PopoSetup
         RequireFile(Path.Combine(extensionRoot, "runtime", "popup.js"));
         RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
         RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
+        RequireFile(Path.Combine(nativeRoot, ".popo-native-version"));
         RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
         RequireFile(Path.Combine(gopeedRoot, "gopeed.exe"));
         RequireFile(Path.Combine(gopeedRoot, "libgopeed.dll"));
@@ -434,6 +453,10 @@ internal static class PopoSetup
         {
             throw new InvalidDataException("Candidate native host does not match its package source.");
         }
+        if (!FilesMatch(sourceNativeVersion, Path.Combine(nativeRoot, ".popo-native-version")))
+        {
+            throw new InvalidDataException("Candidate native version marker does not match its package source.");
+        }
         VerifyExtensionManifest(extensionRoot, extensionId, versionName);
     }
 
@@ -450,6 +473,7 @@ internal static class PopoSetup
         RequireFile(Path.Combine(extensionRoot, "runtime", "popup.js"));
         RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
         RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
+        RequireFile(Path.Combine(nativeRoot, ".popo-native-version"));
         RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
         RequireFile(Path.Combine(nativeRoot, "Gopeed", "gopeed.exe"));
         RequireFile(Path.Combine(nativeRoot, "Gopeed", "libgopeed.dll"));
@@ -528,11 +552,11 @@ internal static class PopoSetup
     private static bool PackagedDirectoryMatches(
         string packageRoot,
         string installedRoot,
-        string excludedRelativeRoot
+        params string[] excludedRelativeRoots
     )
     {
         if (!Directory.Exists(packageRoot) || !Directory.Exists(installedRoot)) return false;
-        string[] packageFiles = RelativeFiles(packageRoot, excludedRelativeRoot);
+        string[] packageFiles = RelativeFiles(packageRoot, excludedRelativeRoots);
         foreach (string relative in packageFiles)
         {
             if (!FilesMatch(
@@ -548,25 +572,38 @@ internal static class PopoSetup
 
     private static string[] RelativeFiles(string root)
     {
-        return RelativeFiles(root, "");
+        return RelativeFiles(root, new string[0]);
     }
 
-    private static string[] RelativeFiles(string root, string excludedRelativeRoot)
+    private static string[] RelativeFiles(string root, params string[] excludedRelativeRoots)
     {
         string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
-        string excluded = (excludedRelativeRoot ?? "")
-            .Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        List<string> excluded = new List<string>();
+        foreach (string value in excludedRelativeRoots ?? new string[0])
+        {
+            string normalized = (value ?? "")
+                .Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!String.IsNullOrEmpty(normalized)) excluded.Add(normalized);
+        }
         List<string> files = new List<string>();
         foreach (string file in Directory.GetFiles(fullRoot, "*", SearchOption.AllDirectories))
         {
             string relative = file.Substring(fullRoot.Length)
                 .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (!String.IsNullOrEmpty(excluded) &&
-                (String.Equals(relative, excluded, StringComparison.OrdinalIgnoreCase) ||
-                 relative.StartsWith(
-                     excluded + Path.DirectorySeparatorChar,
-                     StringComparison.OrdinalIgnoreCase
-                 )))
+            bool isExcluded = false;
+            foreach (string excludedRoot in excluded)
+            {
+                if (String.Equals(relative, excludedRoot, StringComparison.OrdinalIgnoreCase) ||
+                    relative.StartsWith(
+                        excludedRoot + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase
+                    ))
+                {
+                    isExcluded = true;
+                    break;
+                }
+            }
+            if (isExcluded)
             {
                 continue;
             }

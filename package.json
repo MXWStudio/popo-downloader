@@ -1,6 +1,6 @@
 {
   "name": "popo-stable-downloader",
-  "version": "0.7.0-beta.11",
+  "version": "0.7.0",
   "private": true,
   "description": "POPO 稳定下载助手 Chrome 扩展",
   "scripts": {
@@ -10,7 +10,9 @@
     "test": "npm run build:runtime && node --test tests/*.test.js",
     "test:e2e": "npm run build:runtime && playwright test",
     "check:full": "npm run check && npm test && npm run test:e2e",
-    "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1"
+    "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
+    "build:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
+    "verify:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-package.ps1"
   },
   "dependencies": {
     "@gopeed/rest": "1.7.0",

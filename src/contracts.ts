@@ -37,6 +37,7 @@ const SettingsSchema = z.strictObject({
 const SimpleCommandSchema = z.strictObject({
   type: z.enum([
     "GET_STATE",
+    "GET_UPDATE_STATUS",
     "CHECK_GOPEED",
     "CANCEL_FOLDER_TASK",
     "START_DOWNLOAD",

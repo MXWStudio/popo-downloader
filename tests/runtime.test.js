@@ -30,6 +30,10 @@ test("TypeScript + Zod 运行时契约拒绝未知命令和非法任务状态", 
     runtime.contracts.parseRuntimeCommand({ type: "DISMISS_JOB", jobId: "job-a" }),
     { type: "DISMISS_JOB", jobId: "job-a" }
   );
+  assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({ type: "GET_UPDATE_STATUS" }),
+    { type: "GET_UPDATE_STATUS" }
+  );
 });
 
 test("XState 作业状态机只允许声明过的迁移", () => {

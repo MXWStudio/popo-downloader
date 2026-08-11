@@ -55,6 +55,11 @@ function buildFixture(packageRoot, versionName, marker) {
     "fixture-native-host",
     "utf8"
   );
+  fs.writeFileSync(
+    path.join(nativeRoot, ".popo-native-version"),
+    "fixture-native-" + marker,
+    "utf8"
+  );
 }
 
 function compileSetup(packageRoot) {

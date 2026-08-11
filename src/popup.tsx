@@ -42,6 +42,18 @@ interface PopupErrorState {
   transient: boolean;
 }
 
+interface UpdateStatus {
+  state: string;
+  currentVersion: string;
+  targetVersion: string;
+  message: string;
+  updatedAt: string;
+}
+
+interface UpdateStatusResponse {
+  updateStatus: UpdateStatus;
+}
+
 async function callExtension<T extends object = Record<string, never>>(
   message: Record<string, unknown>
 ): Promise<T> {
@@ -337,6 +349,40 @@ function TaskSection({
   );
 }
 
+function useUpdateStatus(): UpdateStatus | null {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const response = await callExtension<UpdateStatusResponse>({
+          type: "GET_UPDATE_STATUS"
+        });
+        if (!disposed) setStatus(response.updateStatus || null);
+      } catch {
+        // Update status is supplemental and must not block task controls.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+  return status;
+}
+
+function updateStatusLabel(status: UpdateStatus | null): string {
+  if (!status) return "";
+  if (["starting", "checking", "downloading", "installing"].includes(status.state)) {
+    return status.targetVersion ? ` · 正在更新到 ${status.targetVersion}` : " · 正在检查更新";
+  }
+  if (status.state === "deferred") return " · 更新已延后";
+  if (status.state === "failed") return " · 更新检查失败";
+  return "";
+}
+
 function NetworkNoticeCard({
   health,
   refresh,
@@ -537,6 +583,7 @@ function ServiceSettings({
 
 function PopupApp() {
   usePopupPresence();
+  const updateStatus = useUpdateStatus();
   const {
     state,
     settings,
@@ -656,7 +703,9 @@ function PopupApp() {
       <p id="errorBox" className="error" hidden={!error}>
         {error?.message || ""}
       </p>
-      <footer id="versionInfo">版本 {version}</footer>
+      <footer id="versionInfo" title={updateStatus?.message || ""}>
+        版本 {version}{updateStatusLabel(updateStatus)}
+      </footer>
     </main>
   );
 }
