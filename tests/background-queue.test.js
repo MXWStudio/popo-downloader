@@ -917,7 +917,7 @@ test("任务运行或暂停时拒绝调整并行下载数", async () => {
   }
 });
 
-test("一键下载当前文件夹有未完成项时暂停剩余批次", async () => {
+test("一键下载当前文件夹有未完成项时记录失败并继续剩余批次", async () => {
   const state = transferState();
   const current = state.jobs[0];
   current.batchId = "batch-incomplete";
@@ -969,25 +969,18 @@ test("一键下载当前文件夹有未完成项时暂停剩余批次", async ()
   );
   try {
     harness.fireAlarm("popo-stable-downloader-pump");
-    await waitUntil(() => harness.stored.popoState?.activeJobId == null);
+    await waitUntil(() => harness.stored.popoState?.activeJobId === "job-next-folder");
     const stored = harness.stored.popoState;
     const failedJob = stored.jobs.find((job) => job.id === current.id);
     const queuedJob = stored.jobs.find((job) => job.id === "job-next-folder");
     assert.equal(failedJob.status, "failed");
     assert.equal(failedJob.counts.failed, 2);
-    assert.equal(queuedJob.status, "queued");
-    assert.equal(queuedJob.batchPaused, true);
+    assert.equal(queuedJob.status, "scanning");
+    assert.equal(queuedJob.batchPaused, false);
     assert.equal(stored.folderReceipts.length, 0);
     assert.ok(stored.logs.some((entry) =>
-      entry.code === "DOWNLOAD_BATCH_PAUSED_AFTER_INCOMPLETE_FOLDER"
+      entry.code === "DOWNLOAD_BATCH_CONTINUED_AFTER_INCOMPLETE_FOLDER"
     ));
-
-    const resumed = await harness.send({
-      type: "RESUME_DOWNLOAD_BATCH",
-      batchId: current.batchId
-    });
-    assert.equal(resumed.ok, true);
-    assert.equal(harness.stored.popoState.activeJobId, "job-next-folder");
   } finally {
     harness.cleanup();
   }

@@ -10,8 +10,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.1");
-  assert.equal(manifest.version_name, "0.7.1");
+  assert.equal(manifest.version, "0.7.2");
+  assert.equal(manifest.version_name, "0.7.2");
+  assert.equal(manifest.name, "POPO 稳定下载助手");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";
   const extensionId = [...digest.subarray(0, 16)]
@@ -251,6 +252,7 @@ test("网页、任务摘要、通知和弹窗共享克制的深色渐变状态�
 
 test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", () => {
   const background = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+  const content = fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8");
   const popup = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
   assert.match(background, /concurrency:\s*5/);
   assert.match(background, /MAX_DOWNLOAD_CONCURRENCY\s*=\s*5/);
@@ -272,6 +274,18 @@ test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", 
   assert.match(background, /continueGopeedTask/);
   assert.match(background, /requestDirectDownloadUrl/);
   assert.match(background, /连续 3 次未返回下载地址/);
+  assert.match(background, /DOWNLOAD_URL_RECOVERED_FROM_PAGE/);
+  assert.match(background, /DOWNLOAD_BATCH_CONTINUED_AFTER_INCOMPLETE_FOLDER/);
+  assert.match(content, /GET_OBSERVED_DOWNLOAD_URL/);
+  const pageApi = fs.readFileSync(path.join(__dirname, "..", "page-api.js"), "utf8");
+  assert.match(pageApi, /PerformanceObserver/);
+  assert.match(pageApi, /popo-stable-download:observed-url/);
+  assert.match(pageApi, /popo-stable-download:request-observed-urls/);
+  assert.match(background, /const currentVersion = chrome\.runtime\.getManifest\(\)\.version;/);
+  assert.doesNotMatch(background, /const currentVersion = chrome\.runtime\.getManifest\(\)\.version_name/);
+  assert.match(background, /function isDevelopmentBuild\(\)/);
+  assert.match(background, /开发版使用当前项目源码，已停用正式版自动更新/);
+  assert.match(background, /chrome\.alarms\.clear\(UPDATE_ALARM\)/);
   assert.doesNotMatch(background, /chrome\.downloads/);
   assert.doesNotMatch(background, /type:\s*"CLICK_DOWNLOAD"/);
   assert.match(background, /itemIndex:\s*item\.itemIndex/);

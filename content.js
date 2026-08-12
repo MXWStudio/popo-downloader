@@ -33,7 +33,11 @@
   const IS_TOP_FRAME = window.top === window;
   const IS_PAGE_SCAN_FRAME = !IS_TOP_FRAME &&
     window.name.startsWith(PAGE_SCAN_FRAME_NAME_PREFIX);
-  const { inferVirtualListItemCount, selectVirtualListMatch } = globalThis.PopoCore;
+  const {
+    inferVirtualListItemCount,
+    selectObservedDownloadUrl,
+    selectVirtualListMatch
+  } = globalThis.PopoCore;
   const { isJobActive, makeFolderJobKey } = globalThis.PopoQueue;
   let latestQueueState = null;
   let queueRefreshTimer = null;
@@ -43,6 +47,24 @@
   let projectCountCandidateSince = 0;
   let workerRecoveryRequestedAt = 0;
   const handledPageScanRequests = new Set();
+  const observedDownloadUrls = [];
+  const MAX_OBSERVED_DOWNLOAD_URLS = 120;
+  const REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT = "popo-stable-download:request-observed-urls";
+
+  function rememberObservedDownloadUrl(value) {
+    const candidate = String(value || "").trim();
+    if (!/^https?:\/\//i.test(candidate)) return;
+    const existingIndex = observedDownloadUrls.indexOf(candidate);
+    if (existingIndex >= 0) observedDownloadUrls.splice(existingIndex, 1);
+    observedDownloadUrls.push(candidate);
+    if (observedDownloadUrls.length > MAX_OBSERVED_DOWNLOAD_URLS) {
+      observedDownloadUrls.splice(0, observedDownloadUrls.length - MAX_OBSERVED_DOWNLOAD_URLS);
+    }
+  }
+
+  window.addEventListener("popo-stable-download:observed-url", (event) => {
+    rememberObservedDownloadUrl(event.detail);
+  });
 
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1423,6 +1445,13 @@
     };
   }
 
+  function observedDownloadInfo(pageId, filename) {
+    window.dispatchEvent(new Event(REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT));
+    return {
+      url: selectObservedDownloadUrl(observedDownloadUrls, { pageId, filename })
+    };
+  }
+
   function requestPageApi(path, queryParams, timeoutMs) {
     return new Promise((resolve, reject) => {
       const requestId = crypto.randomUUID();
@@ -1500,6 +1529,11 @@
           return {
             ok: true,
             result: await requestDirectDownload(message.teamSpaceId, message.pageId, message.timeoutMs)
+          };
+        case "GET_OBSERVED_DOWNLOAD_URL":
+          return {
+            ok: true,
+            result: observedDownloadInfo(message.pageId, message.filename)
           };
         case "RESOLVE_TEAM_SPACE_ID":
           return {

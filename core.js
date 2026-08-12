@@ -158,6 +158,55 @@
     return "";
   }
 
+  function normalizeObservedHttpUrl(value) {
+    const text = String(value || "").trim();
+    if (!/^https?:\/\//i.test(text)) return "";
+    try {
+      const url = new URL(text);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+
+  function selectObservedDownloadUrl(observedUrls, options = {}) {
+    const pageId = String(options.pageId || "").trim().toLowerCase();
+    const preferredFilename = normalizePreviewTitle(options.filename || "");
+    const candidates = [];
+    for (const [index, raw] of (Array.isArray(observedUrls) ? observedUrls : []).entries()) {
+      const normalized = normalizeObservedHttpUrl(raw);
+      if (!normalized) continue;
+      let url;
+      try {
+        url = new URL(normalized);
+      } catch {
+        continue;
+      }
+      if (!/^https?:$/.test(url.protocol) || url.hostname === "docs.popo.netease.com") continue;
+      const lower = normalized.toLowerCase();
+      let score = 0;
+      if (/response-content-disposition=/i.test(normalized)) score += 100;
+      if (/x-amz-signature=/i.test(normalized)) score += 80;
+      if (/\.s3v2\.nie\.netease\.com$/i.test(url.hostname)) score += 60;
+      if (/\.(?:mp4|mov|mkv|avi|webm|mp3|wav|flac|zip|rar|7z|psd|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif)(?:$|\?)/i.test(normalized)) {
+        score += 40;
+      }
+      if (pageId && lower.includes(pageId)) score += 20;
+      if (preferredFilename) {
+        let decoded = normalized;
+        for (let pass = 0; pass < 2; pass += 1) {
+          try { decoded = decodeURIComponent(decoded); } catch { break; }
+        }
+        decoded = normalizePreviewTitle(decoded);
+        if (decoded.includes(preferredFilename)) score += 30;
+      }
+      if (score >= 60) candidates.push({ index, normalized, score });
+    }
+    candidates.sort((left, right) => right.score - left.score || right.index - left.index);
+    return candidates[0]?.normalized || "";
+  }
+
   function extractTeamSpaceId(body) {
     const payload = body && typeof body === "object" && !Array.isArray(body) &&
       Object.prototype.hasOwnProperty.call(body, "data")
@@ -472,6 +521,7 @@
     normalizePreviewTitle,
     previewTitleMatchesFile,
     sanitizePathSegment,
+    selectObservedDownloadUrl,
     selectVirtualListMatch,
     splitTokens,
     validateRuntimeMessage,

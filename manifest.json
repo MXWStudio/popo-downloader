@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "POPO 稳定下载助手",
-  "version": "0.7.1",
-  "version_name": "0.7.1",
+  "version": "0.7.2",
+  "version_name": "0.7.2",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtBXlDaqglvDENelYuSGDfKU3bcTfqvWQPuP+4YQOu2jcn4gVNqIUdQFNzuIYNcwDXmKgeBNxgBlf0QhFlfawzgmYlk9T/6g79wk9wQzkRqXFHJootkakTCqII1didENRnLopO/XTgZ+Z6SOuTY7trB8Rpt/fv4Vc7qqz7k2BZOfAABbTln7eBWPrwwiQZtnFZLEJXITTTv4FH5U3iLhAtTcS/ZfvdrAJQgS+rqEDFTMkau14vr3SzeeOeMofOzaLZedQtMwgBaYuXzd5LtC90futDKMHkgdVfZBN9RuP4vUF9BKZT1twkVAdsufKB1XJL2PiswLQ7Oq/lncv4IVCywIDAQAB",
   "description": "扫描 POPO 团队空间文件夹，并以可暂停、可重试、可核对的队列逐个下载文件。",
   "minimum_chrome_version": "114",

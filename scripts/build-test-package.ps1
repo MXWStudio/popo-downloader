@@ -9,6 +9,9 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json')) | ConvertFrom-Json
 $versionName = [string]$manifest.version_name
 if (-not $versionName) { throw 'manifest.json version_name is required.' }
+if ($versionName -match '(?i)(?:^|[-.])dev(?:[-.]|$)') {
+  throw 'Refusing to create a signed stable package from a development-marked project. Set manifest.json version_name to a formal release version first.'
+}
 
 $distRoot = if ($OutputDirectory) {
   [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -192,7 +195,7 @@ $channelManifest = [ordered]@{
   sha256 = $hash
   size = $size
   signature = $signature
-  notes = 'Adds one-click batch controls, resilient task recovery, selectable install location, repair, and cross-drive migration.'
+  notes = 'Hotfixes POPO single-file address recovery after permission-denied API responses and keeps one-click batches running after an incomplete folder.'
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(

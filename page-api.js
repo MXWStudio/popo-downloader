@@ -3,10 +3,47 @@
 
   const REQUEST_SOURCE = "popo-stable-downloader-isolated";
   const RESPONSE_SOURCE = "popo-stable-downloader-page";
+  const OBSERVED_DOWNLOAD_URL_EVENT = "popo-stable-download:observed-url";
+  const REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT = "popo-stable-download:request-observed-urls";
   const ALLOWED_PATHS = new Set([
     "/api/bs-team-space/web/v1/page/download",
     "/api/bs-team-space/web/v1/teamSpace/id"
   ]);
+
+  const observedResources = new WeakSet();
+  const observedUrls = [];
+  const MAX_OBSERVED_URLS = 120;
+
+  function reportObservedUrl(value) {
+    const candidate = String(value || "").trim();
+    if (!/^https?:\/\//i.test(candidate)) return;
+    const existingIndex = observedUrls.indexOf(candidate);
+    if (existingIndex >= 0) observedUrls.splice(existingIndex, 1);
+    observedUrls.push(candidate);
+    if (observedUrls.length > MAX_OBSERVED_URLS) {
+      observedUrls.splice(0, observedUrls.length - MAX_OBSERVED_URLS);
+    }
+    window.dispatchEvent(new CustomEvent(OBSERVED_DOWNLOAD_URL_EVENT, { detail: candidate }));
+  }
+
+  window.addEventListener(REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT, () => {
+    for (const url of observedUrls) {
+      window.dispatchEvent(new CustomEvent(OBSERVED_DOWNLOAD_URL_EVENT, { detail: url }));
+    }
+  });
+
+  function inspectResource(resource) {
+    if (!resource || typeof resource !== "object" || observedResources.has(resource)) return;
+    observedResources.add(resource);
+    reportObservedUrl(resource.name);
+  }
+
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) inspectResource(entry);
+    });
+    observer.observe({ type: "resource", buffered: true });
+  } catch {}
 
   window.addEventListener("message", async (event) => {
     if (event.source !== window || event.data?.source !== REQUEST_SOURCE) return;
@@ -26,6 +63,7 @@
         headers: { Accept: "application/json" },
         method: "GET"
       });
+      reportObservedUrl(response.url);
       const text = await response.text();
       let body;
       try {

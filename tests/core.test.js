@@ -15,6 +15,7 @@ const {
   matchesFilters,
   previewTitleMatchesFile,
   sanitizePathSegment,
+  selectObservedDownloadUrl,
   selectVirtualListMatch,
   validateRuntimeMessage,
   verifyDirectoryItemCount
@@ -274,6 +275,31 @@ test("从嵌套接口响应中提取优先下载地址", () => {
     }
   }), "https://example.com/file.mp4");
   assert.equal(findFirstHttpUrl({ data: { value: "not-a-url" } }), "");
+});
+
+test("下载接口拒绝时从页面已加载资源中选择最新且最可信的文件地址", () => {
+  const stale = "https://old.s3v2.nie.netease.com/archive/old.mp4?X-Amz-Signature=old";
+  const expected = "https://new.s3v2.nie.netease.com/archive/target.mp4?response-content-disposition=attachment%3BfileName%2A%3DUTF-8%27%27target.mp4&X-Amz-Signature=current";
+  assert.equal(selectObservedDownloadUrl([
+    "https://docs.popo.netease.com/api/bs-team-space/web/v1/page/download?pageId=page-1",
+    stale,
+    expected
+  ], {
+    pageId: "page-1",
+    filename: "target.mp4"
+  }), expected);
+  assert.equal(selectObservedDownloadUrl([
+    "https://docs.popo.netease.com/api/bs-team-space/web/v1/page/download?pageId=page-1"
+  ], {
+    pageId: "page-1",
+    filename: "target.mp4"
+  }), "");
+  assert.equal(selectObservedDownloadUrl([
+    "https://cdn.example.com/assets/logo.png"
+  ], {
+    pageId: "page-1",
+    filename: "target.mp4"
+  }), "");
 });
 
 test("团队空间短码接口响应可提取真实 ID", () => {

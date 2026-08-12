@@ -1947,24 +1947,18 @@ async function finalizeActiveJob(state, status, message, notification = null, fo
   const job = activeJob(state);
   if (!job) return null;
   if (status === "failed" && job.batchId) {
-    let pausedCount = 0;
-    for (const candidate of state.jobs || []) {
-      if (candidate.id === job.id || candidate.batchId !== job.batchId ||
-          isJobTerminal(candidate.status)) continue;
-      candidate.batchPaused = true;
-      if (candidate.status === "queued") {
-        candidate.lastMessage = "前一个文件夹有未完成项，一键下载批次已暂停";
-      }
-      pausedCount += 1;
-    }
-    if (pausedCount) {
+    const remainingCount = (state.jobs || []).filter((candidate) =>
+      candidate.id !== job.id && candidate.batchId === job.batchId &&
+      !isJobTerminal(candidate.status)
+    ).length;
+    if (remainingCount) {
       pushRuntimeEvent(
         state,
-        "DOWNLOAD_BATCH_PAUSED_AFTER_INCOMPLETE_FOLDER",
+        "DOWNLOAD_BATCH_CONTINUED_AFTER_INCOMPLETE_FOLDER",
         "warn",
-        "当前文件夹有未完成项，一键下载批次已暂停",
-        `batchId=${job.batchId}; remaining=${pausedCount}`,
-        { batchId: job.batchId, jobId: job.id, pausedCount }
+        "当前文件夹有未完成项，已记录失败并继续后续文件夹",
+        `batchId=${job.batchId}; remaining=${remainingCount}`,
+        { batchId: job.batchId, jobId: job.id, remainingCount }
       );
     }
   }
@@ -2744,6 +2738,22 @@ async function requestDirectDownloadUrl(state, pageId) {
     }, state.settings.timeouts.downloadStart + 3000, "请求单文件下载地址");
     const directUrl = lastResponse?.ok ? findFirstHttpUrl(lastResponse.body) : "";
     if (directUrl) return directUrl;
+    const observed = await sendToWork(state, {
+      type: "GET_OBSERVED_DOWNLOAD_URL",
+      pageId,
+      filename: state.items.find((item) => item.id === state.preparingItemId)?.name || ""
+    }, 5000, "读取页面已取得的文件地址");
+    if (observed?.url) {
+      pushRuntimeEvent(
+        state,
+        "DOWNLOAD_URL_RECOVERED_FROM_PAGE",
+        "warn",
+        "下载接口拒绝取址，已使用页面预览取得的文件地址",
+        pageApiErrorDetail(lastResponse),
+        { jobId: activeJob(state)?.id || "", pageId }
+      );
+      return observed.url;
+    }
     if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 400));
   }
   throw Object.assign(
@@ -4273,8 +4283,7 @@ async function restoreCancelledJob(jobId, preferredSourceTabId = null) {
 async function saveAutomaticUpdateStatus(status) {
   const normalized = {
     state: String(status?.state || "idle"),
-    currentVersion: String(status?.currentVersion || chrome.runtime.getManifest().version_name ||
-      chrome.runtime.getManifest().version || ""),
+    currentVersion: String(status?.currentVersion || chrome.runtime.getManifest().version || ""),
     targetVersion: String(status?.targetVersion || status?.version || ""),
     message: String(status?.message || status?.error || ""),
     updatedAt: String(status?.updatedAt || new Date().toISOString())
@@ -4283,15 +4292,30 @@ async function saveAutomaticUpdateStatus(status) {
   return normalized;
 }
 
+function isDevelopmentBuild() {
+  const manifest = typeof chrome.runtime.getManifest === "function"
+    ? chrome.runtime.getManifest()
+    : {};
+  const versionName = manifest.version_name || "";
+  return /(?:^|[-.])dev(?:[-.]|$)/i.test(versionName);
+}
+
 function updateBlockedByActiveJobs(state) {
   return (state?.jobs || []).some((job) => !isJobTerminal(job.status));
 }
 
 async function runAutomaticUpdateCheck() {
+  if (isDevelopmentBuild()) {
+    await saveAutomaticUpdateStatus({
+      state: "development",
+      currentVersion: chrome.runtime.getManifest().version,
+      message: "开发版使用当前项目源码，已停用正式版自动更新。"
+    });
+    return;
+  }
   if (automaticUpdateLocked) return;
   automaticUpdateLocked = true;
-  const currentVersion = chrome.runtime.getManifest().version_name ||
-    chrome.runtime.getManifest().version;
+  const currentVersion = chrome.runtime.getManifest().version;
   try {
     const { state } = await getStored({ loadItems: false });
     if (updateBlockedByActiveJobs(state)) {
@@ -4359,10 +4383,18 @@ async function runAutomaticUpdateCheck() {
 }
 
 function scheduleAutomaticUpdates(delayInMinutes) {
+  if (isDevelopmentBuild()) {
+    if (chrome.alarms.clear) void chrome.alarms.clear(UPDATE_ALARM);
+    return;
+  }
   chrome.alarms.create(UPDATE_ALARM, {
     delayInMinutes,
     periodInMinutes: UPDATE_CHECK_PERIOD_MINUTES
   });
+}
+
+if (isDevelopmentBuild() && chrome.alarms.clear) {
+  void chrome.alarms.clear(UPDATE_ALARM);
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -4470,8 +4502,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ok: true,
           updateStatus: data.popoUpdateStatus || {
             state: "idle",
-            currentVersion: chrome.runtime.getManifest().version_name ||
-              chrome.runtime.getManifest().version,
+            currentVersion: chrome.runtime.getManifest().version,
             targetVersion: "",
             message: "",
             updatedAt: ""
