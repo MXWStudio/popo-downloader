@@ -18,7 +18,9 @@ import {
   Folder,
   LoaderCircle,
   Pause,
+  Play,
   Search,
+  Trash2,
   TriangleAlert,
   type LucideIcon
 } from "lucide-react";
@@ -26,7 +28,9 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   attentionJobs,
   failedRetryCount,
+  findPageDownloadBatch,
   findMatchingFolderJob,
+  findMatchingFolderReceipt,
   folderButtonDisplay,
   inferVirtualListItemCount,
   jobDetail,
@@ -91,6 +95,7 @@ interface FolderPortalTarget {
 
 interface PageSnapshot {
   url: string;
+  pageName: string;
   rawCount: number | null;
   countTarget: HTMLElement | null;
   folderTargets: FolderPortalTarget[];
@@ -107,6 +112,15 @@ interface PageUiGlobal {
 
 function normalizeText(value: unknown): string {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function currentDirectoryName(): string {
+  const title = normalizeText(document.title);
+  if (title && title !== "POPO") return title;
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+    '[class*="titleInput"], [class*="breadcrumb"]'
+  )).map((element) => normalizeText(element.textContent)).filter(Boolean);
+  return candidates[candidates.length - 1] || "POPO目录";
 }
 
 function parseFolderRow(row: Element): FolderItem | null {
@@ -269,6 +283,7 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     if (disposed) return;
     onSnapshot({
       url: location.href,
+      pageName: currentDirectoryName(),
       rawCount: PAGE_DETAIL_PATTERN.test(location.href)
         ? currentVirtualListItemCount()
         : null,
@@ -362,7 +377,18 @@ function globalStyles(): string {
     "#" + PROJECT_COUNT_ID + "{display:contents!important;}",
     ".popo-react-project-count{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:72px;height:32px;margin-left:10px;margin-right:auto;padding:0 10px;border:1px solid #526f8f;border-radius:7px;color:#eef6ff;background-color:#132235;background-image:radial-gradient(circle at 18% 0%,rgba(111,186,255,.26),transparent 58%),linear-gradient(135deg,#2c4968 0%,#19334d 52%,#0f1a26 100%);background-size:100% 100%;box-shadow:0 6px 16px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.09);font:600 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;color-scheme:dark;}",
     ".popo-react-project-count[data-state='loading']{color:#91a0b2;}",
-    "@media(prefers-color-scheme:dark){.popo-react-project-count{box-shadow:0 6px 16px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.05);}}",
+    ".popo-page-download-controls{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;margin:0 8px;color-scheme:dark;}",
+    ".popo-page-download-all{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:0 0 auto;min-width:96px;height:32px;margin:0;padding:0 12px;border:1px solid #3f719d;border-radius:7px;color:#eaf5ff;background-color:#12314c;background-image:linear-gradient(145deg,#1d5275 0%,#173b58 55%,#10283d 100%);box-shadow:0 6px 16px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.09);font:600 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;cursor:pointer;color-scheme:dark;}",
+    ".popo-page-download-all svg{width:15px;height:15px;stroke:currentColor;}",
+    ".popo-page-download-all:hover{filter:brightness(1.08);border-color:#61a2d7;}",
+    ".popo-page-download-all:disabled{cursor:wait;opacity:.62;}",
+    ".popo-page-download-all[data-state='queued'],.popo-page-download-all[data-state='preparing'],.popo-page-download-all[data-state='scanning'],.popo-page-download-all[data-state='downloading']{border-color:#3e8ba0;background-image:linear-gradient(145deg,#18506a 0%,#133d4b 55%,#102c30 100%);}",
+    ".popo-page-download-all[data-state='success']{border-color:#3e7566;color:#9ce5cf;background-image:linear-gradient(145deg,#173a34 0%,#10241f 100%);}",
+    ".popo-page-download-all[data-state='failed'],.popo-page-download-all[data-state='warning']{border-color:#84515a;color:#ffc1c7;background-image:linear-gradient(145deg,#46262c 0%,#29191e 100%);}",
+    ".popo-page-batch-action{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:5px;height:32px;padding:0 10px;border:1px solid #536579;border-radius:7px;color:#dce8f5;background:linear-gradient(145deg,#263342,#19232f);box-shadow:0 6px 16px rgba(4,10,18,.2),inset 0 1px 0 rgba(255,255,255,.06);font:600 12px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;cursor:pointer;color-scheme:dark;}",
+    ".popo-page-batch-action svg{width:14px;height:14px;stroke:currentColor;}.popo-page-batch-action:hover{filter:brightness(1.1);}.popo-page-batch-action:disabled{cursor:wait;opacity:.62;}",
+    ".popo-page-batch-action[data-kind='danger']{border-color:#87505b;color:#ffc1c7;background:linear-gradient(145deg,#46262c,#29191e);}",
+    "@media(prefers-color-scheme:dark){.popo-react-project-count,.popo-page-download-all{box-shadow:0 6px 16px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.05);}}",
     ":is(html,body).dark .popo-react-project-count,:is(html,body)[data-theme='dark'] .popo-react-project-count,:is(html,body)[data-color-mode='dark'] .popo-react-project-count{color:#eef6ff;border-color:#526f8f;}"
   ].join("\n");
 }
@@ -485,6 +511,7 @@ async function callExtension<T extends object = Record<string, never>>(
 function usePageSnapshot(): PageSnapshot {
   const [snapshot, setSnapshot] = useState<PageSnapshot>({
     url: location.href,
+    pageName: currentDirectoryName(),
     rawCount: null,
     countTarget: null,
     folderTargets: []
@@ -497,6 +524,7 @@ function usePageSnapshot(): PageSnapshot {
           return candidate?.key === entry.key && candidate.target === entry.target;
         });
       return current.url === next.url &&
+        current.pageName === next.pageName &&
         current.rawCount === next.rawCount &&
         current.countTarget === next.countTarget &&
         sameTargets
@@ -705,6 +733,185 @@ function ProjectCount({ count }: { count: number | null }) {
         : "当前目录第一层：" + count + " 个项目（文件 + 文件夹）"}
     >
       {loading ? "正在统计…" : count + " 个项目"}
+    </span>
+  );
+}
+
+function PageDownloadButton({
+  pageName,
+  parentUrl,
+  count,
+  state,
+  refresh,
+  onError
+}: {
+  pageName: string;
+  parentUrl: string;
+  count: number | null;
+  state: QueueState | null;
+  refresh: () => Promise<void>;
+  onError: (title: string, error: unknown) => void;
+}) {
+  const [starting, setStarting] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [confirmRemoving, setConfirmRemoving] = useState(false);
+  const [outcome, setOutcome] = useState<{
+    addedCount: number;
+    duplicateCount: number;
+    completedCount: number;
+    folderCount: number;
+    coveredByLegacyPageDownload: boolean;
+  } | null>(null);
+  const batch = useMemo(() => findPageDownloadBatch(state, parentUrl), [parentUrl, state]);
+  const label = starting
+    ? "正在核对…"
+    : outcome?.addedCount
+      ? `已排队 ${outcome.addedCount} 个`
+      : outcome?.coveredByLegacyPageDownload
+        ? "整页任务进行中"
+        : outcome?.folderCount === 0
+          ? "没有子文件夹"
+          : outcome && outcome.completedCount === outcome.folderCount
+            ? "均已下载"
+            : outcome
+              ? "文件夹均已入队"
+              : "一键下载";
+
+  useEffect(() => {
+    if (!outcome) return;
+    const timer = window.setTimeout(() => {
+      setOutcome(null);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [outcome]);
+
+  useEffect(() => {
+    if (!confirmRemoving) return;
+    const timer = window.setTimeout(() => setConfirmRemoving(false), 5000);
+    return () => window.clearTimeout(timer);
+  }, [confirmRemoving]);
+
+  useEffect(() => {
+    if (!batch) setConfirmRemoving(false);
+  }, [batch]);
+
+  const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setStarting(true);
+    setOutcome(null);
+    try {
+      const response = await callExtension<{
+        needsWorker?: boolean;
+        addedCount?: number;
+        duplicateCount?: number;
+        completedCount?: number;
+        folderCount?: number;
+        coveredByLegacyPageDownload?: boolean;
+      }>({
+        type: "START_PAGE_DOWNLOAD",
+        pageName,
+        parentUrl
+      });
+      setOutcome({
+        addedCount: response.addedCount || 0,
+        duplicateCount: response.duplicateCount || 0,
+        completedCount: response.completedCount || 0,
+        folderCount: response.folderCount || 0,
+        coveredByLegacyPageDownload: Boolean(response.coveredByLegacyPageDownload)
+      });
+      if (response.needsWorker) {
+        document.dispatchEvent(new CustomEvent(ENSURE_WORKER_EVENT, {
+          detail: { url: parentUrl }
+        }));
+      }
+      await refresh();
+    } catch (error) {
+      onError("一键下载", error);
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleBatchAction = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    type: "PAUSE_DOWNLOAD_BATCH" | "RESUME_DOWNLOAD_BATCH" | "REMOVE_DOWNLOAD_BATCH"
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!batch) return;
+    setBatchBusy(true);
+    try {
+      await callExtension({ type, batchId: batch.id });
+      setConfirmRemoving(false);
+      await refresh();
+    } catch (error) {
+      onError(type === "REMOVE_DOWNLOAD_BATCH" ? "移除一键下载" : "一键下载批次", error);
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  return (
+    <span className="popo-page-download-controls">
+      <button
+        type="button"
+        className="popo-page-download-all"
+        data-state={starting ? "preparing" : outcome?.addedCount ? "queued" : "idle"}
+        disabled={starting || batchBusy || count == null || count === 0}
+        title={count == null
+          ? "正在核对当前页面项目数"
+          : count === 0
+            ? "当前页面没有可下载项目"
+            : `核对“${pageName}”的完整列表，把每个第一层文件夹按页面顺序分别加入下载队列`}
+        aria-busy={starting || undefined}
+        aria-live="polite"
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => void handleClick(event)}
+      >
+        <Download aria-hidden="true" focusable="false" strokeWidth={1.8} />
+        <span>{label}</span>
+      </button>
+      {batch && (
+        <>
+          <button
+            type="button"
+            className="popo-page-batch-action"
+            disabled={batchBusy || starting}
+            title={batch.paused ? "继续这次一键下载批次" : "暂停这次一键下载批次"}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => void handleBatchAction(
+              event,
+              batch.paused ? "RESUME_DOWNLOAD_BATCH" : "PAUSE_DOWNLOAD_BATCH"
+            )}
+          >
+            {batch.paused
+              ? <Play aria-hidden="true" focusable="false" strokeWidth={1.8} />
+              : <Pause aria-hidden="true" focusable="false" strokeWidth={1.8} />}
+            <span>{batch.paused ? "全部继续" : "全部暂停"}</span>
+          </button>
+          <button
+            type="button"
+            className="popo-page-batch-action"
+            data-kind="danger"
+            disabled={batchBusy || starting}
+            title="移除这次一键下载批次；已交给 Gopeed 的文件不会删除"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              if (!confirmRemoving) {
+                event.preventDefault();
+                event.stopPropagation();
+                setConfirmRemoving(true);
+                return;
+              }
+              void handleBatchAction(event, "REMOVE_DOWNLOAD_BATCH");
+            }}
+          >
+            <Trash2 aria-hidden="true" focusable="false" strokeWidth={1.8} />
+            <span>{confirmRemoving ? "确认移除" : "全部移除"}</span>
+          </button>
+        </>
+      )}
     </span>
   );
 }
@@ -1064,12 +1271,24 @@ function FolderDownloadButton({
   const lastActiveJob = useRef<QueueJob | null>(null);
   const reducedMotion = useReducedMotion();
   const activeJob = findMatchingFolderJob(state, item);
+  const receipt = findMatchingFolderReceipt(state, item);
+  const receiptJob = useMemo<QueueJob | null>(() => receipt ? {
+    id: `receipt:${receipt.key}`,
+    key: receipt.key,
+    status: "complete",
+    folderName: receipt.folderName,
+    folderItemIndex: receipt.folderItemIndex,
+    parentUrl: receipt.parentUrl,
+    completedAt: receipt.completedAt,
+    counts: receipt.counts,
+    verifiedCompletion: true
+  } : null, [receipt]);
   const transitionOutcome = !activeJob && lastActiveJob.current
     ? (state?.jobs || []).find((candidate) =>
         candidate.id === lastActiveJob.current?.id && jobIsTerminal(candidate)
       ) || null
     : null;
-  const visibleJob = activeJob || transitionOutcome || outcome;
+  const visibleJob = activeJob || transitionOutcome || outcome || receiptJob;
   const display = folderButtonDisplay(visibleJob, starting);
   const motionKey = `${visibleJob?.id || "transient"}:${display.visualState}`;
   const terminalJob = visibleJob && jobIsTerminal(visibleJob) ? visibleJob : null;
@@ -1078,6 +1297,8 @@ function FolderDownloadButton({
     ? "正在添加下载"
     : activeJob
       ? `${statusText || "任务进行中"}，点击查看任务`
+      : receiptJob && visibleJob === receiptJob
+        ? "已核对完成，数量一致且无遗漏；点击可重新下载"
       : terminalJob
         ? `${statusText}，点击${terminalJob.status === "cancelled" && recoverableCount(terminalJob) > 0
             ? "继续"
@@ -1115,6 +1336,7 @@ function FolderDownloadButton({
     const response = await callExtension<{
       needsWorker?: boolean;
       job?: QueueJob;
+      coveredByPageDownload?: boolean;
     }>({
       type: "START_FOLDER_SCAN",
       folderName: item.name,
@@ -1126,6 +1348,7 @@ function FolderDownloadButton({
         detail: { url: item.parentUrl }
       }));
     }
+    return response;
   };
 
   const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -1147,7 +1370,10 @@ function FolderDownloadButton({
       ) {
         await callExtension({ type: "RESTORE_CANCELLED_JOB", jobId: terminalJob.id });
       } else {
-        await requestFolderScan();
+        const response = await requestFolderScan();
+        if (response.coveredByPageDownload && response.job) {
+          onInspect(response.job.id);
+        }
       }
       await refresh();
     } catch (error) {
@@ -1584,7 +1810,17 @@ function PageEnhancerApp() {
     const values: ReactNode[] = [];
     if (snapshot.countTarget) {
       values.push(createPortal(
-        <ProjectCount count={count} />,
+        <>
+          <ProjectCount count={count} />
+          <PageDownloadButton
+            pageName={snapshot.pageName}
+            parentUrl={snapshot.url}
+            count={count}
+            state={state}
+            refresh={refresh}
+            onError={showActionError}
+          />
+        </>,
         snapshot.countTarget,
         "project-count"
       ));
@@ -1608,9 +1844,11 @@ function PageEnhancerApp() {
     inspectJob,
     refresh,
     showActionError,
+    state,
     snapshot.countTarget,
     snapshot.folderTargets,
-    state
+    snapshot.pageName,
+    snapshot.url
   ]);
 
   return (

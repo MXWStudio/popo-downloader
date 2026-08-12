@@ -56,6 +56,24 @@ test("后台命令在分发前规范化字段并丢弃无关数据", () => {
     type: "DISMISS_JOB",
     jobId: "job-a"
   });
+  assert.deepEqual(validateRuntimeMessage({
+    type: "PAUSE_DOWNLOAD_BATCH",
+    batchId: " batch-a ",
+    ignored: true
+  }), {
+    type: "PAUSE_DOWNLOAD_BATCH",
+    batchId: "batch-a"
+  });
+  assert.deepEqual(validateRuntimeMessage({
+    type: "START_PAGE_DOWNLOAD",
+    pageName: " 当前素材页 ",
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1#preview",
+    ignored: true
+  }), {
+    type: "START_PAGE_DOWNLOAD",
+    pageName: "当前素材页",
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1#preview"
+  });
 });
 
 test("逐目录数量核对区分已验证、数量不一致和无法独立推导", () => {
@@ -83,6 +101,10 @@ test("逐目录数量核对区分已验证、数量不一致和无法独立推�
 test("后台命令拒绝越界字段、未知设置和非 POPO 页面", () => {
   assert.throws(() => validateRuntimeMessage(null), /message/);
   assert.throws(() => validateRuntimeMessage({ type: "CANCEL_JOB", jobId: "" }), /jobId/);
+  assert.throws(
+    () => validateRuntimeMessage({ type: "REMOVE_DOWNLOAD_BATCH", batchId: "" }),
+    /batchId/
+  );
   assert.throws(() => validateRuntimeMessage({
     type: "RESTORE_CANCELLED_JOB",
     jobId: "job-a",
@@ -100,6 +122,11 @@ test("后台命令拒绝越界字段、未知设置和非 POPO 页面", () => {
     folderItemIndex: "1",
     parentUrl: "https://example.com/team/pc/team1/pageDetail/root1"
   }), /parentUrl/);
+  assert.throws(() => validateRuntimeMessage({
+    type: "START_PAGE_DOWNLOAD",
+    pageName: "",
+    parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1"
+  }), /pageName/);
   assert.throws(() => validateRuntimeMessage({
     type: "SAVE_SETTINGS",
     settings: { unexpected: true }

@@ -69,6 +69,7 @@ function compileSetup(packageRoot) {
     "/target:winexe",
     "/optimize+",
     "/codepage:65001",
+    "/reference:System.Drawing.dll",
     "/reference:System.Windows.Forms.dll",
     "/reference:System.Web.Extensions.dll",
     "/out:" + output,
@@ -90,6 +91,8 @@ function runSetup(setupExecutable, installRoot, options = {}) {
     "--install-root",
     installRoot
   ];
+  if (options.repair) args.push("--repair");
+  if (options.migrateFrom) args.push("--migrate-from", options.migrateFrom);
   if (options.failAfterSwap) args.push("--test-fail-after-swap");
   return spawnSync(setupExecutable, args, {
     cwd: path.dirname(setupExecutable),
@@ -242,6 +245,59 @@ test("verified candidate update restores the previous install on swap failure", 
     assert.equal(repeatedState.rollbackPath, extensionOnlyState.rollbackPath);
     assert.equal(fs.readFileSync(taskDatabase, "utf8"), "persistent-task-history");
     assert.equal(fs.readFileSync(sessionPreferences, "utf8"), '{"port":10888}');
+
+    const repaired = runSetup(setupExecutable, installRoot, { repair: true });
+    assert.equal(repaired.status, 0, repaired.stdout + repaired.stderr);
+    const repairedState = readInstallState(installRoot);
+    assert.equal(repairedState.version, "0.7.0-test.2");
+    assert.equal(repairedState.updateMode, "repair");
+    assert.equal(fs.readFileSync(taskDatabase, "utf8"), "persistent-task-history");
+    assert.equal(fs.readFileSync(sessionPreferences, "utf8"), '{"port":10888}');
+
+    const migratedRoot = path.join(sandbox, "migrated");
+    const migrated = runSetup(setupExecutable, migratedRoot, { migrateFrom: installRoot });
+    assert.equal(migrated.status, 0, migrated.stdout + migrated.stderr);
+    const migratedState = readInstallState(migratedRoot);
+    assert.equal(migratedState.version, "0.7.0-test.2");
+    assert.equal(migratedState.updateMode, "migration");
+    assert.equal(migratedState.chromeExtensionPath, path.join(installRoot, "Extension"));
+    assert.equal(
+      fs.readFileSync(path.join(migratedRoot, "NativeHost", "Gopeed", "storage", "gopeed.db"), "utf8"),
+      "persistent-task-history"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(migratedRoot, "NativeHost", "Gopeed", "storage", "session.json"), "utf8"),
+      '{"port":10888}'
+    );
+    assert.match(
+      fs.readFileSync(path.join(installRoot, "Extension", "runtime", "popup.js"), "utf8"),
+      /extension-only-update/
+    );
+    const migrationMarker = JSON.parse(
+      fs.readFileSync(path.join(installRoot, "migration-state.json"), "utf8")
+    );
+    assert.equal(migrationMarker.migratedTo, migratedRoot);
+    assert.ok(!fs.existsSync(path.join(installRoot, "NativeHost")));
+
+    fs.appendFileSync(
+      path.join(packageRoot, "extension", "runtime", "popup.js"),
+      "\n// post-migration-update\n",
+      "utf8"
+    );
+    const postMigrationUpdate = runSetup(setupExecutable, migratedRoot);
+    assert.equal(postMigrationUpdate.status, 0, postMigrationUpdate.stdout + postMigrationUpdate.stderr);
+    assert.match(
+      fs.readFileSync(path.join(migratedRoot, "Extension", "runtime", "popup.js"), "utf8"),
+      /post-migration-update/
+    );
+    assert.match(
+      fs.readFileSync(path.join(installRoot, "Extension", "runtime", "popup.js"), "utf8"),
+      /post-migration-update/
+    );
+    assert.equal(
+      readInstallState(migratedRoot).chromeExtensionPath,
+      path.join(installRoot, "Extension")
+    );
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

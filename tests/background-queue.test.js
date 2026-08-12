@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fakeIndexedDb = require("fake-indexeddb");
 const { buildTaskIdentityLabels } = require("../gopeed.js");
+const { makeFolderJobKey } = require("../queue.js");
 
 function installFakeIndexedDb() {
   const names = [
@@ -52,6 +53,7 @@ function createHarness(initial = {}, options = {}) {
   const pausedGopeedTasks = [];
   const continuedGopeedTasks = [];
   const sentTabMessages = [];
+  const nativeMessages = [];
   const actionState = {};
   const storageAccessState = {};
 
@@ -61,7 +63,9 @@ function createHarness(initial = {}, options = {}) {
     if (files.includes("gopeed.js")) {
       global.PopoGopeed = {
         ...require("../gopeed.js"),
-        ...(options.gopeedConfig ? {
+        ...(options.getGopeedConfig ? {
+          getConfig: options.getGopeedConfig
+        } : options.gopeedConfig ? {
           async getConfig() { return structuredClone(options.gopeedConfig); }
         } : {}),
         ...(options.gopeedTasks ? {
@@ -95,7 +99,16 @@ function createHarness(initial = {}, options = {}) {
       async setTitle({ title }) { actionState.title = title; }
     },
     alarms: { create() {}, onAlarm: eventStub() },
-    runtime: { onInstalled: eventStub(), onMessage: eventStub(), onStartup: eventStub() },
+    runtime: {
+      onInstalled: eventStub(),
+      onMessage: eventStub(),
+      onStartup: eventStub(),
+      async sendNativeMessage(host, message) {
+        nativeMessages.push({ host, message: structuredClone(message) });
+        if (options.sendNativeMessage) return options.sendNativeMessage(host, message);
+        throw new Error("未配置本机助手响应");
+      }
+    },
     storage: {
       local: {
         async setAccessLevel({ accessLevel }) {
@@ -114,8 +127,11 @@ function createHarness(initial = {}, options = {}) {
     tabs: {
       onRemoved: eventStub(),
       onUpdated: eventStub(),
-      async sendMessage(tabId, message, options) {
-        sentTabMessages.push({ tabId, message: structuredClone(message), options: structuredClone(options) });
+      async sendMessage(tabId, message, sendOptions) {
+        sentTabMessages.push({ tabId, message: structuredClone(message), options: structuredClone(sendOptions) });
+        if (options.sendTabMessage) {
+          return options.sendTabMessage(tabId, message, sendOptions);
+        }
         return { ok: true };
       },
       async get() { return null; },
@@ -146,6 +162,7 @@ function createHarness(initial = {}, options = {}) {
     continuedGopeedTasks,
     deletedGopeedTasks,
     fireAlarm,
+    nativeMessages,
     pausedGopeedTasks,
     send,
     sentTabMessages,
@@ -367,6 +384,447 @@ test("三个母文件夹可按点击顺序入队且重复点击不会新增任�
   }
 });
 
+test("一键下载核对完整页面后把每个文件夹分别加入持久化队列", async () => {
+  const base = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const harness = createHarness({}, {
+    async sendTabMessage(_tabId, message) {
+      if (message.type !== "SCAN_DIRECTORY") return { ok: true };
+      assert.equal(message.hiddenFrame, true);
+      assert.equal(message.preserveScroll, undefined);
+      return {
+        ok: true,
+        result: {
+          url: base,
+          directoryName: "整页素材",
+          diagnostics: { expectedItemCount: 3 },
+          items: [
+            { type: "folder", name: "子文件夹 A", itemIndex: "1" },
+            { type: "folder", name: "子文件夹 B", itemIndex: "2" },
+            { type: "file", name: "说明.txt", itemIndex: "3" }
+          ]
+        }
+      };
+    }
+  });
+  try {
+    const response = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: base,
+      pageName: "整页素材"
+    });
+    const duplicate = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: `${base}#preview`,
+      pageName: "整页素材"
+    });
+    const coveredFolder = await harness.send({
+      type: "START_FOLDER_SCAN",
+      parentUrl: base,
+      folderName: "子文件夹 A",
+      folderItemIndex: "1"
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.needsWorker, true);
+    assert.equal(response.addedCount, 2);
+    assert.equal(response.folderCount, 2);
+    assert.equal(response.countVerified, true);
+    assert.match(response.batchId, /^batch-/);
+    assert.equal(duplicate.addedCount, 0);
+    assert.equal(duplicate.duplicateCount, 2);
+    assert.equal(duplicate.batchId, response.batchId);
+    assert.equal(coveredFolder.duplicate, true);
+    assert.equal(coveredFolder.job.id, response.jobs[0].id);
+    assert.equal(harness.stored.popoState.jobs.length, 2);
+    assert.equal(harness.stored.popoState.mode, "waiting_worker");
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.folderName), [
+      "子文件夹 A",
+      "子文件夹 B"
+    ]);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.status), [
+      "waiting_worker",
+      "queued"
+    ]);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.batchId), [
+      response.batchId,
+      response.batchId
+    ]);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.batchPaused), [false, false]);
+    assert.deepEqual(harness.stored.popoState.resolveQueue, [{
+      key: response.jobs[0].key,
+      parentUrl: base,
+      parentPath: [],
+      name: "子文件夹 A",
+      itemIndex: "1"
+    }]);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载批次可整体暂停继续和移除且不误伤单独任务", async () => {
+  const base = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const harness = createHarness({}, {
+    async sendTabMessage(_tabId, message) {
+      if (message.type !== "SCAN_DIRECTORY") return { ok: true };
+      return {
+        ok: true,
+        result: {
+          url: base,
+          directoryName: "整页素材",
+          diagnostics: { expectedItemCount: 3 },
+          items: [
+            { type: "folder", name: "优先单独下载", itemIndex: "1" },
+            { type: "folder", name: "批次文件夹 A", itemIndex: "2" },
+            { type: "folder", name: "批次文件夹 B", itemIndex: "3" }
+          ]
+        }
+      };
+    }
+  });
+  try {
+    const single = await harness.send({
+      type: "START_FOLDER_SCAN",
+      parentUrl: base,
+      folderName: "优先单独下载",
+      folderItemIndex: "1"
+    });
+    const batch = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: base,
+      pageName: "整页素材"
+    });
+
+    const paused = await harness.send({
+      type: "PAUSE_DOWNLOAD_BATCH",
+      batchId: batch.batchId
+    });
+    assert.equal(paused.ok, true);
+    assert.equal(harness.stored.popoState.activeJobId, single.job.id);
+    assert.equal(harness.stored.popoState.jobs[0].status, "waiting_worker");
+    assert.deepEqual(
+      harness.stored.popoState.jobs.slice(1).map((job) => job.batchPaused),
+      [true, true]
+    );
+
+    await harness.send({ type: "CANCEL_JOB", jobId: single.job.id });
+    assert.equal(harness.stored.popoState.activeJobId, null);
+    assert.equal(harness.stored.popoState.mode, "idle");
+
+    const resumed = await harness.send({
+      type: "RESUME_DOWNLOAD_BATCH",
+      batchId: batch.batchId
+    });
+    assert.equal(resumed.ok, true);
+    assert.equal(harness.stored.popoState.activeJobId, batch.jobs[0].id);
+    assert.equal(harness.stored.popoState.jobs.find((job) => job.id === batch.jobs[0].id).status, "waiting_worker");
+    assert.deepEqual(
+      harness.stored.popoState.jobs.filter((job) => job.batchId === batch.batchId)
+        .map((job) => job.batchPaused),
+      [false, false]
+    );
+
+    const removed = await harness.send({
+      type: "REMOVE_DOWNLOAD_BATCH",
+      batchId: batch.batchId
+    });
+    assert.equal(removed.ok, true);
+    assert.equal(removed.removedCount, 2);
+    assert.equal(harness.stored.popoState.jobs.some((job) => job.batchId === batch.batchId), false);
+    assert.equal(harness.stored.popoState.activeJobId, null);
+    assert.equal(harness.stored.popoState.mode, "idle");
+    assert.deepEqual(harness.deletedGopeedTasks, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载批次暂停会同步暂停当前 Gopeed 任务并可整体继续", async () => {
+  const state = transferState({ mode: "downloading", jobStatus: "downloading" });
+  state.jobs[0].batchId = "batch-active";
+  state.jobs[0].batchParentUrl = state.jobs[0].parentUrl;
+  state.jobs[0].batchPaused = false;
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async getGopeedTask() {
+        return { status: "pause", progress: { downloaded: 1024, speed: 0 } };
+      }
+    }
+  );
+  try {
+    const paused = await harness.send({
+      type: "PAUSE_DOWNLOAD_BATCH",
+      batchId: "batch-active"
+    });
+    assert.equal(paused.ok, true);
+    assert.equal(paused.state.mode, "paused");
+    assert.equal(paused.state.jobs[0].batchPaused, true);
+    assert.deepEqual(harness.pausedGopeedTasks, ["task-active"]);
+
+    const resumed = await harness.send({
+      type: "RESUME_DOWNLOAD_BATCH",
+      batchId: "batch-active"
+    });
+    assert.equal(resumed.ok, true);
+    assert.equal(resumed.state.mode, "downloading");
+    assert.equal(resumed.state.jobs[0].batchPaused, false);
+    assert.deepEqual(harness.continuedGopeedTasks, ["task-active"]);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载批次整体移除会保留已经交给 Gopeed 的文件", async () => {
+  const state = transferState({ mode: "downloading", jobStatus: "downloading", includePending: true });
+  state.jobs[0].batchId = "batch-remove-active";
+  state.jobs[0].batchParentUrl = state.jobs[0].parentUrl;
+  state.jobs[0].batchPaused = false;
+  state.jobs.push({
+    id: "job-batch-queued",
+    key: "key-batch-queued",
+    sourceTabId: 7,
+    folderName: "后续文件夹",
+    folderItemIndex: "2",
+    parentUrl: state.rootUrl,
+    batchId: "batch-remove-active",
+    batchParentUrl: state.rootUrl,
+    batchPaused: false,
+    scope: "folder",
+    status: "queued",
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    counts: {}
+  });
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async getGopeedTask() {
+        return { status: "running", progress: { downloaded: 1024, speed: 1024 } };
+      }
+    }
+  );
+  try {
+    const removed = await harness.send({
+      type: "REMOVE_DOWNLOAD_BATCH",
+      batchId: "batch-remove-active"
+    });
+    assert.equal(removed.ok, true);
+    assert.equal(removed.removedCount, 2);
+    assert.equal(harness.stored.popoState.jobs.length, 0);
+    assert.equal(harness.stored.popoState.activeJobId, null);
+    assert.deepEqual(harness.deletedGopeedTasks, []);
+    assert.deepEqual(harness.pausedGopeedTasks, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载保留已有单项任务优先级并让其余文件夹依次排队", async () => {
+  const base = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const harness = createHarness({}, {
+    async sendTabMessage(_tabId, message) {
+      if (message.type !== "SCAN_DIRECTORY") return { ok: true };
+      return {
+        ok: true,
+        result: {
+          url: base,
+          directoryName: "整页素材",
+          diagnostics: { expectedItemCount: 3 },
+          items: [
+            { type: "folder", name: "优先单独下载", itemIndex: "3" },
+            { type: "folder", name: "后续文件夹 A", itemIndex: "4" },
+            { type: "folder", name: "后续文件夹 B", itemIndex: "5" }
+          ]
+        }
+      };
+    }
+  });
+  try {
+    const folder = await harness.send({
+      type: "START_FOLDER_SCAN",
+      parentUrl: base,
+      folderName: "优先单独下载",
+      folderItemIndex: "3"
+    });
+    const page = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: base,
+      pageName: "整页素材"
+    });
+
+    assert.equal(page.addedCount, 2);
+    assert.equal(page.duplicateCount, 1);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.scope), ["folder", "folder", "folder"]);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.folderName), [
+      "优先单独下载",
+      "后续文件夹 A",
+      "后续文件夹 B"
+    ]);
+
+    await harness.send({ type: "CANCEL_JOB", jobId: folder.job.id });
+    const state = harness.stored.popoState;
+    assert.equal(state.activeJobId, page.jobs[0].id);
+    assert.equal(state.jobs.find((job) => job.id === page.jobs[0].id).status, "waiting_worker");
+    assert.deepEqual(state.scanQueue, []);
+    assert.equal(state.resolveQueue[0].name, "后续文件夹 A");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载跳过已有绿色完整性凭证且单独点击可重新下载", async () => {
+  const base = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const completedKey = makeFolderJobKey({
+    parentUrl: base,
+    folderItemIndex: "1",
+    folderName: "已下载文件夹"
+  });
+  const now = new Date().toISOString();
+  const harness = createHarness({
+    popoState: {
+      version: 4,
+      runToken: "run-receipt",
+      jobs: [],
+      folderReceipts: [{
+        key: completedKey,
+        parentUrl: base,
+        folderItemIndex: "1",
+        folderName: "已下载文件夹",
+        completedAt: now,
+        counts: { files: 6, discoveredFiles: 6, success: 6 }
+      }],
+      activeJobId: null,
+      mode: "idle"
+    }
+  }, {
+    async sendTabMessage(_tabId, message) {
+      if (message.type !== "SCAN_DIRECTORY") return { ok: true };
+      return {
+        ok: true,
+        result: {
+          url: base,
+          directoryName: "整页素材",
+          diagnostics: { expectedItemCount: 2 },
+          items: [
+            { type: "folder", name: "已下载文件夹", itemIndex: "1" },
+            { type: "folder", name: "待下载文件夹", itemIndex: "2" }
+          ]
+        }
+      };
+    }
+  });
+  try {
+    const page = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: base,
+      pageName: "整页素材"
+    });
+    assert.equal(page.addedCount, 1);
+    assert.equal(page.completedCount, 1);
+    assert.equal(page.jobs[0].folderName, "待下载文件夹");
+    assert.equal(page.state.folderReceipts[0].key, completedKey);
+
+    const single = await harness.send({
+      type: "START_FOLDER_SCAN",
+      parentUrl: base,
+      folderName: "已下载文件夹",
+      folderItemIndex: "1"
+    });
+    assert.equal(single.duplicate, false);
+    assert.equal(harness.stored.popoState.folderReceipts.length, 0);
+    assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.folderName), [
+      "待下载文件夹",
+      "已下载文件夹"
+    ]);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("一键下载无法核对页面总数时不会建立不完整队列", async () => {
+  const base = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const harness = createHarness({}, {
+    async sendTabMessage(_tabId, message) {
+      if (message.type !== "SCAN_DIRECTORY") return { ok: true };
+      return {
+        ok: true,
+        result: {
+          url: base,
+          directoryName: "整页素材",
+          diagnostics: { expectedItemCount: null },
+          items: [{ type: "folder", name: "无法闭环", itemIndex: "1" }]
+        }
+      };
+    }
+  });
+  try {
+    const response = await harness.send({
+      type: "START_PAGE_DOWNLOAD",
+      parentUrl: base,
+      pageName: "整页素材"
+    });
+    assert.equal(response.ok, false);
+    assert.match(response.error, /防止漏掉文件夹/);
+    assert.equal(harness.stored.popoState, undefined);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("单独文件夹全部成功且数量闭环后写入持久化绿色凭证", async () => {
+  const state = transferState();
+  const job = state.jobs[0];
+  job.key = makeFolderJobKey({
+    parentUrl: job.parentUrl,
+    folderItemIndex: job.folderItemIndex,
+    folderName: job.folderName
+  });
+  job.scope = "folder";
+  state.items = [{
+    id: "completed-file",
+    parentUrl: job.parentUrl,
+    name: "completed.psd",
+    selected: true,
+    status: "success",
+    attempts: 1,
+    gopeedTaskId: "task-completed"
+  }];
+  state.activeTransfers = [];
+  state.activeItemId = null;
+  state.preparingItemId = null;
+  state.scanQueue = [];
+  state.resolveQueue = [];
+  state.scanFailures = [];
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    { gopeedConfig: { downloadDir: "D:\\Downloads" } }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.activeJobId == null);
+    assert.equal(harness.stored.popoState.jobs[0].status, "complete");
+    assert.equal(harness.stored.popoState.folderReceipts.length, 1);
+    assert.equal(harness.stored.popoState.folderReceipts[0].key, job.key);
+    assert.deepEqual(harness.stored.popoState.folderReceipts[0].counts, {
+      files: 1,
+      discoveredFiles: 1,
+      folders: 0,
+      success: 1,
+      failed: 0,
+      cancelled: 0,
+      scanFailures: 0,
+      verifiedDirectories: 0,
+      unverifiedDirectories: 0
+    });
+    const snapshot = await harness.send({ type: "GET_STATE" });
+    assert.equal(snapshot.state.jobs.length, 0);
+    assert.equal(snapshot.state.folderReceipts[0].folderName, job.folderName);
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test("旧版本保存过的筛选不会跳过文件夹中的其他格式", async () => {
   const harness = createHarness({
     popoSettings: {
@@ -403,7 +861,7 @@ test("旧版本保存过的筛选不会跳过文件夹中的其他格式", async
   }
 });
 
-test("并行下载数可在 1 到 5 之间持久化并立即更新运行状态", async () => {
+test("空闲时并行下载数可在 1 到 5 之间持久化", async () => {
   const harness = createHarness({ popoSettings: { concurrency: 5 } });
   try {
     const response = await harness.send({
@@ -423,6 +881,113 @@ test("并行下载数可在 1 到 5 之间持久化并立即更新运行状态",
 
     const snapshot = await harness.send({ type: "GET_STATE" });
     assert.equal(snapshot.settings.concurrency, 2);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("任务运行或暂停时拒绝调整并行下载数", async () => {
+  for (const mode of ["downloading", "paused"]) {
+    const state = transferState({ mode, jobStatus: mode });
+    const harness = createHarness({
+      popoSettings: state.settings,
+      popoState: state
+    });
+    try {
+      const response = await harness.send({
+        type: "SET_DOWNLOAD_CONCURRENCY",
+        concurrency: 4
+      });
+      assert.equal(response.ok, false);
+      assert.match(response.error, /任务进行或暂停时不能调整并行下载数/);
+      assert.equal(harness.stored.popoSettings.concurrency, 1);
+      assert.equal(harness.stored.popoState.settings.concurrency, 1);
+
+      const legacyResponse = await harness.send({
+        type: "SAVE_SETTINGS",
+        settings: { ...state.settings, concurrency: 4 }
+      });
+      assert.equal(legacyResponse.ok, false);
+      assert.match(legacyResponse.error, /任务进行或暂停时不能调整并行下载数/);
+      assert.equal(harness.stored.popoSettings.concurrency, 1);
+      assert.equal(harness.stored.popoState.settings.concurrency, 1);
+    } finally {
+      harness.cleanup();
+    }
+  }
+});
+
+test("一键下载当前文件夹有未完成项时暂停剩余批次", async () => {
+  const state = transferState();
+  const current = state.jobs[0];
+  current.batchId = "batch-incomplete";
+  current.batchParentUrl = current.parentUrl;
+  current.scope = "folder";
+  state.jobs.push({
+    id: "job-next-folder",
+    key: "key-next-folder",
+    sourceTabId: 7,
+    folderName: "第二个文件夹",
+    folderItemIndex: "2",
+    parentUrl: current.parentUrl,
+    scope: "folder",
+    batchId: current.batchId,
+    batchParentUrl: current.parentUrl,
+    batchPaused: false,
+    status: "queued",
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    counts: {}
+  });
+  state.items = [
+    {
+      id: "failed-file-1",
+      parentUrl: current.parentUrl,
+      name: "未完成-1.psd",
+      selected: true,
+      status: "failed",
+      attempts: 3
+    },
+    {
+      id: "failed-file-2",
+      parentUrl: current.parentUrl,
+      name: "未完成-2.psd",
+      selected: true,
+      status: "failed",
+      attempts: 3
+    }
+  ];
+  state.activeTransfers = [];
+  state.activeItemId = null;
+  state.preparingItemId = null;
+  state.scanQueue = [];
+  state.resolveQueue = [];
+  state.scanFailures = [];
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    { gopeedConfig: { downloadDir: "D:\\Downloads" } }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.activeJobId == null);
+    const stored = harness.stored.popoState;
+    const failedJob = stored.jobs.find((job) => job.id === current.id);
+    const queuedJob = stored.jobs.find((job) => job.id === "job-next-folder");
+    assert.equal(failedJob.status, "failed");
+    assert.equal(failedJob.counts.failed, 2);
+    assert.equal(queuedJob.status, "queued");
+    assert.equal(queuedJob.batchPaused, true);
+    assert.equal(stored.folderReceipts.length, 0);
+    assert.ok(stored.logs.some((entry) =>
+      entry.code === "DOWNLOAD_BATCH_PAUSED_AFTER_INCOMPLETE_FOLDER"
+    ));
+
+    const resumed = await harness.send({
+      type: "RESUME_DOWNLOAD_BATCH",
+      batchId: current.batchId
+    });
+    assert.equal(resumed.ok, true);
+    assert.equal(harness.stored.popoState.activeJobId, "job-next-folder");
   } finally {
     harness.cleanup();
   }
@@ -602,6 +1167,10 @@ test("服务工作线程中断后按稳定标签重新挂接已创建的 Gopeed 
       itemId,
       taskId: "task-reconciled",
       pollFailures: 0,
+      lastObservedStatus: "active",
+      resumeAfterReconnect: false,
+      restartResumeFailures: 0,
+      externalPaused: false,
       startedAt: now,
       reconciledAt: harness.stored.popoState.activeTransfers[0].reconciledAt
     }]);
@@ -1588,6 +2157,145 @@ test("手动暂停和继续 Gopeed 任务时项目保持运行并持续对账", 
     assert.ok(harness.stored.popoState.logs.some((entry) =>
       entry.code === "GOPEED_TASK_RESUMED_EXTERNALLY"
     ));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("Gopeed 关闭并自动重启后只恢复断线前正在运行的 POPO 任务", async () => {
+  const state = transferState({ includePending: true });
+  state.settings = {
+    ...state.settings,
+    concurrency: 2,
+    gopeedEndpoint: "http://127.0.0.1:9999"
+  };
+  state.items[1] = {
+    ...state.items[1],
+    id: "manual-paused-file",
+    name: "manual-paused.mp4",
+    status: "paused",
+    stage: "已在 Gopeed 暂停",
+    attempts: 1,
+    gopeedTaskId: "task-manual-paused"
+  };
+  state.activeTransfers[0].lastObservedStatus = "active";
+  state.activeTransfers.push({
+    itemId: "manual-paused-file",
+    taskId: "task-manual-paused",
+    pollFailures: 0,
+    lastObservedStatus: "paused",
+    externalPaused: true
+  });
+  let gopeedRestarted = false;
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async getGopeedTask() {
+        if (!gopeedRestarted) throw new Error("连接被拒绝");
+        return { status: "pause", progress: { downloaded: 1024, speed: 0 } };
+      },
+      async getGopeedConfig(settings) {
+        if (settings.gopeedEndpoint.endsWith(":9999")) throw new Error("连接被拒绝");
+        return { downloadDir: "D:\\Downloads" };
+      },
+      async sendNativeMessage(_host, message) {
+        assert.deepEqual(message, { action: "ensure_gopeed" });
+        gopeedRestarted = true;
+        return { ok: true, endpoint: "http://127.0.0.1:32123" };
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.logs?.some((entry) =>
+      entry.code === "GOPEED_RESTART_RECOVERY_COMPLETED"
+    ));
+    assert.deepEqual(harness.continuedGopeedTasks, ["task-active"]);
+    assert.equal(harness.stored.popoState.mode, "downloading");
+    assert.equal(harness.stored.popoState.gopeedRecoveryPending, false);
+    assert.equal(harness.stored.popoState.settings.gopeedEndpoint, "http://127.0.0.1:32123");
+    const storedItems = harness.stored["popoItems:job-gopeed-control:0"];
+    assert.equal(storedItems.find((item) => item.id === "active-file").status, "transferring");
+    assert.equal(storedItems.find((item) => item.id === "manual-paused-file").status, "paused");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("Gopeed 重启时原本手动暂停的任务保持暂停且网页状态收敛", async () => {
+  const state = transferState();
+  state.settings = { ...state.settings, gopeedEndpoint: "http://127.0.0.1:9999" };
+  state.items[0].status = "paused";
+  state.items[0].stage = "已在 Gopeed 暂停";
+  state.activeTransfers[0].lastObservedStatus = "paused";
+  state.activeTransfers[0].externalPaused = true;
+  let gopeedRestarted = false;
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async getGopeedTask() {
+        if (!gopeedRestarted) throw new Error("连接被拒绝");
+        return { status: "pause", progress: { downloaded: 1024, speed: 0 } };
+      },
+      async getGopeedConfig(settings) {
+        if (settings.gopeedEndpoint.endsWith(":9999")) throw new Error("连接被拒绝");
+        return { downloadDir: "D:\\Downloads" };
+      },
+      async sendNativeMessage() {
+        gopeedRestarted = true;
+        return { ok: true, endpoint: "http://127.0.0.1:32123" };
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.mode === "paused");
+    assert.deepEqual(harness.continuedGopeedTasks, []);
+    assert.equal(harness.stored.popoState.pauseOrigin, "gopeed_restart");
+    assert.equal(harness.stored.popoState.pauseResumeMode, "downloading");
+    assert.ok(harness.stored.popoState.logs.some((entry) =>
+      entry.code === "GOPEED_RESTART_RECOVERY_BLOCKED"
+    ));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("Gopeed 重启后连续恢复失败会暂停项目并提供继续入口", async () => {
+  const state = transferState();
+  state.settings = { ...state.settings, gopeedEndpoint: "http://127.0.0.1:9999" };
+  state.activeTransfers[0].lastObservedStatus = "active";
+  let gopeedRestarted = false;
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async getGopeedTask() {
+        if (!gopeedRestarted) throw new Error("连接被拒绝");
+        return { status: "pause", progress: { downloaded: 1024, speed: 0 } };
+      },
+      async getGopeedConfig(settings) {
+        if (settings.gopeedEndpoint.endsWith(":9999")) throw new Error("连接被拒绝");
+        return { downloadDir: "D:\\Downloads" };
+      },
+      async sendNativeMessage() {
+        gopeedRestarted = true;
+        return { ok: true, endpoint: "http://127.0.0.1:32123" };
+      },
+      async continueGopeedTask() {
+        throw new Error("任务尚未准备好");
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.activeTransfers?.[0]?.restartResumeFailures === 1);
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.activeTransfers?.[0]?.restartResumeFailures === 2);
+    harness.fireAlarm("popo-stable-downloader-pump");
+    await waitUntil(() => harness.stored.popoState?.mode === "paused");
+    assert.equal(harness.stored.popoState.phase, "gopeed_recovery_blocked");
+    assert.equal(harness.stored.popoState.pauseOrigin, "gopeed_restart");
+    assert.equal(harness.stored["popoItems:job-gopeed-control:0"][0].status, "paused");
   } finally {
     harness.cleanup();
   }

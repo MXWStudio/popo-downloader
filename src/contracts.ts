@@ -60,6 +60,14 @@ const JobCommandSchema = z.union([
     type: z.literal("RESTORE_CANCELLED_JOB"),
     jobId: z.string().min(1).max(200),
     sourceTabId: z.number().int().nonnegative().optional()
+  }),
+  z.strictObject({
+    type: z.enum([
+      "PAUSE_DOWNLOAD_BATCH",
+      "RESUME_DOWNLOAD_BATCH",
+      "REMOVE_DOWNLOAD_BATCH"
+    ]),
+    batchId: z.string().min(1).max(200)
   })
 ]);
 
@@ -90,6 +98,11 @@ export const RuntimeCommandSchema = z.union([
     type: z.literal("START_FOLDER_SCAN"),
     folderName: z.string().min(1).max(1024),
     folderItemIndex: z.string().min(1).max(200),
+    parentUrl: z.url({ protocol: /^https$/, hostname: /^docs\.popo\.netease\.com$/ })
+  }),
+  z.strictObject({
+    type: z.literal("START_PAGE_DOWNLOAD"),
+    pageName: z.string().min(1).max(1024),
     parentUrl: z.url({ protocol: /^https$/, hostname: /^docs\.popo\.netease\.com$/ })
   }),
   z.strictObject({
@@ -138,6 +151,9 @@ export const GopeedTaskIdSchema = z.string().min(1).max(512);
 
 export const QueueJobSchema = z.looseObject({
   id: z.string().min(1).max(200),
+  batchId: z.string().min(1).max(200).optional(),
+  batchParentUrl: z.string().max(4096).optional(),
+  batchPaused: z.boolean().optional(),
   status: JobStatusSchema,
   createdAt: z.string().max(100).optional(),
   updatedAt: z.string().max(100).optional(),

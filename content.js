@@ -16,6 +16,10 @@
   const STATUS_ID = "popo-stable-download-status";
   const QUEUE_PANEL_ID = "popo-stable-download-queue";
   const WORKER_FRAME_ID = "popo-stable-download-worker-frame";
+  const PAGE_SCAN_FRAME_ID = "popo-stable-page-scan-frame";
+  const PAGE_SCAN_FRAME_NAME_PREFIX = "popo-stable-page-scan:";
+  const PAGE_SCAN_REQUEST_SOURCE = "popo-stable-page-scan-request";
+  const PAGE_SCAN_RESPONSE_SOURCE = "popo-stable-page-scan-response";
   const ENSURE_WORKER_EVENT = "popo-stable-download:ensure-worker";
   const EXTENSION_NODE_SELECTOR = [
     `#${STYLE_ID}`,
@@ -23,9 +27,12 @@
     `#${STATUS_ID}`,
     `#${QUEUE_PANEL_ID}`,
     `#${WORKER_FRAME_ID}`,
+    `#${PAGE_SCAN_FRAME_ID}`,
     `.${BUTTON_CLASS}`
   ].join(",");
   const IS_TOP_FRAME = window.top === window;
+  const IS_PAGE_SCAN_FRAME = !IS_TOP_FRAME &&
+    window.name.startsWith(PAGE_SCAN_FRAME_NAME_PREFIX);
   const { inferVirtualListItemCount, selectVirtualListMatch } = globalThis.PopoCore;
   const { isJobActive, makeFolderJobKey } = globalThis.PopoQueue;
   let latestQueueState = null;
@@ -35,6 +42,7 @@
   let projectCountCandidateRounds = 0;
   let projectCountCandidateSince = 0;
   let workerRecoveryRequestedAt = 0;
+  const handledPageScanRequests = new Set();
 
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1185,6 +1193,80 @@
     };
   }
 
+  async function scanDirectoryPreservingScroll(timeoutMs) {
+    const initialScroller = await waitForDirectory(timeoutMs);
+    const initialScrollTop = initialScroller?.scrollTop || 0;
+    try {
+      return await scanDirectory(timeoutMs);
+    } finally {
+      const currentScroller = currentDirectoryScroller() || initialScroller;
+      if (currentScroller?.isConnected) {
+        moveScroller(currentScroller, Math.max(0, initialScrollTop));
+        await delay(120);
+      }
+    }
+  }
+
+  function scanDirectoryInHiddenFrame(timeoutMs) {
+    if (!IS_TOP_FRAME) throw new Error("只有顶层页面可以创建独立核对工作区");
+    document.getElementById(PAGE_SCAN_FRAME_ID)?.remove();
+    const requestId = crypto.randomUUID();
+    const frame = document.createElement("iframe");
+    frame.id = PAGE_SCAN_FRAME_ID;
+    frame.name = `${PAGE_SCAN_FRAME_NAME_PREFIX}${requestId}`;
+    frame.src = location.href;
+    frame.title = "POPO 一键下载独立核对工作区";
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.cssText = [
+      "position:fixed",
+      "left:-20000px",
+      "top:0",
+      "width:1280px",
+      "height:900px",
+      "border:0",
+      "opacity:0",
+      "pointer-events:none",
+      "z-index:-1"
+    ].join(";");
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timeout;
+      let retry;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        clearInterval(retry);
+        window.removeEventListener("message", onMessage);
+        frame.remove();
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const dispatch = () => {
+        frame.contentWindow?.postMessage({
+          source: PAGE_SCAN_REQUEST_SOURCE,
+          requestId,
+          timeoutMs
+        }, location.origin);
+      };
+      const onMessage = (event) => {
+        if (event.origin !== location.origin || event.source !== frame.contentWindow) return;
+        if (event.data?.source !== PAGE_SCAN_RESPONSE_SOURCE ||
+            event.data?.requestId !== requestId) return;
+        if (event.data.ok) finish(null, event.data.result);
+        else finish(new Error(event.data.error || "独立核对工作区读取失败"));
+      };
+      timeout = setTimeout(() => {
+        finish(new Error("独立核对工作区加载超时"));
+      }, Math.max(5000, Number(timeoutMs) || 0) + 10000);
+      retry = setInterval(dispatch, 250);
+      window.addEventListener("message", onMessage);
+      frame.addEventListener("load", dispatch, { once: true });
+      document.documentElement.appendChild(frame);
+    });
+  }
+
   async function findItem(name, expectedType, itemIndex, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     let scroller = await waitForDirectory(timeoutMs);
@@ -1394,7 +1476,14 @@
         case "PING":
           return { ok: true, url: location.href, result: { url: location.href } };
         case "SCAN_DIRECTORY":
-          return { ok: true, result: await scanDirectory(message.timeoutMs) };
+          return {
+            ok: true,
+            result: await (message.hiddenFrame && IS_TOP_FRAME
+              ? scanDirectoryInHiddenFrame(message.timeoutMs)
+              : message.preserveScroll
+                ? scanDirectoryPreservingScroll(message.timeoutMs)
+                : scanDirectory(message.timeoutMs))
+          };
         case "OPEN_ITEM":
           return {
             ok: true,
@@ -1456,9 +1545,37 @@
     startQueueStatePolling();
     void restoreSourcePageSession();
   } else {
-    void chrome.runtime.sendMessage({
-      type: "REGISTER_WORKER_FRAME",
-      url: location.href
-    }).catch(() => {});
+    if (!IS_PAGE_SCAN_FRAME) {
+      void chrome.runtime.sendMessage({
+        type: "REGISTER_WORKER_FRAME",
+        url: location.href
+      }).catch(() => {});
+    }
+  }
+
+  if (IS_PAGE_SCAN_FRAME) {
+    window.addEventListener("message", (event) => {
+      if (event.origin !== location.origin || event.source !== window.parent) return;
+      if (event.data?.source !== PAGE_SCAN_REQUEST_SOURCE) return;
+      const requestId = String(event.data.requestId || "");
+      if (!requestId || window.name !== `${PAGE_SCAN_FRAME_NAME_PREFIX}${requestId}`) return;
+      if (handledPageScanRequests.has(requestId)) return;
+      handledPageScanRequests.add(requestId);
+      void scanDirectory(event.data.timeoutMs).then((result) => {
+        window.parent.postMessage({
+          source: PAGE_SCAN_RESPONSE_SOURCE,
+          requestId,
+          ok: true,
+          result
+        }, location.origin);
+      }).catch((error) => {
+        window.parent.postMessage({
+          source: PAGE_SCAN_RESPONSE_SOURCE,
+          requestId,
+          ok: false,
+          error: String(error).replace(/^Error:\s*/, "")
+        }, location.origin);
+      });
+    });
   }
 })();

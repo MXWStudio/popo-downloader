@@ -197,6 +197,11 @@
     "DISMISS_JOB",
     "RESTORE_CANCELLED_JOB"
   ]);
+  const BATCH_RUNTIME_COMMANDS = new Set([
+    "PAUSE_DOWNLOAD_BATCH",
+    "RESUME_DOWNLOAD_BATCH",
+    "REMOVE_DOWNLOAD_BATCH"
+  ]);
   const SETTINGS_STRING_LIMITS = Object.freeze({
     formats: 4096,
     includeKeywords: 4096,
@@ -338,6 +343,11 @@
       return command;
     }
 
+    if (BATCH_RUNTIME_COMMANDS.has(type)) {
+      command.batchId = boundedMessageString(message.batchId, "batchId", 200);
+      return command;
+    }
+
     switch (type) {
       case "SAVE_GOPEED_SETTINGS":
         return {
@@ -386,6 +396,12 @@
           folderItemIndex: boundedMessageString(message.folderItemIndex, "folderItemIndex", 200, {
             allowNumber: true
           }),
+          parentUrl: normalizePopoPageUrl(message.parentUrl, "parentUrl")
+        };
+      case "START_PAGE_DOWNLOAD":
+        return {
+          type,
+          pageName: boundedMessageString(message.pageName, "pageName", 1024),
           parentUrl: normalizePopoPageUrl(message.parentUrl, "parentUrl")
         };
       case "SOURCE_PAGE_READY":

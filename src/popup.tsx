@@ -432,6 +432,7 @@ function NetworkNoticeCard({
 function ServiceSettings({
   connection,
   settings,
+  concurrencyLocked,
   refreshGopeed,
   setConnection,
   setSettings,
@@ -439,6 +440,7 @@ function ServiceSettings({
 }: {
   connection: GopeedConnection | null;
   settings: GopeedSettings;
+  concurrencyLocked: boolean;
   refreshGopeed: (force?: boolean) => Promise<void>;
   setConnection: (connection: GopeedConnection) => void;
   setSettings: (settings: GopeedSettings) => void;
@@ -538,14 +540,17 @@ function ServiceSettings({
             <select
               id="downloadConcurrency"
               value={concurrency}
-              disabled={busy}
+              disabled={busy || concurrencyLocked}
+              title={concurrencyLocked ? "任务进行或暂停时不能调整并行下载数" : undefined}
               onChange={(event) => void saveConcurrency(Number(event.target.value))}
             >
               {[1, 2, 3, 4, 5].map((value) => (
                 <option key={value} value={value}>{value}</option>
               ))}
             </select>
-            <p>同时下载的文件数量，最高 5。降低后不会暂停已开始的任务。</p>
+            <p>{concurrencyLocked
+              ? "任务进行或暂停时保持当前并行数，全部结束后才可调整。"
+              : "同时下载的文件数量，最高 5。"}</p>
           </div>
           <div className="folder-picker-setting">
             <span>保存位置</span>
@@ -694,6 +699,7 @@ function PopupApp() {
       <ServiceSettings
         connection={connection}
         settings={settings}
+        concurrencyLocked={active.length > 0}
         refreshGopeed={refreshGopeed}
         setConnection={setConnection}
         setSettings={setSettings}

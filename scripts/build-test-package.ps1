@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+  [string]$OutputDirectory = ''
+)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
@@ -8,7 +10,11 @@ $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json'))
 $versionName = [string]$manifest.version_name
 if (-not $versionName) { throw 'manifest.json version_name is required.' }
 
-$distRoot = Join-Path $repoRoot 'dist'
+$distRoot = if ($OutputDirectory) {
+  [System.IO.Path]::GetFullPath($OutputDirectory)
+} else {
+  Join-Path $repoRoot 'dist'
+}
 $packageName = "POPO-Stable-Downloader-$versionName-win-x64"
 $stagingRoot = Join-Path $distRoot $packageName
 $zipPath = Join-Path $distRoot "$packageName.zip"
@@ -47,6 +53,7 @@ if ($LASTEXITCODE -ne 0) { throw 'The native host failed to compile.' }
 
 & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
   /reference:System.Windows.Forms.dll `
+  /reference:System.Drawing.dll `
   /reference:System.Web.Extensions.dll `
   /out:$setupExecutable $setupSource
 if ($LASTEXITCODE -ne 0) { throw 'The green setup assistant failed to compile.' }
@@ -185,7 +192,7 @@ $channelManifest = [ordered]@{
   sha256 = $hash
   size = $size
   signature = $signature
-  notes = 'First stable green release with signed COS updates, verified candidate installation, automatic rollback, Gopeed v1.9.3, and download concurrency 5.'
+  notes = 'Adds one-click batch controls, resilient task recovery, selectable install location, repair, and cross-drive migration.'
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(

@@ -146,6 +146,47 @@ test("网页行按钮用真实数量区分查找、空结果、遗漏和失败",
   );
 });
 
+test("一键下载批次在页面顶部和文件夹行共享暂停状态", () => {
+  const parentUrl = "https://docs.popo.netease.com/team/pc/team/pageDetail/folder";
+  const state = {
+    jobs: [{
+      id: "job-batch-a",
+      batchId: "batch-a",
+      batchParentUrl: parentUrl,
+      batchPaused: true,
+      status: "queued",
+      queuePosition: 0,
+      createdAt: "2026-08-11T10:00:00.000Z"
+    }, {
+      id: "job-batch-b",
+      batchId: "batch-a",
+      batchParentUrl: parentUrl,
+      batchPaused: true,
+      status: "queued",
+      queuePosition: 0,
+      createdAt: "2026-08-11T10:00:01.000Z"
+    }, {
+      id: "job-independent",
+      status: "waiting_worker",
+      parentUrl
+    }]
+  };
+
+  const batch = uiModel.findPageDownloadBatch(state, parentUrl + "#preview");
+  assert.equal(batch.id, "batch-a");
+  assert.equal(batch.paused, true);
+  assert.equal(batch.activeCount, 2);
+  assert.equal(batch.queuedCount, 2);
+  assert.deepEqual(uiModel.folderButtonDisplay(state.jobs[0]), {
+    visualState: "paused",
+    primary: "批次已暂停",
+    secondary: "",
+    progress: null,
+    indeterminate: false,
+    warningSegment: false
+  });
+});
+
 test("页面通知只在任务转为完成或失败时产生且初始历史保持静默", () => {
   const complete = {
     id: "job-complete",
@@ -294,4 +335,40 @@ test("虚拟列表项目数与行按钮使用相同稳定页面标识", () => {
     }).id,
     "job-folder"
   );
+});
+
+test("数量闭环凭证可让单项和一键任务持续显示绿色无遗漏反馈", () => {
+  const parentUrl = "https://docs.popo.netease.com/team/pc/team/pageDetail/folder";
+  const key = uiModel.makeFolderJobKey({
+    parentUrl,
+    folderItemIndex: "8",
+    folderName: "完整素材"
+  });
+  const receipt = {
+    key,
+    parentUrl,
+    folderItemIndex: "8",
+    folderName: "完整素材",
+    completedAt: "2026-08-11T10:00:00.000Z",
+    counts: { files: 12, discoveredFiles: 12, success: 12 }
+  };
+
+  assert.equal(uiModel.findMatchingFolderReceipt({ folderReceipts: [receipt] }, {
+    parentUrl,
+    itemIndex: "8",
+    name: "完整素材"
+  }), receipt);
+  assert.deepEqual(uiModel.folderButtonDisplay({
+    id: `receipt:${key}`,
+    status: "complete",
+    counts: receipt.counts,
+    verifiedCompletion: true
+  }), {
+    visualState: "success",
+    primary: "已下载 12 个",
+    secondary: "无遗漏",
+    progress: 100,
+    indeterminate: false,
+    warningSegment: false
+  });
 });

@@ -9,6 +9,7 @@ const {
   applyCancelPolicy,
   canTransitionJobStatus,
   clientVisibleJobs,
+  findCoveredFolderJob,
   findDuplicateJob,
   isJobActive,
   makeFolderJobKey,
@@ -137,6 +138,25 @@ test("同一 POPO 文件夹重复点击只匹配一个活动任务", () => {
   assert.equal(findDuplicateJob([{ id: "a", key, status: "complete" }], secondKey), null);
 });
 
+test("整页下载跳过已单独排队或完成的文件夹但保留失败重试", () => {
+  const input = {
+    parentUrl: "https://docs.popo.netease.com/team/pc/t1/pageDetail/p1",
+    folderItemIndex: "42",
+    folderName: "母文件 A"
+  };
+  const key = makeFolderJobKey(input);
+  const jobs = [
+    { id: "page", key: "page-key", status: "scanning" },
+    { id: "queued", key, status: "queued" },
+    { id: "done", key, status: "complete" },
+    { id: "failed", key, status: "failed" }
+  ];
+
+  assert.equal(findCoveredFolderJob(jobs, "page", input)?.id, "queued");
+  assert.equal(findCoveredFolderJob([jobs[0], jobs[2]], "page", input)?.id, "done");
+  assert.equal(findCoveredFolderJob([jobs[0], jobs[3]], "page", input), null);
+});
+
 test("取消只影响未开始文件并保留已交给 Gopeed 的文件", () => {
   const items = [
     { id: "pending", selected: true, status: "pending" },
@@ -173,9 +193,11 @@ test("万级文件统计保持准确且排队位置只计算等待任务", () =>
   const jobs = [
     { id: "active", status: "downloading" },
     { id: "b", status: "queued" },
+    { id: "paused-batch", status: "queued", batchPaused: true },
     { id: "done", status: "complete" },
     { id: "c", status: "queued" }
   ];
   assert.equal(queuePosition(jobs, "b"), 1);
+  assert.equal(queuePosition(jobs, "paused-batch"), 0);
   assert.equal(queuePosition(jobs, "c"), 2);
 });

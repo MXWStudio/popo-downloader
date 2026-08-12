@@ -18,6 +18,7 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
 
 export interface JobCounts {
   files?: number | undefined;
+  folders?: number | undefined;
   total?: number | undefined;
   discoveredFiles?: number | undefined;
   scanFailures?: number | undefined;
@@ -35,11 +36,15 @@ export interface JobCounts {
 export interface QueueJob {
   id: string;
   key?: string | undefined;
+  batchId?: string | undefined;
+  batchParentUrl?: string | undefined;
+  batchPaused?: boolean | undefined;
   status: JobStatus;
   folderName?: string | undefined;
   displayName?: string | undefined;
   folderItemIndex?: string | undefined;
   parentUrl?: string | undefined;
+  scope?: "folder" | "page" | undefined;
   queuePosition?: number | undefined;
   counts?: JobCounts | undefined;
   cancelRequested?: boolean | undefined;
@@ -49,10 +54,21 @@ export interface QueueJob {
   startedAt?: string | undefined;
   updatedAt?: string | undefined;
   completedAt?: string | undefined;
+  verifiedCompletion?: boolean | undefined;
+}
+
+export interface FolderCompletionReceipt {
+  key: string;
+  parentUrl: string;
+  folderItemIndex: string;
+  folderName: string;
+  completedAt: string;
+  counts?: JobCounts | undefined;
 }
 
 export interface QueueState {
   jobs?: QueueJob[] | undefined;
+  folderReceipts?: FolderCompletionReceipt[] | undefined;
   activeJobId?: string | null | undefined;
   mode?: JobStatus | "idle" | undefined;
   triggerMode?: string | undefined;
@@ -219,6 +235,14 @@ export interface FolderButtonDisplay {
   warningSegment: boolean;
 }
 
+export interface PageDownloadBatchSummary {
+  id: string;
+  jobs: QueueJob[];
+  paused: boolean;
+  activeCount: number;
+  queuedCount: number;
+}
+
 function countValue(value: unknown): number {
   return Math.max(0, Number(value) || 0);
 }
@@ -258,6 +282,18 @@ export function folderButtonDisplay(
   const scanIssueCount = scanFailures + unverifiedDirectories;
   const warningSegment = scanIssueCount > 0;
   const handedOff = countValue(counts.handedOff);
+
+  if (job.batchPaused && !jobIsTerminal(job)) {
+    const position = countValue(job.queuePosition);
+    return {
+      visualState: "paused",
+      primary: "批次已暂停",
+      secondary: job.status === "queued" && position ? `第 ${position}` : "",
+      progress: null,
+      indeterminate: false,
+      warningSegment: false
+    };
+  }
 
   if (job.status === "queued") {
     const position = countValue(job.queuePosition);
@@ -379,8 +415,8 @@ export function folderButtonDisplay(
     }
     return {
       visualState: "success",
-      primary: `已完成 ${success || total || discovered} 个`,
-      secondary: "",
+      primary: `${job.verifiedCompletion ? "已下载" : "已完成"} ${success || total || discovered} 个`,
+      secondary: job.verifiedCompletion ? "无遗漏" : "",
       progress: 100,
       indeterminate: false,
       warningSegment: false
@@ -471,6 +507,41 @@ function normalizeParentUrl(value: unknown): string {
   }
 }
 
+export function findPageDownloadBatch(
+  state: QueueState | null | undefined,
+  parentUrl: string
+): PageDownloadBatchSummary | null {
+  const normalizedParentUrl = normalizeParentUrl(parentUrl);
+  const groups = new Map<string, QueueJob[]>();
+  for (const job of state?.jobs || []) {
+    if (!job.batchId || !jobIsActive(job)) continue;
+    if (normalizeParentUrl(job.batchParentUrl || job.parentUrl) !== normalizedParentUrl) continue;
+    const group = groups.get(job.batchId) || [];
+    group.push(job);
+    groups.set(job.batchId, group);
+  }
+  const candidates = [...groups.entries()].map(([id, jobs]) => ({
+    id,
+    jobs,
+    createdAt: jobs.reduce(
+      (latest, job) => String(job.createdAt || "") > latest ? String(job.createdAt || "") : latest,
+      ""
+    )
+  }));
+  candidates.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const current = candidates[0];
+  if (!current) return null;
+  return {
+    id: current.id,
+    jobs: current.jobs,
+    paused: current.jobs.some((job) =>
+      Boolean(job.batchPaused) || ["paused", "draining_paused"].includes(job.status)
+    ),
+    activeCount: current.jobs.length,
+    queuedCount: current.jobs.filter((job) => job.status === "queued").length
+  };
+}
+
 export function makeFolderJobKey(input: {
   parentUrl: string;
   folderItemIndex: string;
@@ -498,6 +569,22 @@ export function findMatchingFolderJob(
       normalizeText(job.folderItemIndex) === normalizeText(item.itemIndex) &&
       normalizeText(job.folderName).toLocaleLowerCase() === normalizeText(item.name).toLocaleLowerCase()
     )
+  )) || null;
+}
+
+export function findMatchingFolderReceipt(
+  state: QueueState | null | undefined,
+  item: { parentUrl: string; itemIndex: string; name: string }
+): FolderCompletionReceipt | null {
+  const key = makeFolderJobKey({
+    parentUrl: item.parentUrl,
+    folderItemIndex: item.itemIndex,
+    folderName: item.name
+  });
+  return (state?.folderReceipts || []).find((receipt) => receipt.key === key || (
+    normalizeParentUrl(receipt.parentUrl) === normalizeParentUrl(item.parentUrl) &&
+    normalizeText(receipt.folderItemIndex) === normalizeText(item.itemIndex) &&
+    normalizeText(receipt.folderName).toLocaleLowerCase() === normalizeText(item.name).toLocaleLowerCase()
   )) || null;
 }
 

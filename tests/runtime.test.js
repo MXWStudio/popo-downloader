@@ -34,6 +34,33 @@ test("TypeScript + Zod 运行时契约拒绝未知命令和非法任务状态", 
     runtime.contracts.parseRuntimeCommand({ type: "GET_UPDATE_STATUS" }),
     { type: "GET_UPDATE_STATUS" }
   );
+  assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({
+      type: "REMOVE_DOWNLOAD_BATCH",
+      batchId: "batch-a"
+    }),
+    { type: "REMOVE_DOWNLOAD_BATCH", batchId: "batch-a" }
+  );
+  assert.throws(
+    () => runtime.contracts.parseRuntimeCommand({
+      type: "PAUSE_DOWNLOAD_BATCH",
+      batchId: "",
+      ignored: true
+    }),
+    /Invalid/
+  );
+  assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({
+      type: "START_PAGE_DOWNLOAD",
+      pageName: "整页素材",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1"
+    }),
+    {
+      type: "START_PAGE_DOWNLOAD",
+      pageName: "整页素材",
+      parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1"
+    }
+  );
 });
 
 test("XState 作业状态机只允许声明过的迁移", () => {

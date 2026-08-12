@@ -167,6 +167,7 @@ test("single React page root renders project count and recycled folder-row porta
   }));
   await page.goto("https://example.test/team/pc/test/pageDetail/folder");
   await page.setContent(`
+    <title>整页素材</title>
     <div id="toolbar">
       <button id="type-filter"><span>所有类型</span></button>
       <button>排序</button>
@@ -195,7 +196,7 @@ test("single React page root renders project count and recycled folder-row porta
     </div>
   `);
   await page.evaluate(() => {
-    const state = { jobs: [], activeJobId: null, mode: "idle", popupOpen: false };
+    const state = { jobs: [], folderReceipts: [], activeJobId: null, mode: "idle", popupOpen: false };
     const calls = [];
     const listeners = new Set();
     const runtime = {
@@ -227,6 +228,62 @@ test("single React page root renders project count and recycled folder-row porta
             needsWorker: false
           };
         }
+        if (message.type === "START_PAGE_DOWNLOAD") {
+          const batchId = "batch-page";
+          const folders = [
+            { folderName: "文件夹 A", folderItemIndex: "0" },
+            { folderName: "文件夹 B", folderItemIndex: "1" }
+          ];
+          const added = [];
+          let duplicateCount = 0;
+          for (const folder of folders) {
+            if (state.jobs.some((job) =>
+              job.parentUrl === message.parentUrl &&
+              job.folderItemIndex === folder.folderItemIndex &&
+              job.folderName === folder.folderName
+            )) {
+              duplicateCount += 1;
+              continue;
+            }
+            const job = {
+              id: "job-" + (state.jobs.length + 1),
+              status: "queued",
+              scope: "folder",
+              batchId,
+              batchParentUrl: message.parentUrl,
+              batchPaused: false,
+              ...folder,
+              parentUrl: message.parentUrl,
+              queuePosition: state.jobs.length + 1,
+              counts: {}
+            };
+            state.jobs.push(job);
+            added.push(job);
+          }
+          return {
+            ok: true,
+            jobs: added,
+            addedCount: added.length,
+            duplicateCount,
+            completedCount: 0,
+            folderCount: folders.length,
+            batchId,
+            state: JSON.parse(JSON.stringify(state)),
+            needsWorker: false
+          };
+        }
+        if (["PAUSE_DOWNLOAD_BATCH", "RESUME_DOWNLOAD_BATCH"].includes(message.type)) {
+          const paused = message.type === "PAUSE_DOWNLOAD_BATCH";
+          for (const job of state.jobs) {
+            if (job.batchId === message.batchId) job.batchPaused = paused;
+          }
+          return { ok: true, state: JSON.parse(JSON.stringify(state)) };
+        }
+        if (message.type === "REMOVE_DOWNLOAD_BATCH") {
+          const removedCount = state.jobs.filter((job) => job.batchId === message.batchId).length;
+          state.jobs = state.jobs.filter((job) => job.batchId !== message.batchId);
+          return { ok: true, state: JSON.parse(JSON.stringify(state)), removedCount };
+        }
         return { ok: true, state: JSON.parse(JSON.stringify(state)) };
       },
       onMessage: {
@@ -249,6 +306,9 @@ test("single React page root renders project count and recycled folder-row porta
     "background-image",
     /radial-gradient.*linear-gradient/
   );
+  const pageDownloadButton = page.locator("button.popo-page-download-all");
+  await expect(pageDownloadButton).toHaveText("一键下载");
+  await expect(pageDownloadButton).toHaveAttribute("title", /整页素材/);
   await expect(page.locator("button.popo-stable-download-button")).toHaveCount(2);
   await expect(page.locator("[data-item-index='2'] button.popo-stable-download-button")).toHaveCount(0);
   await expect(page.locator("[data-item-index='0'] .pageName > .popo-react-download-anchor")).toHaveCount(1);
@@ -275,6 +335,29 @@ test("single React page root renders project count and recycled folder-row porta
   await expect(firstButton).toContainText("第 1");
   await expect(firstButton).toHaveCSS("width", "124px");
   await expect(firstButton.locator(".popo-download-secondary")).toHaveText("第 1");
+  await pageDownloadButton.click();
+  await expect(pageDownloadButton).toContainText("已排队 1 个");
+  await expect(page.locator("[data-item-index='1'] button.popo-stable-download-button")).toContainText("排队中");
+  const batchPauseButton = page.locator(".popo-page-batch-action").filter({ hasText: "全部暂停" });
+  const batchRemoveButton = page.locator(".popo-page-batch-action").filter({ hasText: "全部移除" });
+  await expect(batchPauseButton).toBeVisible();
+  await expect(batchRemoveButton).toBeVisible();
+  await batchPauseButton.click();
+  await expect(page.locator("[data-item-index='1'] button.popo-stable-download-button")).toContainText("批次已暂停");
+  const batchResumeButton = page.locator(".popo-page-batch-action").filter({ hasText: "全部继续" });
+  await batchResumeButton.click();
+  await expect(page.locator("[data-item-index='1'] button.popo-stable-download-button")).toContainText("排队中");
+  await batchRemoveButton.click();
+  await expect(page.locator(".popo-page-batch-action").filter({ hasText: "确认移除" })).toBeVisible();
+  await page.locator(".popo-page-batch-action").filter({ hasText: "确认移除" }).click();
+  await expect(page.locator("[data-item-index='1'] button.popo-stable-download-button")).toHaveAttribute("data-state", "idle");
+  await expect(page.locator(".popo-page-batch-action")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__popoUiTest.calls
+    .filter((message) => message.type === "START_PAGE_DOWNLOAD"))).toEqual([{
+      type: "START_PAGE_DOWNLOAD",
+      pageName: "整页素材",
+      parentUrl: "https://example.test/team/pc/test/pageDetail/folder"
+    }]);
   const firstQueueLayout = await firstButton.evaluate((element) => {
     const content = element.querySelector(".popo-download-content");
     const secondary = element.querySelector(".popo-download-secondary");
@@ -453,22 +536,34 @@ test("single React page root renders project count and recycled folder-row porta
 
   await page.evaluate(() => {
     const job = window.__popoUiTest.state.jobs[0];
-    job.status = "complete";
-    job.completedAt = new Date().toISOString();
-    job.counts = {
-      files: 383,
-      discoveredFiles: 383,
-      success: 383,
-      failed: 0,
-      cancelled: 0
-    };
+    const completedAt = new Date().toISOString();
+    window.__popoUiTest.state.folderReceipts = [{
+      key: [job.parentUrl, job.folderItemIndex, job.folderName.toLocaleLowerCase()].join("\u0000"),
+      parentUrl: job.parentUrl,
+      folderItemIndex: job.folderItemIndex,
+      folderName: job.folderName,
+      completedAt,
+      counts: {
+        files: 383,
+        discoveredFiles: 383,
+        success: 383,
+        failed: 0,
+        cancelled: 0,
+        scanFailures: 0,
+        unverifiedDirectories: 0
+      }
+    }];
+    window.__popoUiTest.state.jobs = window.__popoUiTest.state.jobs.filter(
+      (candidate) => candidate.id !== job.id
+    );
     for (const listener of window.__popoUiTest.listeners) {
       listener({ type: "FOLDER_TASK_FINISHED" });
     }
   });
   await expect(page.locator(".popo-toast")).toHaveCount(0);
   await expect(firstButton).toHaveAttribute("data-state", "success");
-  await expect(firstButton).toContainText("已完成 383 个");
+  await expect(firstButton).toContainText("已下载 383 个");
+  await expect(firstButton).toContainText("无遗漏");
   await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = false;
     for (const listener of window.__popoUiTest.listeners) {
@@ -713,6 +808,7 @@ test("popup uses simple wording and safely removes cancelled history", async () 
   const concurrencySelect = popup.locator("#downloadConcurrency");
   await expect(concurrencySelect).toBeVisible();
   await expect(concurrencySelect).toHaveValue("5");
+  await expect(concurrencySelect).toBeEnabled();
   await concurrencySelect.selectOption("2");
   await expect(concurrencySelect).toHaveValue("2");
   await expect.poll(() => session.worker.evaluate(async () => {
@@ -725,6 +821,35 @@ test("popup uses simple wording and safely removes cancelled history", async () 
       active: popoState?.settings?.concurrency
     };
   })).toEqual({ saved: 2, active: 2 });
+
+  await session.worker.evaluate(async () => {
+    const { popoState } = await chrome.storage.local.get("popoState");
+    popoState.jobs = [{
+      id: "job-e2e-active",
+      key: "e2e-active-key",
+      folderName: "正在处理的文件夹",
+      status: "paused",
+      createdAt: new Date().toISOString(),
+      counts: { files: 2, success: 0, failed: 0, cancelled: 0 }
+    }, ...popoState.jobs];
+    popoState.activeJobId = "job-e2e-active";
+    popoState.mode = "paused";
+    await chrome.storage.local.set({ popoState });
+  });
+  await expect(concurrencySelect).toBeDisabled();
+  await expect(concurrencySelect).toHaveAttribute(
+    "title",
+    "任务进行或暂停时不能调整并行下载数"
+  );
+
+  await session.worker.evaluate(async () => {
+    const { popoState } = await chrome.storage.local.get("popoState");
+    popoState.jobs = popoState.jobs.filter((job) => job.id !== "job-e2e-active");
+    popoState.activeJobId = null;
+    popoState.mode = "idle";
+    await chrome.storage.local.set({ popoState });
+  });
+  await expect(concurrencySelect).toBeEnabled();
 
   await popup.getByRole("button", { name: "移除" }).click();
   await expect(popup.locator(".popup-remove-note")).toHaveText("只从列表移除，不会删除已下载文件。");

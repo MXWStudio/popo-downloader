@@ -10,8 +10,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.0");
-  assert.equal(manifest.version_name, "0.7.0");
+  assert.equal(manifest.version, "0.7.1");
+  assert.equal(manifest.version_name, "0.7.1");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";
   const extensionId = [...digest.subarray(0, 16)]
@@ -68,6 +68,7 @@ test("React 页面根接管项目数、文件夹按钮、任务条和通知", ()
   assert.match(pageUi, /function PageEnhancerApp/);
   assert.match(pageUi, /createPortal/);
   assert.match(pageUi, /ProjectCount/);
+  assert.match(pageUi, /PageDownloadButton/);
   assert.match(pageUi, /FolderDownloadButton/);
   assert.match(pageUi, /QueueDock/);
   assert.match(pageUi, /ToastViewport/);
@@ -83,8 +84,12 @@ test("React 页面根接管项目数、文件夹按钮、任务条和通知", ()
   assert.match(pageUi, /inferVirtualListItemCount/);
   assert.match(pageUi, /count \+ " 个项目"/);
   assert.match(pageUi, /START_FOLDER_SCAN/);
+  assert.match(pageUi, /START_PAGE_DOWNLOAD/);
+  assert.match(pageUi, /一键下载/);
   assert.doesNotMatch(pageUi, /CONFIRM_FOLDER_DOWNLOAD|SHOW_FOLDER_CONFIRMATION|确认下载/);
   assert.match(content, /popo-stable-download-worker-frame/);
+  assert.match(content, /PAGE_SCAN_FRAME_NAME_PREFIX/);
+  assert.match(content, /scanDirectoryInHiddenFrame/);
   assert.match(content, /REGISTER_WORKER_FRAME/);
   assert.match(content, /SOURCE_PAGE_READY/);
   assert.match(content, /needsWorkerRecovery/);
@@ -250,6 +255,7 @@ test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", 
   assert.match(background, /concurrency:\s*5/);
   assert.match(background, /MAX_DOWNLOAD_CONCURRENCY\s*=\s*5/);
   assert.match(background, /SET_DOWNLOAD_CONCURRENCY/);
+  assert.match(background, /任务进行或暂停时不能调整并行下载数/);
   assert.match(popup, /id="downloadConcurrency"/);
   assert.match(popup, /\[1, 2, 3, 4, 5\]/);
   assert.match(background, /gopeedConnections:\s*1/);

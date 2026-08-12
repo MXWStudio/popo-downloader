@@ -163,6 +163,15 @@
     return (jobs || []).find((job) => job.key === key && isJobActive(job.status)) || null;
   }
 
+  function findCoveredFolderJob(jobs, currentJobId, input) {
+    const key = makeFolderJobKey(input);
+    return (jobs || []).find((job) =>
+      job.id !== currentJobId &&
+      job.key === key &&
+      (isJobActive(job.status) || job.status === "complete")
+    ) || null;
+  }
+
   function summarizeItems(items, scannedFolderCount = 0, scanFailureCount = 0) {
     const selected = (items || []).filter((item) => item.selected);
     const count = (status) => selected.filter((item) => item.status === status).length;
@@ -202,7 +211,7 @@
   }
 
   function queuePosition(jobs, jobId) {
-    const queued = (jobs || []).filter((job) => job.status === "queued");
+    const queued = (jobs || []).filter((job) => job.status === "queued" && !job.batchPaused);
     const index = queued.findIndex((job) => job.id === jobId);
     return index < 0 ? 0 : index + 1;
   }
@@ -213,6 +222,7 @@
     applyCancelPolicy,
     canTransitionJobStatus,
     clientVisibleJobs,
+    findCoveredFolderJob,
     findDuplicateJob,
     isJobActive,
     isJobTerminal,

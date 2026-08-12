@@ -29,18 +29,31 @@ test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册�
 
 test("绿色安装助手自动准备完整运行目录并引导加载扩展", () => {
   assert.match(setupSource, /ApplyVerifiedUpdate/);
+  assert.match(setupSource, /InstallOptionsForm/);
+  assert.match(setupSource, /FolderBrowserDialog/);
+  assert.match(setupSource, /GetSuggestedInstallRoot/);
+  assert.match(setupSource, /FindExistingInstallRoot/);
+  assert.match(setupSource, /SaveInstallRoot/);
+  assert.match(setupSource, /InstallRootValueName/);
+  assert.match(setupSource, /--repair/);
+  assert.match(setupSource, /migrating \? "migration" : forceRepair \? "repair" : "verified-candidate"/);
+  assert.match(setupSource, /--migrate-from/);
+  assert.match(setupSource, /SeedMigrationData/);
+  assert.match(setupSource, /FinalizeMigration/);
+  assert.match(setupSource, /SyncCompatibilityExtension/);
+  assert.match(setupSource, /chromeExtensionPath/);
   assert.match(setupSource, /candidate-/);
   assert.match(setupSource, /VerifyCandidate/);
   assert.match(setupSource, /DirectoriesMatch/);
   assert.match(setupSource, /PackagedDirectoryMatches/);
   assert.match(setupSource, /previous installation was restored/);
-  assert.match(setupSource, /updateMode", "verified-candidate"/);
+  assert.match(setupSource, /\{ "updateMode", updateMode \}/);
   assert.match(setupSource, /\.popo-native-version/);
   assert.match(setupSource, /nativeCodeVersionMatches/);
   assert.doesNotMatch(setupSource, /CopyDirectory\(sourceExtension, extensionRoot\)/);
   assert.doesNotMatch(setupSource, /InstallGopeed\(sourceGopeed, gopeedRoot, nativeRoot\)/);
-  assert.match(setupSource, /OpenChromeExtensions/);
-  assert.match(setupSource, /OpenFolder\(extensionRoot\)/);
+  assert.doesNotMatch(setupSource, /chrome:\/\/extensions|OpenChromeExtensions/);
+  assert.match(setupSource, /OpenFolder\(chromeExtensionRoot\)/);
   assert.match(setupSource, /加载已解压的扩展程序/);
   assert.match(setupSource, /--quiet/);
   assert.match(setupSource, /if \(!quiet\)\s*\{\s*try \{ Clipboard\.SetText/);
@@ -49,6 +62,7 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(setupSource, /"runtime", "popup\.js"/);
   assert.match(setupSource, /"runtime", "page-ui\.js"/);
   assert.match(buildSource, /POPO-Setup\.exe/);
+  assert.match(buildSource, /System\.Drawing\.dll/);
   assert.match(buildSource, /latest\.json/);
   assert.match(buildSource, /channel = 'stable'/);
   assert.match(buildSource, /ProtectedData/);
