@@ -17,6 +17,8 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.match(workflow, /Prevent stable channel downgrade/);
   assert.match(workflow, /assert-release-version\.ps1/);
   assert.match(workflow, /npm --prefix release-source run check:full/);
+  assert.match(workflow, /TEMP: \$\{\{ runner\.temp \}\}/);
+  assert.match(workflow, /TMP: \$\{\{ runner\.temp \}\}/);
   assert.match(workflow, /verify-release-package\.ps1/);
   assert.match(workflow, /POPO_RELEASE_SIGNING_KEY_BASE64/);
   assert.match(workflow, /TENCENT_COS_SECRET_ID/);

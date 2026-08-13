@@ -125,6 +125,11 @@ jobs:
 
       - name: Run full verification
         shell: pwsh
+        env:
+          # GitHub's default Windows TEMP can use an 8.3 path while the native
+          # installer records the same directory with its long path.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: npm --prefix release-source run check:full
 
       - name: Restore release source after tests
