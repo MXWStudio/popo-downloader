@@ -12,7 +12,9 @@
     "check:full": "npm run check && npm test && npm run test:e2e",
     "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
     "build:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
-    "verify:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-package.ps1"
+    "verify:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-package.ps1",
+    "release:check-version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/assert-release-version.ps1",
+    "release:notes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/get-release-notes.ps1"
   },
   "dependencies": {
     "@gopeed/rest": "1.7.0",

@@ -1,11 +1,22 @@
 [CmdletBinding()]
 param(
-  [string]$OutputDirectory = ''
+  [string]$RepoRoot = '',
+  [string]$OutputDirectory = '',
+  [string]$ReleaseNotesPath = '',
+  [string]$SigningKeyBase64 = $env:POPO_RELEASE_SIGNING_KEY_BASE64,
+  [switch]$SkipRuntimeBuild
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if (Test-Path Env:POPO_RELEASE_SIGNING_KEY_BASE64) {
+  Remove-Item Env:POPO_RELEASE_SIGNING_KEY_BASE64
+}
+$repoRoot = if ($RepoRoot) {
+  (Resolve-Path -LiteralPath $RepoRoot).Path
+} else {
+  (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
 $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json')) | ConvertFrom-Json
 $versionName = [string]$manifest.version_name
 if (-not $versionName) { throw 'manifest.json version_name is required.' }
@@ -38,8 +49,10 @@ $nativeExecutable = Join-Path $compileRoot 'PopoFolderPickerHost.exe'
 $nativeVersion = (Get-FileHash -LiteralPath $nativeSource -Algorithm SHA256).Hash.ToLowerInvariant()
 $setupExecutable = Join-Path $compileRoot $setupExecutableName
 
-& npm run build:runtime --prefix $repoRoot
-if ($LASTEXITCODE -ne 0) { throw 'The extension runtime bundle failed to build.' }
+if (-not $SkipRuntimeBuild) {
+  & npm run build:runtime --prefix $repoRoot
+  if ($LASTEXITCODE -ne 0) { throw 'The extension runtime bundle failed to build.' }
+}
 
 if (-not (Test-Path -LiteralPath $compiler)) {
   throw "The Windows .NET Framework compiler was not found: $compiler"
@@ -161,16 +174,27 @@ $canonical = @(
   [string]$size
 ) -join "`n"
 
-if (-not (Test-Path -LiteralPath $signingKeyPath)) {
-  throw "Release signing key was not found. Run scripts/Initialize-ReleaseSigningKey.ps1 first: $signingKeyPath"
+$privateKeyBytes = $null
+if ($SigningKeyBase64) {
+  try {
+    $privateKeyBytes = [Convert]::FromBase64String($SigningKeyBase64.Trim())
+  }
+  catch {
+    throw 'POPO_RELEASE_SIGNING_KEY_BASE64 is not valid Base64.'
+  }
 }
-$entropy = [System.Text.Encoding]::UTF8.GetBytes('POPO stable release signing key v1')
-$protectedKey = [System.IO.File]::ReadAllBytes($signingKeyPath)
-$privateKeyBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
-  $protectedKey,
-  $entropy,
-  [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-)
+else {
+  if (-not (Test-Path -LiteralPath $signingKeyPath)) {
+    throw "Release signing key was not found. Run scripts/Initialize-ReleaseSigningKey.ps1 first or configure POPO_RELEASE_SIGNING_KEY_BASE64: $signingKeyPath"
+  }
+  $entropy = [System.Text.Encoding]::UTF8.GetBytes('POPO stable release signing key v1')
+  $protectedKey = [System.IO.File]::ReadAllBytes($signingKeyPath)
+  $privateKeyBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+    $protectedKey,
+    $entropy,
+    [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+  )
+}
 $rsa = New-Object System.Security.Cryptography.RSACryptoServiceProvider
 try {
   $rsa.FromXmlString([System.Text.Encoding]::UTF8.GetString($privateKeyBytes))
@@ -184,6 +208,13 @@ finally {
   [Array]::Clear($privateKeyBytes, 0, $privateKeyBytes.Length)
 }
 
+$releaseNotes = 'Stable release package.'
+if ($ReleaseNotesPath) {
+  $resolvedReleaseNotesPath = (Resolve-Path -LiteralPath $ReleaseNotesPath).Path
+  $releaseNotes = [System.IO.File]::ReadAllText($resolvedReleaseNotesPath).Trim()
+  if (-not $releaseNotes) { throw 'Release notes must not be empty.' }
+}
+
 $channelManifest = [ordered]@{
   schemaVersion = 1
   channel = 'stable'
@@ -195,7 +226,7 @@ $channelManifest = [ordered]@{
   sha256 = $hash
   size = $size
   signature = $signature
-  notes = 'Hotfixes POPO single-file address recovery after permission-denied API responses and keeps one-click batches running after an incomplete folder.'
+  notes = $releaseNotes
 }
 $channelJson = $channelManifest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText(

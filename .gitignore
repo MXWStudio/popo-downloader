@@ -16,6 +16,7 @@ test-results/
 # Local test packages stay outside source control until an explicit release.
 /dist/POPO-Stable-Downloader-*.zip
 /dist/POPO-Stable-Downloader-*.zip.sha256.txt
+/dist/latest.json
 
 # Operating-system metadata
 .DS_Store

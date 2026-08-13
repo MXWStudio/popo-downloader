@@ -1,12 +1,17 @@
 [CmdletBinding()]
 param(
+  [string]$RepoRoot = '',
   [string]$ManifestPath = '',
   [string]$PackagePath = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repoRoot = if ($RepoRoot) {
+  (Resolve-Path -LiteralPath $RepoRoot).Path
+} else {
+  (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+}
 if (-not $ManifestPath) { $ManifestPath = Join-Path $repoRoot 'dist\latest.json' }
 $manifestPath = (Resolve-Path -LiteralPath $ManifestPath).Path
 $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json

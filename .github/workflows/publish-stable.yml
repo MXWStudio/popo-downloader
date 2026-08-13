@@ -1,0 +1,278 @@
+name: Publish stable release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to publish or recover
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Check out release automation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.sha }}
+          path: automation
+          persist-credentials: false
+
+      - name: Check out the release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: release-source/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate tag and version metadata
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/assert-release-version.ps1 -Tag $env:RELEASE_TAG -RepoRoot release-source
+
+      - name: Prevent stable channel downgrade
+        shell: pwsh
+        run: |
+          $targetVersion = [version]$env:RELEASE_TAG.TrimStart('v')
+          $channelUrl = 'https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/latest.json'
+          $response = Invoke-WebRequest -Uri ($channelUrl + '?check=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Headers @{ 'Cache-Control' = 'no-cache' } -SkipHttpErrorCheck
+          if ($response.StatusCode -eq 404) {
+            Write-Host 'No stable channel exists yet; continuing with the first release.'
+          }
+          elseif ($response.StatusCode -ne 200) {
+            throw "The stable channel could not be checked (HTTP $($response.StatusCode))."
+          }
+          else {
+            $online = $response.Content | ConvertFrom-Json
+            $onlineVersion = [version][string]$online.version
+            if ($onlineVersion -gt $targetVersion) { throw "Refusing to move the stable channel backward from $onlineVersion to $targetVersion." }
+          }
+
+      - name: Require release secrets
+        shell: pwsh
+        env:
+          POPO_RELEASE_SIGNING_KEY_BASE64: ${{ secrets.POPO_RELEASE_SIGNING_KEY_BASE64 }}
+          TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
+          TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
+        run: |
+          foreach ($name in @(
+            'POPO_RELEASE_SIGNING_KEY_BASE64',
+            'TENCENT_COS_SECRET_ID',
+            'TENCENT_COS_SECRET_KEY'
+          )) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required GitHub Actions secret is missing: $name"
+            }
+          }
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix release-source
+          Push-Location release-source
+          try {
+            npx playwright install chromium
+          }
+          finally {
+            Pop-Location
+          }
+          python -m pip install --disable-pip-version-check --no-input "cos-python-sdk-v5==1.9.44"
+
+      - name: Prepare release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/get-release-notes.ps1 -Version $version -OutputPath release-notes.md -RepoRoot release-source
+          if ($LASTEXITCODE -ne 0) {
+            $releaseJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json body 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "No release notes are available for $env:RELEASE_TAG." }
+            $releaseBody = [string](($releaseJson | ConvertFrom-Json).body)
+            if ([string]::IsNullOrWhiteSpace($releaseBody)) { throw "The existing $env:RELEASE_TAG GitHub Release has empty notes." }
+            [System.IO.File]::WriteAllText(
+              (Join-Path $PWD 'release-notes.md'),
+              $releaseBody.Trim() + "`r`n",
+              (New-Object System.Text.UTF8Encoding($false))
+            )
+          }
+
+      - name: Run full verification
+        shell: pwsh
+        run: npm --prefix release-source run check:full
+
+      - name: Restore release source after tests
+        shell: pwsh
+        run: |
+          git -C release-source reset --hard HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to restore the tagged release source.' }
+          git -C release-source clean -ffdx -e node_modules/
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to clean generated files from the tagged release source.' }
+
+      - name: Restore trusted release automation before signing
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.sha }}
+          path: automation
+          clean: true
+          persist-credentials: false
+
+      - name: Build runtime without release secrets
+        shell: pwsh
+        run: npm --prefix release-source run build:runtime
+
+      - name: Build the signed package
+        shell: pwsh
+        env:
+          POPO_RELEASE_SIGNING_KEY_BASE64: ${{ secrets.POPO_RELEASE_SIGNING_KEY_BASE64 }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/build-test-package.ps1 -RepoRoot release-source -ReleaseNotesPath release-notes.md -SkipRuntimeBuild
+
+      - name: Restore trusted release automation after signing
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.sha }}
+          path: automation
+          clean: true
+          persist-credentials: false
+
+      - name: Verify the signed package
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/verify-release-package.ps1 -RepoRoot release-source
+
+      - name: Prepare reusable GitHub Release assets
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dist = 'release-source/dist'
+          $builtManifest = Get-Content -Raw -LiteralPath "$dist/latest.json" | ConvertFrom-Json
+          if ("v$($builtManifest.version)" -ne $env:RELEASE_TAG) {
+            throw 'Signed manifest version does not match the release tag.'
+          }
+          $expectedAssets = @(
+            [string]$builtManifest.artifact,
+            "$($builtManifest.artifact).sha256.txt",
+            'latest.json'
+          )
+
+          $releaseJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,assets 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            $actualAssets = @($release.assets | ForEach-Object { $_.name })
+            $missingAssets = @($expectedAssets | Where-Object { $_ -notin $actualAssets })
+            if ($missingAssets.Count -gt 0 -and -not [bool]$release.isDraft) {
+              throw "The existing GitHub Release is missing required assets: $($missingAssets -join ', ')"
+            }
+            if ($missingAssets.Count -gt 0) {
+              foreach ($asset in @($expectedAssets | Where-Object { $_ -in $actualAssets })) {
+                gh release delete-asset $env:RELEASE_TAG $asset --repo $env:GITHUB_REPOSITORY --yes
+                if ($LASTEXITCODE -ne 0) { throw "Failed to reset the incomplete draft GitHub Release asset: $asset" }
+              }
+              gh release upload $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY "$dist/$($builtManifest.artifact)" "$dist/$($builtManifest.artifact).sha256.txt" "$dist/latest.json"
+              if ($LASTEXITCODE -ne 0) { throw 'Failed to recover the draft GitHub Release assets.' }
+            }
+            foreach ($asset in $expectedAssets) {
+              gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $asset --dir $dist --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Failed to reuse GitHub Release asset: $asset" }
+            }
+            $releaseIsDraft = [bool]$release.isDraft
+          }
+          else {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft --verify-tag --title "POPO $($builtManifest.version)" --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the draft GitHub Release.' }
+            gh release upload $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY "$dist/$($builtManifest.artifact)" "$dist/$($builtManifest.artifact).sha256.txt" "$dist/latest.json"
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to upload the draft GitHub Release assets.' }
+            $releaseIsDraft = $true
+          }
+
+          powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/verify-release-package.ps1 -RepoRoot release-source
+          $manifest = Get-Content -Raw -LiteralPath "$dist/latest.json" | ConvertFrom-Json
+          "version=$($manifest.version)" >> $env:GITHUB_OUTPUT
+          "artifact=$($manifest.artifact)" >> $env:GITHUB_OUTPUT
+          "sha256=$($manifest.sha256)" >> $env:GITHUB_OUTPUT
+          "size=$($manifest.size)" >> $env:GITHUB_OUTPUT
+          "draft=$($releaseIsDraft.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Upload immutable package to Tencent COS
+        shell: pwsh
+        env:
+          TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
+          TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
+          TENCENT_COS_SESSION_TOKEN: ${{ secrets.TENCENT_COS_SESSION_TOKEN }}
+        run: |
+          python automation/scripts/publish-cos-object.py --file "release-source/dist/${{ steps.release.outputs.artifact }}" --key "stable/${{ steps.release.outputs.artifact }}" --content-type application/zip --cache-control "public,max-age=31536000,immutable" --sha256 "${{ steps.release.outputs.sha256 }}"
+
+      - name: Read back and verify the COS package
+        shell: pwsh
+        run: |
+          $url = "https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/${{ steps.release.outputs.artifact }}"
+          $download = Join-Path $env:RUNNER_TEMP '${{ steps.release.outputs.artifact }}'
+          curl.exe -fsSL --retry 5 --retry-all-errors -o $download ($url + '?verify=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+          if ($LASTEXITCODE -ne 0) { throw 'The COS package could not be downloaded.' }
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant()
+          $actualSize = (Get-Item -LiteralPath $download).Length
+          if ($actualHash -ne '${{ steps.release.outputs.sha256 }}') { throw 'The COS package SHA-256 does not match.' }
+          if ($actualSize -ne [long]'${{ steps.release.outputs.size }}') { throw 'The COS package size does not match.' }
+
+      - name: Publish the GitHub Release
+        if: steps.release.outputs.draft == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+
+      - name: Switch the stable COS channel last
+        shell: pwsh
+        env:
+          TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
+          TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
+          TENCENT_COS_SESSION_TOKEN: ${{ secrets.TENCENT_COS_SESSION_TOKEN }}
+        run: |
+          python automation/scripts/publish-cos-object.py --file release-source/dist/latest.json --key stable/latest.json --content-type application/json --cache-control "no-cache,no-store,must-revalidate" --allow-overwrite
+
+      - name: Verify the live stable channel
+        shell: pwsh
+        run: |
+          $onlineManifest = Join-Path $env:RUNNER_TEMP 'latest-online.json'
+          $url = 'https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/latest.json'
+          $matched = $false
+          foreach ($attempt in 1..10) {
+            curl.exe -fsSL -H 'Cache-Control: no-cache' -o $onlineManifest ($url + '?verify=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+            if ($LASTEXITCODE -eq 0) {
+              $online = Get-Content -Raw -LiteralPath $onlineManifest | ConvertFrom-Json
+              if ($online.version -eq '${{ steps.release.outputs.version }}' -and $online.sha256 -eq '${{ steps.release.outputs.sha256 }}') {
+                $matched = $true
+                break
+              }
+            }
+            Start-Sleep -Seconds 3
+          }
+          if (-not $matched) { throw 'The live stable channel did not switch to the expected release.' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/verify-release-package.ps1 -RepoRoot release-source -ManifestPath $onlineManifest -PackagePath "release-source/dist/${{ steps.release.outputs.artifact }}"
