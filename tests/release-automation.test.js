@@ -45,6 +45,8 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.ok(switchChannel < verifyChannel);
   assert.match(workflow, /Reusing the verified immutable COS package/);
   assert.match(workflow, /foreach \(\$attempt in 1\.\.3\)/);
+  assert.match(workflow, /-w '%\{http_code\}'/);
+  assert.doesNotMatch(workflow, /-Method Head/);
 });
 
 test("release package signing supports GitHub Actions without removing local DPAPI support", () => {

@@ -240,10 +240,9 @@ jobs:
           $published = $false
 
           foreach ($attempt in 1..3) {
-            $head = Invoke-WebRequest -Uri ($url + '?probe=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Method Head -Headers @{ 'Cache-Control' = 'no-cache' } -SkipHttpErrorCheck
-            if ($head.StatusCode -eq 200) {
-              curl.exe -fsSL --retry 5 --retry-all-errors -o $download ($url + '?reuse=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
-              if ($LASTEXITCODE -ne 0) { throw 'The existing COS package could not be downloaded for verification.' }
+            $statusCode = curl.exe -sS -L --retry 5 --retry-all-errors -o $download -w '%{http_code}' ($url + '?probe=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+            if ($LASTEXITCODE -ne 0) { throw 'The immutable COS package could not be checked.' }
+            if ($statusCode -eq '200') {
               $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant()
               $actualSize = (Get-Item -LiteralPath $download).Length
               if ($actualHash -ne $expectedHash -or $actualSize -ne $expectedSize) {
@@ -253,8 +252,8 @@ jobs:
               $published = $true
               break
             }
-            if ($head.StatusCode -ne 404) {
-              throw "The immutable COS package could not be checked (HTTP $($head.StatusCode))."
+            if ($statusCode -ne '404') {
+              throw "The immutable COS package could not be checked (HTTP $statusCode)."
             }
 
             python automation/scripts/publish-cos-object.py --file "release-source/dist/$artifact" --key "stable/$artifact" --content-type application/zip --cache-control "public,max-age=31536000,immutable" --sha256 $expectedHash
