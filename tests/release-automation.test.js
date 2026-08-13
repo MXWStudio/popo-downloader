@@ -34,7 +34,7 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.match(workflow, /git -C release-source reset --hard HEAD/);
   assert.match(workflow, /git -C release-source clean -ffdx -e node_modules\//);
 
-  const uploadPackage = workflow.indexOf("Upload immutable package to Tencent COS");
+  const uploadPackage = workflow.indexOf("Upload or reuse immutable package in Tencent COS");
   const verifyPackage = workflow.indexOf("Read back and verify the COS package");
   const publishRelease = workflow.indexOf("Publish the GitHub Release");
   const switchChannel = workflow.indexOf("Switch the stable COS channel last");
@@ -43,6 +43,8 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.ok(verifyPackage < publishRelease);
   assert.ok(publishRelease < switchChannel);
   assert.ok(switchChannel < verifyChannel);
+  assert.match(workflow, /Reusing the verified immutable COS package/);
+  assert.match(workflow, /foreach \(\$attempt in 1\.\.3\)/);
 });
 
 test("release package signing supports GitHub Actions without removing local DPAPI support", () => {

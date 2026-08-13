@@ -225,14 +225,46 @@ jobs:
           "size=$($manifest.size)" >> $env:GITHUB_OUTPUT
           "draft=$($releaseIsDraft.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
-      - name: Upload immutable package to Tencent COS
+      - name: Upload or reuse immutable package in Tencent COS
         shell: pwsh
         env:
           TENCENT_COS_SECRET_ID: ${{ secrets.TENCENT_COS_SECRET_ID }}
           TENCENT_COS_SECRET_KEY: ${{ secrets.TENCENT_COS_SECRET_KEY }}
           TENCENT_COS_SESSION_TOKEN: ${{ secrets.TENCENT_COS_SESSION_TOKEN }}
         run: |
-          python automation/scripts/publish-cos-object.py --file "release-source/dist/${{ steps.release.outputs.artifact }}" --key "stable/${{ steps.release.outputs.artifact }}" --content-type application/zip --cache-control "public,max-age=31536000,immutable" --sha256 "${{ steps.release.outputs.sha256 }}"
+          $artifact = '${{ steps.release.outputs.artifact }}'
+          $expectedHash = '${{ steps.release.outputs.sha256 }}'
+          $expectedSize = [long]'${{ steps.release.outputs.size }}'
+          $url = "https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/$artifact"
+          $download = Join-Path $env:RUNNER_TEMP "existing-$artifact"
+          $published = $false
+
+          foreach ($attempt in 1..3) {
+            $head = Invoke-WebRequest -Uri ($url + '?probe=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Method Head -Headers @{ 'Cache-Control' = 'no-cache' } -SkipHttpErrorCheck
+            if ($head.StatusCode -eq 200) {
+              curl.exe -fsSL --retry 5 --retry-all-errors -o $download ($url + '?reuse=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())
+              if ($LASTEXITCODE -ne 0) { throw 'The existing COS package could not be downloaded for verification.' }
+              $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant()
+              $actualSize = (Get-Item -LiteralPath $download).Length
+              if ($actualHash -ne $expectedHash -or $actualSize -ne $expectedSize) {
+                throw 'A different immutable object already exists at the release key.'
+              }
+              Write-Host "Reusing the verified immutable COS package: $artifact"
+              $published = $true
+              break
+            }
+            if ($head.StatusCode -ne 404) {
+              throw "The immutable COS package could not be checked (HTTP $($head.StatusCode))."
+            }
+
+            python automation/scripts/publish-cos-object.py --file "release-source/dist/$artifact" --key "stable/$artifact" --content-type application/zip --cache-control "public,max-age=31536000,immutable" --sha256 $expectedHash
+            if ($LASTEXITCODE -eq 0) {
+              $published = $true
+              break
+            }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $published) { throw 'The immutable COS package could not be published after three attempts.' }
 
       - name: Read back and verify the COS package
         shell: pwsh
