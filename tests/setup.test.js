@@ -23,6 +23,9 @@ test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册�
   assert.match(setupSource, /SpecialFolder\.LocalApplicationData/);
   assert.match(setupSource, /Registry\.CurrentUser\.CreateSubKey/);
   assert.match(setupSource, /NativeMessagingHosts/);
+  assert.match(setupSource, /AgentTaskNamePrefix/);
+  assert.match(setupSource, /\/SC ONLOGON \/RL LIMITED/);
+  assert.match(setupSource, /Registry\.CurrentUser/);
   assert.match(setupSource, /allowed_origins/);
   assert.doesNotMatch(setupSource, /Registry\.LocalMachine|HKEY_LOCAL_MACHINE/);
 });
@@ -50,6 +53,14 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(setupSource, /\{ "updateMode", updateMode \}/);
   assert.match(setupSource, /\.popo-native-version/);
   assert.match(setupSource, /nativeCodeVersionMatches/);
+  assert.match(setupSource, /Candidate update agent/);
+  assert.match(setupSource, /StopAgent\(productRoot\)/);
+  assert.match(setupSource, /StartAgent\(productRoot\)/);
+  assert.match(setupSource, /WaitForAgentReady/);
+  assert.match(setupSource, /AgentStartupExists/);
+  assert.match(setupSource, /--test-verify-agent-startup/);
+  assert.match(setupSource, /DeleteAgentStartup/);
+  assert.match(setupSource, /release-manifest\.json/);
   assert.doesNotMatch(setupSource, /CopyDirectory\(sourceExtension, extensionRoot\)/);
   assert.doesNotMatch(setupSource, /InstallGopeed\(sourceGopeed, gopeedRoot, nativeRoot\)/);
   assert.doesNotMatch(setupSource, /chrome:\/\/extensions|OpenChromeExtensions/);

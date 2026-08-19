@@ -27,6 +27,8 @@ test("Manifest V3 仅申请任务所需权限", () => {
     manifest.host_permissions,
     [
       "https://docs.popo.netease.com/*",
+      "https://*.ingest.sentry.io/*",
+      "https://*.ingest.us.sentry.io/*",
       "http://127.0.0.1/*",
       "http://localhost/*"
     ]
@@ -294,6 +296,26 @@ test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", 
   assert.match(background, /gopeedDownloadDirOverride/);
   assert.match(background, /sendNativeMessage\(FOLDER_PICKER_HOST/);
   assert.match(background, /action: "ensure_gopeed"/);
+  assert.match(background, /action: "agent_connection"/);
+  assert.match(background, /X-Popo-Agent-Token/);
+  assert.match(background, /popoAgentShadowComparison/);
+  assert.match(background, /popoAgentShadowComparisonHistory/);
+  assert.match(background, /MAX_RETAINED_AGENT_SHADOW_COMPARISONS = 64/);
+  assert.match(background, /GET_UPDATE_DIAGNOSTICS/);
+  assert.match(background, /buildUpdateDiagnostics/);
+  assert.match(background, /normalizeUpdateDiagnosticVersion/);
+  assert.match(background, /normalizeUpdateDiagnosticErrorCode/);
+  assert.match(background, /normalizeShadowDiagnosticTransactionId/);
+  assert.match(popup, /GET_UPDATE_DIAGNOSTICS/);
+  assert.match(popup, /copyUpdateDiagnosticsButton/);
+  assert.match(popup, /复制诊断信息/);
+  assert.match(background, /DOWNLOAD_STALLED/);
+  assert.match(background, /GOPEED_TASK_MISSING/);
+  assert.match(background, /GET_DIAGNOSTIC_STATUS/);
+  assert.match(background, /SEND_DIAGNOSTICS/);
+  assert.match(popup, /立即发送诊断/);
+  assert.match(background, /AGENT_PROTOCOL_VERSION < connectionMinimumProtocol/);
+  assert.match(background, /statusProtocol !== connectionProtocol/);
   assert.match(background, /UPDATE_ALARM/);
   assert.match(background, /action: "check_update"/);
   assert.match(background, /action: "apply_update"/);

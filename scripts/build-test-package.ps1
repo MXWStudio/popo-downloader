@@ -41,12 +41,15 @@ $gopeedPortableRoot = Join-Path $gopeedVendorRoot 'portable'
 $gopeedSourceArchive = Join-Path $gopeedVendorRoot 'Gopeed-v1.9.3-source.zip'
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $nativeSource = Join-Path $repoRoot 'native-host\FolderPickerHost.cs'
+$agentSource = Join-Path $repoRoot 'agent\PopoAgent.cs'
 $setupSource = Join-Path $repoRoot 'setup\PopoSetup.cs'
 $setupExecutableName = 'POPO-Setup.exe'
 $compileRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
   ("popo-package-compile-" + [Guid]::NewGuid().ToString('N'))
 $nativeExecutable = Join-Path $compileRoot 'PopoFolderPickerHost.exe'
 $nativeVersion = (Get-FileHash -LiteralPath $nativeSource -Algorithm SHA256).Hash.ToLowerInvariant()
+$agentExecutable = Join-Path $compileRoot 'PopoAgent.exe'
+$agentVersion = (Get-FileHash -LiteralPath $agentSource -Algorithm SHA256).Hash.ToLowerInvariant()
 $setupExecutable = Join-Path $compileRoot $setupExecutableName
 
 if (-not $SkipRuntimeBuild) {
@@ -68,6 +71,12 @@ New-Item -ItemType Directory -Path $compileRoot -Force | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'The native host failed to compile.' }
 
 & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
+  /reference:System.Web.Extensions.dll `
+  /reference:System.Security.dll `
+  /out:$agentExecutable $agentSource
+if ($LASTEXITCODE -ne 0) { throw 'The POPO update agent failed to compile.' }
+
+& $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
   /reference:System.Windows.Forms.dll `
   /reference:System.Drawing.dll `
   /reference:System.Web.Extensions.dll `
@@ -80,6 +89,7 @@ foreach ($requiredPath in @(
   (Join-Path $gopeedVendorRoot 'metadata.json'),
   $gopeedSourceArchive,
   $nativeExecutable,
+  $agentExecutable,
   $setupExecutable,
   (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md')
 )) {
@@ -102,10 +112,12 @@ foreach ($target in @($stagingRoot, $zipPath, $checksumPath, $channelManifestPat
 
 $extensionRoot = Join-Path $stagingRoot 'extension'
 $nativeHostRoot = Join-Path $stagingRoot 'native-host'
+$agentRoot = Join-Path $stagingRoot 'agent'
 $gopeedRoot = Join-Path $stagingRoot 'Gopeed'
 $gopeedLicenseRoot = Join-Path $stagingRoot 'licenses\gopeed'
 New-Item -ItemType Directory -Path $extensionRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $nativeHostRoot 'bin') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $agentRoot 'bin') -Force | Out-Null
 New-Item -ItemType Directory -Path $gopeedRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $gopeedLicenseRoot -Force | Out-Null
 
@@ -135,9 +147,34 @@ Copy-Item -LiteralPath $nativeExecutable -Destination (Join-Path $nativeHostRoot
   $nativeVersion,
   (New-Object System.Text.UTF8Encoding($false))
 )
+Copy-Item -LiteralPath (Join-Path $repoRoot 'agent\PopoAgent.cs') -Destination $agentRoot
+Copy-Item -LiteralPath $agentExecutable -Destination (Join-Path $agentRoot 'bin')
+[System.IO.File]::WriteAllText(
+  (Join-Path $agentRoot 'bin\.popo-agent-version'),
+  $agentVersion,
+  (New-Object System.Text.UTF8Encoding($false))
+)
 Copy-Item -LiteralPath $setupExecutable -Destination (Join-Path $stagingRoot $setupExecutableName)
 Copy-Item -LiteralPath (Join-Path $repoRoot 'TESTING.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.md') -Destination $stagingRoot
+
+$componentManifest = [ordered]@{
+  schemaVersion = 1
+  releaseVersion = $versionName
+  extensionVersion = $versionName
+  agentVersion = $versionName
+  nativeHostVersion = $versionName
+  installerVersion = $versionName
+  updateProtocol = 2
+  minimumProtocol = 1
+}
+[System.IO.File]::WriteAllText(
+  (Join-Path $stagingRoot 'release-manifest.json'),
+  ($componentManifest | ConvertTo-Json -Depth 3),
+  (New-Object System.Text.UTF8Encoding($false))
+)
+Copy-Item -LiteralPath (Join-Path $stagingRoot 'release-manifest.json') `
+  -Destination (Join-Path $agentRoot 'bin\release-manifest.json')
 
 Get-ChildItem -LiteralPath $gopeedPortableRoot -Force |
   Copy-Item -Destination $gopeedRoot -Recurse -Force

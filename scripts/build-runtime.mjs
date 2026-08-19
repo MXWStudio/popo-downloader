@@ -9,7 +9,10 @@ const shared = {
   target: ["chrome114"],
   sourcemap: false,
   legalComments: "none",
-  logLevel: "warning"
+  logLevel: "warning",
+  define: {
+    __POPO_DIAGNOSTIC_DSN__: JSON.stringify(process.env.POPO_DIAGNOSTIC_DSN || "")
+  }
 };
 
 await build({

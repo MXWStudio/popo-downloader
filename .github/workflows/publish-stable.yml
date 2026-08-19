@@ -150,6 +150,8 @@ jobs:
 
       - name: Build runtime without release secrets
         shell: pwsh
+        env:
+          POPO_DIAGNOSTIC_DSN: ${{ vars.POPO_DIAGNOSTIC_DSN }}
         run: npm --prefix release-source run build:runtime
 
       - name: Build the signed package

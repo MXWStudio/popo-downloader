@@ -21,6 +21,8 @@
   ],
   "host_permissions": [
     "https://docs.popo.netease.com/*",
+    "https://*.ingest.sentry.io/*",
+    "https://*.ingest.us.sentry.io/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

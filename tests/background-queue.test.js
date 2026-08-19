@@ -48,6 +48,7 @@ function eventStub() {
 function createHarness(initial = {}, options = {}) {
   const backgroundPath = require.resolve("../background.js");
   delete require.cache[backgroundPath];
+  const previousFetch = Object.getOwnPropertyDescriptor(global, "fetch");
   const stored = structuredClone(initial);
   const deletedGopeedTasks = [];
   const pausedGopeedTasks = [];
@@ -92,6 +93,13 @@ function createHarness(initial = {}, options = {}) {
     }
     if (files.includes("queue.js")) global.PopoQueue = require("../queue.js");
   };
+  if (options.fetch) {
+    Object.defineProperty(global, "fetch", {
+      configurable: true,
+      writable: true,
+      value: options.fetch
+    });
+  }
   global.chrome = {
     action: {
       async setBadgeText({ text }) { actionState.text = text; },
@@ -103,6 +111,9 @@ function createHarness(initial = {}, options = {}) {
       onInstalled: eventStub(),
       onMessage: eventStub(),
       onStartup: eventStub(),
+      ...(options.runtimeManifest ? {
+        getManifest() { return structuredClone(options.runtimeManifest); }
+      } : {}),
       async sendNativeMessage(host, message) {
         nativeMessages.push({ host, message: structuredClone(message) });
         if (options.sendNativeMessage) return options.sendNativeMessage(host, message);
@@ -151,6 +162,8 @@ function createHarness(initial = {}, options = {}) {
     delete global.PopoGopeed;
     delete global.PopoQueue;
     delete global.PopoRuntime;
+    if (previousFetch) Object.defineProperty(global, "fetch", previousFetch);
+    else delete global.fetch;
     delete require.cache[backgroundPath];
   };
   const fireAlarm = (name) => {
@@ -178,6 +191,36 @@ async function waitUntil(predicate, message = "等待后台状态更新超时") 
   }
   assert.fail(message);
 }
+
+test("未配置接收地址时一键诊断会脱敏写入 IndexedDB 离线队列", async () => {
+  const restoreIndexedDb = installFakeIndexedDb();
+  const runtime = require("../runtime/popo-runtime.cjs");
+  await runtime.taskStore.resetDatabaseForTests();
+  const initialState = transferState();
+  initialState.rootUrl = "https://docs.popo.netease.com/team/pc/private/pageDetail/root-secret";
+  const harness = createHarness({
+    popoState: initialState,
+    popoSettings: initialState.settings
+  }, {
+    runtimeManifest: { version: "0.7.2" }
+  });
+  try {
+    const response = await harness.send({ type: "SEND_DIAGNOSTICS" });
+    assert.equal(response.ok, true);
+    assert.equal(response.diagnosticStatus.configured, false);
+    assert.equal(response.diagnosticStatus.pendingCount, 1);
+    const records = await runtime.taskStore.listDiagnosticEvents({ includeDeferred: true });
+    assert.equal(records.length, 1);
+    assert.equal(records[0].event.message, "MANUAL_DIAGNOSTIC_SNAPSHOT");
+    const exported = JSON.stringify(records[0].event);
+    assert.doesNotMatch(exported, /active\.mp4|root-secret|private\/pageDetail/);
+    assert.match(records[0].event.tags.install, /^h:/);
+  } finally {
+    harness.cleanup();
+    await runtime.taskStore.resetDatabaseForTests();
+    restoreIndexedDb();
+  }
+});
 
 function transferState({ mode = "downloading", jobStatus = mode, includePending = false } = {}) {
   const now = new Date().toISOString();
@@ -245,6 +288,564 @@ test("后台启动时把本地状态限制在受信任扩展上下文", () => {
   const harness = createHarness();
   try {
     assert.equal(harness.storageAccessState.accessLevel, "TRUSTED_CONTEXTS");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("incompatible agent shadow status falls back to the existing signed update path", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "not-used-for-an-incompatible-protocol",
+            protocol: 3,
+            minimumProtocol: 3
+          };
+        }
+        if (message.action === "check_update") {
+          return { ok: true, available: false, version: "0.7.2" };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "up_to_date");
+    assert.equal(harness.stored.popoAgentShadowStatus.available, false);
+    assert.equal(harness.stored.popoAgentShadowStatus.errorCode, "AGENT_UNAVAILABLE");
+    assert.equal(harness.stored.popoAgentShadowComparison.comparable, false);
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "shadow_unavailable");
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("matching agent and legacy checks persist a comparable shadow diagnostic", async () => {
+  const existingHistory = Array.from({ length: 64 }, (_, index) => ({
+    schemaVersion: 1,
+    outcome: "matched",
+    comparable: true,
+    matches: true,
+    shadowTarget: "0.7.2",
+    legacyTarget: "0.7.2",
+    shadowState: "idle",
+    shadowErrorCode: "",
+    legacyErrorCode: "",
+    shadowFailureKind: "",
+    legacyFailureKind: "",
+    shadowTransactionId: `shadow-old-${index}`,
+    shadowUpdatedAt: "2026-08-13T00:00:00.000Z",
+    checkedAt: new Date(Date.UTC(2026, 7, 13, 0, index)).toISOString(),
+    ...(index === 1 ? { secret: "must-not-survive" } : {})
+  }));
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoAgentShadowComparisonHistory: existingHistory,
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async fetch(url, init) {
+        assert.equal(url, "http://127.0.0.1:54321/update-status");
+        assert.equal(init.headers["X-Popo-Agent-Token"], "test-agent-token");
+        return {
+          ok: true,
+          async json() {
+            return {
+              schemaVersion: 1,
+              phase: "shadow",
+              state: "idle",
+              currentVersion: "0.7.2",
+              targetVersion: "0.7.2",
+              transactionId: "shadow-match",
+              errorCode: "",
+              protocol: 2,
+              minimumProtocol: 1,
+              updatedAt: "2026-08-14T00:00:00.000Z"
+            };
+          }
+        };
+      },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "test-agent-token",
+            protocol: 2,
+            minimumProtocol: 1
+          };
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: false,
+            currentVersion: "0.7.2",
+            version: "0.7.2"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "up_to_date");
+    assert.equal(harness.stored.popoAgentShadowComparison.schemaVersion, 1);
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "matched");
+    assert.equal(harness.stored.popoAgentShadowComparison.comparable, true);
+    assert.equal(harness.stored.popoAgentShadowComparison.matches, true);
+    assert.equal(harness.stored.popoAgentShadowComparison.shadow.validation, "passed");
+    assert.equal(harness.stored.popoAgentShadowComparison.legacy.validation, "passed");
+    assert.equal(harness.stored.popoAgentShadowComparisonHistory.length, 64);
+    assert.equal(harness.stored.popoAgentShadowComparisonHistory[0].shadowTransactionId, "shadow-old-1");
+    assert.equal(harness.stored.popoAgentShadowComparisonHistory.at(-1).outcome, "matched");
+    assert.equal(
+      harness.stored.popoAgentShadowComparisonHistory.at(-1).shadowTransactionId,
+      "shadow-match"
+    );
+    const persistedHistory = JSON.stringify(harness.stored.popoAgentShadowComparisonHistory);
+    assert.equal(persistedHistory.includes("must-not-survive"), false);
+    assert.equal(persistedHistory.includes("test-agent-token"), false);
+    assert.equal(persistedHistory.includes("127.0.0.1:54321"), false);
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("update diagnostics expose only a bounded redacted shadow snapshot", async () => {
+  const outcomes = ["matched", "mismatch", "shadow_unavailable", "matched_failure", "legacy_failed"];
+  const history = Array.from({ length: 70 }, (_, index) => ({
+    schemaVersion: 1,
+    outcome: outcomes[index % outcomes.length],
+    comparable: index % 5 !== 2,
+    matches: index % 5 === 0 || index % 5 === 3,
+    shadowTarget: "0.7.3",
+    legacyTarget: index % 5 === 1 ? "0.7.2" : "0.7.3",
+    shadowState: index % 5 === 2 ? "unavailable" : "available",
+    shadowErrorCode: index % 5 === 2 ? "AGENT_UNAVAILABLE" : "",
+    legacyErrorCode: index % 5 === 4 ? "LEGACY_NETWORK_ERROR" : "",
+    shadowFailureKind: index % 5 === 2 ? "network" : "",
+    legacyFailureKind: index % 5 === 4 ? "network" : "",
+    shadowTransactionId: `shadow-${index}`,
+    shadowUpdatedAt: new Date(Date.UTC(2026, 7, 14, 0, index)).toISOString(),
+    checkedAt: new Date(Date.UTC(2026, 7, 14, 1, index)).toISOString(),
+    token: "history-secret-token",
+    endpoint: "http://127.0.0.1:54321"
+  }));
+  Object.assign(history[10], {
+    shadowTarget: "https://secret.example/version",
+    legacyTarget: "D:\\private\\version.txt",
+    shadowState: "private-state",
+    shadowErrorCode: "SHADOW_SECRET_TOKEN_QWERTY",
+    legacyErrorCode: "LEGACY_SECRET_CODE",
+    shadowFailureKind: "secret-kind",
+    legacyFailureKind: "secret-kind",
+    shadowTransactionId: "shadow-C:\\private\\transaction.txt",
+    shadowUpdatedAt: "D:\\private\\time.txt"
+  });
+  const harness = createHarness({
+    popoUpdateStatus: {
+      state: "up_to_date",
+      currentVersion: "0.7.2",
+      targetVersion: "D:\\private\\legacy-version.txt",
+      message: "legacy message must not be exported",
+      updatedAt: "2026-08-14T01:00:00.000Z"
+    },
+    popoAgentShadowStatus: {
+      available: true,
+      state: "checking",
+      currentVersion: "0.7.2",
+      targetVersion: "https://agent-secret.example/version",
+      transactionId: "shadow-current",
+      message: "C:\\private\\agent-error.log",
+      errorCode: "AGENT_SECRET_TOKEN_QWERTY",
+      protocol: 2,
+      minimumProtocol: 1,
+      updatedAt: "2026-08-14T01:01:00.000Z",
+      token: "agent-secret-token",
+      endpoint: "http://127.0.0.1:65432"
+    },
+    popoAgentShadowComparison: {
+      ...history.at(-1),
+      outcome: "mismatch",
+      comparable: true,
+      matches: false,
+      shadowTransactionId: "shadow-latest",
+      checkedAt: "2026-08-14T02:00:00.000Z",
+      privatePath: "D:\\private\\package.zip"
+    },
+    popoAgentShadowComparisonHistory: history
+  }, {
+    runtimeManifest: { version: "0.7.2", version_name: "0.7.2" }
+  });
+  try {
+    const storedBefore = JSON.stringify(harness.stored);
+    const response = await harness.send({ type: "GET_UPDATE_DIAGNOSTICS" });
+    assert.equal(response.ok, true);
+    assert.equal(response.diagnostics.schemaVersion, 1);
+    assert.equal(response.diagnostics.phase, "shadow");
+    assert.equal(response.diagnostics.productVersion, "0.7.2");
+    assert.equal(response.diagnostics.history.length, 64);
+    assert.equal(response.diagnostics.history[0].shadowTransactionId, "shadow-6");
+    const poisoned = response.diagnostics.history[4];
+    assert.equal(poisoned.shadowTarget, "");
+    assert.equal(poisoned.legacyTarget, "");
+    assert.equal(poisoned.shadowState, "unavailable");
+    assert.equal(poisoned.shadowErrorCode, "");
+    assert.equal(poisoned.legacyErrorCode, "");
+    assert.equal(poisoned.shadowFailureKind, "");
+    assert.equal(poisoned.legacyFailureKind, "");
+    assert.equal(poisoned.shadowTransactionId, "");
+    assert.equal(poisoned.shadowUpdatedAt, "");
+    assert.equal(response.diagnostics.latestComparison.shadowTransactionId, "shadow-latest");
+    assert.equal(response.diagnostics.agent.transactionId, "shadow-current");
+    assert.equal(response.diagnostics.agent.protocol, 2);
+    assert.equal(response.diagnostics.agent.targetVersion, "");
+    assert.equal(response.diagnostics.agent.errorCode, "");
+    assert.equal(response.diagnostics.legacyUpdate.targetVersion, "");
+    assert.equal(response.diagnostics.summary.total, 64);
+    assert.ok(response.diagnostics.summary.matched > 0);
+    assert.ok(response.diagnostics.summary.mismatched > 0);
+    assert.ok(response.diagnostics.summary.unavailable > 0);
+    assert.ok(response.diagnostics.summary.failures > 0);
+    assert.ok(Number.isFinite(Date.parse(response.diagnostics.generatedAt)));
+    const exported = JSON.stringify(response.diagnostics);
+    for (const sensitive of [
+      "history-secret-token",
+      "agent-secret-token",
+      "127.0.0.1:54321",
+      "127.0.0.1:65432",
+      "legacy message must not be exported",
+      "private\\agent-error.log",
+      "private\\package.zip",
+      "secret.example/version",
+      "private\\version.txt",
+      "private-state",
+      "SECRET_TOKEN_QWERTY",
+      "LEGACY_SECRET_CODE",
+      "secret-kind",
+      "private\\transaction.txt",
+      "private\\time.txt",
+      "private\\legacy-version.txt",
+      "agent-secret.example/version"
+    ]) {
+      assert.equal(exported.includes(sensitive), false, sensitive);
+    }
+    assert.equal(JSON.stringify(harness.stored), storedBefore);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("agent target mismatch is diagnostic only and the legacy result remains authoritative", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async fetch() {
+        return {
+          ok: true,
+          async json() {
+            return {
+              schemaVersion: 1,
+              phase: "shadow",
+              state: "available",
+              currentVersion: "0.7.2",
+              targetVersion: "0.7.3",
+              transactionId: "shadow-mismatch",
+              errorCode: "",
+              protocol: 2,
+              minimumProtocol: 1,
+              updatedAt: "2026-08-14T00:00:00.000Z"
+            };
+          }
+        };
+      },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "test-agent-token",
+            protocol: 2,
+            minimumProtocol: 1
+          };
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: false,
+            currentVersion: "0.7.2",
+            version: "0.7.2"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "up_to_date");
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "mismatch");
+    assert.equal(harness.stored.popoAgentShadowComparison.comparable, true);
+    assert.equal(harness.stored.popoAgentShadowComparison.matches, false);
+    assert.equal(harness.stored.popoUpdateStatus.targetVersion, "0.7.2");
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("legacy check failure is persisted before the existing update flow reports an error", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async fetch() {
+        return {
+          ok: true,
+          async json() {
+            return {
+              schemaVersion: 1,
+              phase: "shadow",
+              state: "idle",
+              currentVersion: "0.7.2",
+              targetVersion: "0.7.2",
+              transactionId: "shadow-legacy-failure",
+              errorCode: "",
+              protocol: 2,
+              minimumProtocol: 1,
+              updatedAt: "2026-08-14T00:00:00.000Z"
+            };
+          }
+        };
+      },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "test-agent-token",
+            protocol: 2,
+            minimumProtocol: 1
+          };
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: false,
+            error: "simulated signed manifest failure",
+            errorCode: "LEGACY_MANIFEST_INVALID"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "failed");
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "legacy_failed");
+    assert.equal(harness.stored.popoAgentShadowComparison.legacy.errorCode, "LEGACY_MANIFEST_INVALID");
+    assert.equal(harness.stored.popoUpdateStatus.message, "simulated signed manifest failure");
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("legacy native messaging transport failure is retained in shadow history", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async fetch() {
+        return {
+          ok: true,
+          async json() {
+            return {
+              schemaVersion: 1,
+              phase: "shadow",
+              state: "idle",
+              currentVersion: "0.7.2",
+              targetVersion: "0.7.2",
+              transactionId: "shadow-legacy-transport",
+              errorCode: "",
+              protocol: 2,
+              minimumProtocol: 1,
+              updatedAt: "2026-08-14T00:00:00.000Z"
+            };
+          }
+        };
+      },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "test-agent-token",
+            protocol: 2,
+            minimumProtocol: 1
+          };
+        }
+        if (message.action === "check_update") {
+          throw new Error("legacy native host disconnected");
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "failed");
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "legacy_failed");
+    assert.equal(harness.stored.popoAgentShadowComparison.legacy.failureKind, "transport");
+    assert.equal(harness.stored.popoAgentShadowComparisonHistory.length, 1);
+    assert.equal(harness.stored.popoAgentShadowComparisonHistory[0].legacyFailureKind, "transport");
+    assert.equal(harness.stored.popoUpdateStatus.message, "legacy native host disconnected");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("agent and legacy signature failures compare by diagnostic category", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.2", version_name: "0.7.2" },
+      async fetch() {
+        return {
+          ok: true,
+          async json() {
+            return {
+              schemaVersion: 1,
+              phase: "shadow",
+              state: "failed",
+              currentVersion: "0.7.2",
+              targetVersion: "",
+              transactionId: "shadow-signature-failure",
+              errorCode: "SHADOW_SIGNATURE_INVALID",
+              protocol: 2,
+              minimumProtocol: 1,
+              updatedAt: "2026-08-14T00:00:00.000Z"
+            };
+          }
+        };
+      },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          return {
+            ok: true,
+            endpoint: "http://127.0.0.1:54321",
+            token: "test-agent-token",
+            protocol: 2,
+            minimumProtocol: 1
+          };
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: false,
+            error: "simulated legacy signature failure",
+            errorCode: "LEGACY_SIGNATURE_INVALID"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "failed");
+    assert.equal(harness.stored.popoAgentShadowComparison.outcome, "matched_failure");
+    assert.equal(harness.stored.popoAgentShadowComparison.comparable, true);
+    assert.equal(harness.stored.popoAgentShadowComparison.matches, true);
+    assert.equal(harness.stored.popoAgentShadowComparison.shadow.failureKind, "signature");
+    assert.equal(harness.stored.popoAgentShadowComparison.legacy.failureKind, "signature");
   } finally {
     harness.cleanup();
   }

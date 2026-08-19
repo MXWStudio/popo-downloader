@@ -68,6 +68,10 @@ $requiredEntries = @(
   ($expectedRoot + 'extension/manifest.json'),
   ($expectedRoot + 'native-host/bin/PopoFolderPickerHost.exe'),
   ($expectedRoot + 'native-host/bin/.popo-native-version'),
+  ($expectedRoot + 'agent/bin/PopoAgent.exe'),
+  ($expectedRoot + 'agent/bin/.popo-agent-version'),
+  ($expectedRoot + 'agent/bin/release-manifest.json'),
+  ($expectedRoot + 'release-manifest.json'),
   ($expectedRoot + 'Gopeed/gopeed.exe')
 )
 $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
@@ -91,6 +95,31 @@ try {
   }
   if ([string]$extensionManifest.version -ne [string]$manifest.chromeVersion) {
     throw 'Packaged Chrome version does not match latest.json.'
+  }
+  $releaseManifestEntry = $archive.Entries | Where-Object {
+    $_.FullName.Replace('\', '/') -eq ($expectedRoot + 'release-manifest.json')
+  } | Select-Object -First 1
+  $releaseReader = New-Object System.IO.StreamReader($releaseManifestEntry.Open())
+  try {
+    $releaseManifest = $releaseReader.ReadToEnd() | ConvertFrom-Json
+  }
+  finally {
+    $releaseReader.Dispose()
+  }
+  foreach ($property in @(
+    'releaseVersion',
+    'extensionVersion',
+    'agentVersion',
+    'nativeHostVersion',
+    'installerVersion'
+  )) {
+    if ([string]$releaseManifest.$property -ne [string]$manifest.version) {
+      throw "Packaged component version is inconsistent: $property"
+    }
+  }
+  if ([int]$releaseManifest.updateProtocol -ne 2 -or
+      [int]$releaseManifest.minimumProtocol -ne 1) {
+    throw 'Packaged update protocol is not compatible with the bridge agent.'
   }
 }
 finally {

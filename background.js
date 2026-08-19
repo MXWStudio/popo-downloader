@@ -44,7 +44,32 @@ const {
 const PUMP_ALARM = "popo-stable-downloader-pump";
 const WATCHDOG_ALARM = "popo-stable-downloader-watchdog";
 const UPDATE_ALARM = "popo-stable-downloader-update";
+const DIAGNOSTIC_FLUSH_ALARM = "popo-stable-downloader-diagnostics";
 const FOLDER_PICKER_HOST = "com.popo.stable_downloader.folder_picker";
+const AGENT_PROTOCOL_VERSION = 2;
+const AGENT_MINIMUM_PROTOCOL_VERSION = 1;
+const MAX_RETAINED_AGENT_SHADOW_COMPARISONS = 64;
+const AGENT_SHADOW_DIAGNOSTIC_STATES = new Set([
+  "idle",
+  "checking",
+  "available",
+  "failed",
+  "unavailable"
+]);
+const UPDATE_DIAGNOSTIC_ERROR_CODES = new Set([
+  "",
+  "AGENT_UNAVAILABLE",
+  "INTERRUPTED_SHADOW_CHECK",
+  "SHADOW_NETWORK_ERROR",
+  "SHADOW_SIGNATURE_INVALID",
+  "SHADOW_MANIFEST_INVALID",
+  "SHADOW_CHECK_FAILED",
+  "LEGACY_NETWORK_ERROR",
+  "LEGACY_SIGNATURE_INVALID",
+  "LEGACY_MANIFEST_INVALID",
+  "LEGACY_CHECK_FAILED",
+  "LEGACY_TRANSPORT_ERROR"
+]);
 const TERMINAL_STATUSES = new Set(["success", "failed", "cancelled", "skipped"]);
 const ITEM_CHUNK_SIZE = 200;
 const ITEM_STORAGE_PREFIX = "popoItems";
@@ -60,10 +85,24 @@ const popupUiPorts = new Set();
 const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
 const UPDATE_CHECK_PERIOD_MINUTES = 6 * 60;
 const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
+const runtimeDiagnostics = globalThis.PopoRuntime?.diagnostics || null;
 const runtimeNetworkMonitor = globalThis.PopoRuntime?.networkMonitor || null;
 const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
 const runtimeWorkflow = globalThis.PopoRuntime?.workflow || null;
 let automaticUpdateLocked = false;
+let diagnosticFlushLocked = false;
+const DIAGNOSTIC_EVENT_CODES = new Set([
+  "BACKGROUND_UNCAUGHT_ERROR",
+  "DOWNLOAD_ATTEMPT_FAILED",
+  "DOWNLOAD_STALLED",
+  "GOPEED_CONNECTION_LOST",
+  "GOPEED_RESTART_RECOVERY_BLOCKED",
+  "GOPEED_RESTART_RECOVERY_PENDING",
+  "GOPEED_TASK_MISSING",
+  "INDEXEDDB_READ_FAILED",
+  "INDEXEDDB_WRITE_FALLBACK",
+  "MANUAL_DIAGNOSTIC_SNAPSHOT"
+]);
 
 function enforceRuntimeCommandContract(command) {
   if (typeof runtimeContracts?.parseRuntimeCommand !== "function") return command;
@@ -509,6 +548,7 @@ function newState() {
     networkHealth: newNetworkHealth(),
     workflow: newPersistentWorkflow(),
     runtimeHealth: newRuntimeHealth(),
+    pendingDiagnostics: [],
     itemStorageBackend: "",
     itemStorageGeneration: "",
     logs: []
@@ -794,6 +834,28 @@ function sanitizeRuntimeContext(context) {
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
+function queueDiagnosticCandidate(state, code, level, context = {}) {
+  if (!runtimeDiagnostics || !DIAGNOSTIC_EVENT_CODES.has(code)) return;
+  const sanitized = typeof runtimeDiagnostics.sanitizeDiagnosticContext === "function"
+    ? runtimeDiagnostics.sanitizeDiagnosticContext(context)
+    : sanitizeRuntimeContext(context) || {};
+  const fingerprint = `${code}|${String(sanitized.failureStage || "")}`;
+  const now = new Date().toISOString();
+  const pending = Array.isArray(state.pendingDiagnostics) ? state.pendingDiagnostics : [];
+  const recent = [...pending].reverse().find((candidate) =>
+    candidate.fingerprint === fingerprint && Date.now() - Date.parse(candidate.at) < 5 * 60_000
+  );
+  if (recent) {
+    recent.count = Math.min(10_000, (Number(recent.count) || 1) + 1);
+    recent.at = now;
+    recent.level = level;
+    recent.context = sanitized;
+  } else {
+    pending.push({ code, level, at: now, count: 1, context: sanitized, fingerprint });
+  }
+  state.pendingDiagnostics = pending.slice(-50);
+}
+
 function pushLog(state, level, message, details, event = null) {
   const at = new Date().toISOString();
   const code = /^[A-Z0-9_]{1,64}$/.test(String(event?.code || ""))
@@ -819,6 +881,7 @@ function pushLog(state, level, message, details, event = null) {
 
 function pushRuntimeEvent(state, code, level, message, details = "", context = {}) {
   pushLog(state, level, message, details, { code, context });
+  queueDiagnosticCandidate(state, code, level, context);
 }
 
 function activeJob(state) {
@@ -954,6 +1017,126 @@ function saveState(state, force = false) {
   return write;
 }
 
+async function ensureDiagnosticInstallId() {
+  const stored = await chrome.storage.local.get(["popoDiagnosticInstallId"]);
+  const existing = String(stored.popoDiagnosticInstallId || "");
+  if (/^install-[A-Za-z0-9._-]{8,128}$/.test(existing)) return existing;
+  const installId = createId("install");
+  await chrome.storage.local.set({ popoDiagnosticInstallId: installId });
+  return installId;
+}
+
+async function persistPendingDiagnostics(state) {
+  const candidates = Array.isArray(state.pendingDiagnostics) ? state.pendingDiagnostics : [];
+  if (!candidates.length || !indexedDbTaskStoreAvailable() ||
+      typeof runtimeTaskStore?.enqueueDiagnosticEvent !== "function" ||
+      typeof runtimeDiagnostics?.buildDiagnosticEvent !== "function") return 0;
+  const installId = await ensureDiagnosticInstallId();
+  const job = activeJob(state);
+  const snapshot = {
+    mode: state.mode,
+    phase: state.phase,
+    counts: {
+      total: Number(job?.counts?.files) || 0,
+      success: Number(job?.counts?.success) || 0,
+      failed: Number(job?.counts?.failed) || 0,
+      pending: Number(job?.counts?.pending) || 0,
+      transferring: Number(job?.counts?.transferring) || 0,
+      activeTransfers: (state.activeTransfers || []).length,
+      scanQueue: (state.scanQueue || []).length,
+      resolveQueue: (state.resolveQueue || []).length
+    }
+  };
+  let written = 0;
+  for (const candidate of candidates) {
+    const event = runtimeDiagnostics.buildDiagnosticEvent({
+      candidate,
+      installId,
+      release: chrome.runtime.getManifest?.().version || "unknown",
+      state: snapshot
+    });
+    await runtimeTaskStore.enqueueDiagnosticEvent(event);
+    written += 1;
+  }
+  state.pendingDiagnostics = [];
+  chrome.alarms.create(DIAGNOSTIC_FLUSH_ALARM, {
+    when: Date.now() + 1000,
+    periodInMinutes: 1
+  });
+  return written;
+}
+
+async function getDiagnosticStatus(state = null) {
+  const configuration = typeof runtimeDiagnostics?.diagnosticConfiguration === "function"
+    ? runtimeDiagnostics.diagnosticConfiguration()
+    : { configured: false, provider: "none", host: "" };
+  const stored = await chrome.storage.local.get(["popoDiagnosticMeta"]);
+  let outbox = { pendingCount: 0, oldestAt: "", newestAt: "" };
+  if (indexedDbTaskStoreAvailable() && typeof runtimeTaskStore?.diagnosticOutboxStatus === "function") {
+    try {
+      outbox = await runtimeTaskStore.diagnosticOutboxStatus();
+    } catch (error) {
+      outbox = { ...outbox, error: String(error?.message || error).slice(0, 200) };
+    }
+  }
+  const localPending = Array.isArray(state?.pendingDiagnostics) ? state.pendingDiagnostics.length : 0;
+  const meta = stored.popoDiagnosticMeta || {};
+  return {
+    schemaVersion: 1,
+    configured: Boolean(configuration.configured),
+    provider: configuration.provider || "none",
+    host: configuration.host || "",
+    pendingCount: outbox.pendingCount + localPending,
+    oldestAt: outbox.oldestAt || "",
+    newestAt: outbox.newestAt || "",
+    lastSentAt: String(meta.lastSentAt || ""),
+    lastAttemptAt: String(meta.lastAttemptAt || ""),
+    lastError: String(meta.lastError || outbox.error || "").slice(0, 200)
+  };
+}
+
+async function flushDiagnostics({ manual = false } = {}) {
+  if (diagnosticFlushLocked) return getDiagnosticStatus();
+  diagnosticFlushLocked = true;
+  try {
+    const configuration = runtimeDiagnostics?.diagnosticConfiguration?.() || { configured: false };
+    if (!configuration.configured) return getDiagnosticStatus();
+    if (!indexedDbTaskStoreAvailable() || typeof runtimeTaskStore?.listDiagnosticEvents !== "function") {
+      throw new Error("诊断离线队列不可用");
+    }
+    const records = await runtimeTaskStore.listDiagnosticEvents({
+      limit: 10,
+      includeDeferred: manual
+    });
+    let sent = 0;
+    let lastError = "";
+    for (const record of records) {
+      try {
+        await runtimeDiagnostics.sendDiagnosticEvent(record.event);
+        await runtimeTaskStore.markDiagnosticEventSent(record.eventId);
+        sent += 1;
+      } catch (error) {
+        lastError = String(error?.message || error).replace(/^Error:\s*/, "").slice(0, 200);
+        await runtimeTaskStore.markDiagnosticEventRetry({ eventId: record.eventId, error: lastError });
+        break;
+      }
+    }
+    const now = new Date().toISOString();
+    const previousMeta = (await chrome.storage.local.get(["popoDiagnosticMeta"]))
+      .popoDiagnosticMeta || {};
+    await chrome.storage.local.set({
+      popoDiagnosticMeta: {
+        lastAttemptAt: now,
+        lastSentAt: sent > 0 ? now : String(previousMeta.lastSentAt || ""),
+        lastError
+      }
+    });
+    return { ...(await getDiagnosticStatus()), sent };
+  } finally {
+    diagnosticFlushLocked = false;
+  }
+}
+
 async function writeLegacyItemChunks(state, chunks, hashes, previousStorage) {
   const jobId = String(state.activeJobId || "");
   const updates = {};
@@ -1054,6 +1237,11 @@ async function saveStateUnlocked(state, force = false) {
     }
   }
 
+  try {
+    await persistPendingDiagnostics(state);
+  } catch (error) {
+    console.warn("诊断事件暂未写入离线队列，将随任务状态保留", error);
+  }
   const metadata = structuredClone(state);
   delete metadata.items;
   delete metadata._itemsLoaded;
@@ -2335,6 +2523,46 @@ function markAttemptFailure(state, item, stage, error, retryTaskId = null) {
     item.completedAt = new Date().toISOString();
     pushLog(state, "error", `${item.name}：${stage}`, detail);
   }
+  queueDiagnosticCandidate(
+    state,
+    "DOWNLOAD_ATTEMPT_FAILED",
+    item.status === "failed" ? "error" : "warn",
+    {
+      failureStage: stage,
+      attempt: Number(item.attempts) || 0,
+      retrying: item.status === "pending",
+      terminal: item.status === "failed"
+    }
+  );
+}
+
+function observeTransferProgress(state, transfer, item, task, status) {
+  if (typeof runtimeDiagnostics?.inspectTransferProgress !== "function") return;
+  const observation = runtimeDiagnostics.inspectTransferProgress({
+    previousDownloaded: transfer.lastDownloaded,
+    lastProgressAt: transfer.lastProgressAt,
+    stallReportedAt: transfer.stallReportedAt,
+    downloaded: task?.progress?.downloaded,
+    status
+  });
+  transfer.lastDownloaded = observation.downloaded;
+  transfer.lastProgressAt = observation.lastProgressAt;
+  transfer.stallReportedAt = observation.stallReportedAt;
+  if (!observation.stalled) return;
+  pushRuntimeEvent(
+    state,
+    "DOWNLOAD_STALLED",
+    "warn",
+    "检测到单文件长时间没有新增下载数据",
+    `stalledForSeconds=${Math.round(observation.stalledForMs / 1000)}`,
+    {
+      jobId: activeJob(state)?.id || "",
+      taskId: transfer.taskId,
+      stalledForSeconds: Math.round(observation.stalledForMs / 1000),
+      activeTransfers: (state.activeTransfers || []).length
+    }
+  );
+  item.stage = "Gopeed 传输中（已自动记录停滞现场）";
 }
 
 function recordGopeedReconciliation(state, outcome, options = {}) {
@@ -2869,6 +3097,7 @@ async function syncGopeedTransfers(state, { resumeAfterReconnect = false } = {})
         status: task?.status || ""
       };
       const status = classifyGopeedTaskStatus(task?.status);
+      observeTransferProgress(state, transfer, item, task, status);
       observed[status] += 1;
       if (status === "success") {
         transfer.lastObservedStatus = "success";
@@ -3005,6 +3234,14 @@ async function syncGopeedTransfers(state, { resumeAfterReconnect = false } = {})
       }
     } catch (error) {
       if (error?.code === 2001) {
+        pushRuntimeEvent(
+          state,
+          "GOPEED_TASK_MISSING",
+          "error",
+          "Gopeed 中已找不到已登记的下载任务",
+          "将刷新 POPO 临时地址并重新建立下载",
+          { jobId: activeJob(state)?.id || "", taskId: transfer.taskId }
+        );
         item.retryTaskId = null;
         markAttemptFailure(
           state,
@@ -3457,7 +3694,14 @@ async function pump() {
     }
   } catch (error) {
     const { state } = await getStored();
-    pushLog(state, "error", "后台任务发生未捕获错误", String(error));
+    pushRuntimeEvent(
+      state,
+      "BACKGROUND_UNCAUGHT_ERROR",
+      "error",
+      "后台任务发生未捕获错误",
+      String(error),
+      { mode: state.mode, phase: state.phase }
+    );
     await saveState(state);
     if (["scanning", "downloading", "draining"].includes(state.mode)) schedulePump(1000);
   } finally {
@@ -4292,6 +4536,331 @@ async function saveAutomaticUpdateStatus(status) {
   return normalized;
 }
 
+async function readAgentShadowStatus() {
+  try {
+    const connection = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+      action: "agent_connection"
+    });
+    if (!connection?.ok || !connection.endpoint || !connection.token) {
+      throw new Error(connection?.error || "更新服务尚未准备好");
+    }
+    const connectionProtocol = Number(connection.protocol);
+    const connectionMinimumProtocol = Number(connection.minimumProtocol);
+    if (!Number.isInteger(connectionProtocol) || !Number.isInteger(connectionMinimumProtocol) ||
+        connectionProtocol < connectionMinimumProtocol ||
+        connectionProtocol < AGENT_MINIMUM_PROTOCOL_VERSION ||
+        AGENT_PROTOCOL_VERSION < connectionMinimumProtocol) {
+      throw new Error("更新服务协议不兼容");
+    }
+    const endpoint = new URL(connection.endpoint);
+    if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" ||
+        endpoint.username || endpoint.password || endpoint.pathname !== "/" ||
+        endpoint.search || endpoint.hash ||
+        Number(endpoint.port) < 49152 || Number(endpoint.port) > 65535) {
+      throw new Error("更新服务地址不受信任");
+    }
+    const response = await fetch(`${endpoint.origin}/update-status`, {
+      method: "GET",
+      headers: { "X-Popo-Agent-Token": connection.token },
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(`更新服务返回 HTTP ${response.status}`);
+    const status = await response.json();
+    const statusProtocol = Number(status?.protocol);
+    const statusMinimumProtocol = Number(status?.minimumProtocol);
+    const allowedStates = new Set(["idle", "checking", "available", "failed"]);
+    if (Number(status?.schemaVersion) !== 1 || status?.phase !== "shadow" ||
+        !allowedStates.has(status?.state) ||
+        !Number.isInteger(statusProtocol) || !Number.isInteger(statusMinimumProtocol) ||
+        statusProtocol < statusMinimumProtocol ||
+        statusProtocol < AGENT_MINIMUM_PROTOCOL_VERSION ||
+        AGENT_PROTOCOL_VERSION < statusMinimumProtocol ||
+        statusProtocol !== connectionProtocol ||
+        statusMinimumProtocol !== connectionMinimumProtocol) {
+      throw new Error("更新服务状态协议不兼容");
+    }
+    const normalized = {
+      available: true,
+      state: String(status?.state || "idle"),
+      phase: String(status?.phase || "shadow"),
+      currentVersion: String(status?.currentVersion || ""),
+      targetVersion: String(status?.targetVersion || ""),
+      transactionId: String(status?.transactionId || ""),
+      message: String(status?.message || ""),
+      errorCode: String(status?.errorCode || ""),
+      protocol: statusProtocol,
+      minimumProtocol: statusMinimumProtocol,
+      updatedAt: String(status?.updatedAt || new Date().toISOString())
+    };
+    await chrome.storage.local.set({ popoAgentShadowStatus: normalized });
+    return normalized;
+  } catch (error) {
+    const unavailable = {
+      available: false,
+      state: "unavailable",
+      phase: "shadow",
+      currentVersion: chrome.runtime.getManifest().version,
+      targetVersion: "",
+      transactionId: "",
+      message: String(error?.message || error).replace(/^Error:\s*/, ""),
+      errorCode: "AGENT_UNAVAILABLE",
+      protocol: 0,
+      minimumProtocol: 0,
+      updatedAt: new Date().toISOString()
+    };
+    await chrome.storage.local.set({ popoAgentShadowStatus: unavailable });
+    return unavailable;
+  }
+}
+
+async function saveAgentShadowComparison(shadow, legacyCheck) {
+  const shadowTarget = String(shadow?.targetVersion || "");
+  const legacyTarget = String(legacyCheck?.version || "");
+  const shadowErrorCode = String(shadow?.errorCode || "");
+  const legacyErrorCode = String(legacyCheck?.errorCode || "");
+  const shadowAvailable = Boolean(shadow?.available);
+  const shadowFailed = shadowAvailable && shadow?.state === "failed";
+  const legacySucceeded = Boolean(legacyCheck?.ok);
+  const legacyFailed = legacyCheck != null && !legacySucceeded;
+  const shadowFailureKind = diagnosticFailureKind(shadowErrorCode);
+  const legacyFailureKind = diagnosticFailureKind(legacyErrorCode);
+  const comparableVersions = shadowAvailable && !shadowFailed && legacySucceeded &&
+    Boolean(shadowTarget && legacyTarget);
+  const comparableFailures = shadowFailed && legacyFailed &&
+    Boolean(shadowFailureKind && legacyFailureKind);
+  const matches = comparableVersions
+    ? shadowTarget === legacyTarget
+    : comparableFailures
+      ? shadowFailureKind === legacyFailureKind
+      : false;
+  let outcome = "not_comparable";
+  if (!shadowAvailable) outcome = "shadow_unavailable";
+  else if (shadowFailed && legacySucceeded) outcome = "shadow_failed";
+  else if (!shadowFailed && legacyFailed) outcome = "legacy_failed";
+  else if (comparableFailures) outcome = matches ? "matched_failure" : "failure_mismatch";
+  else if (comparableVersions) outcome = matches ? "matched" : "mismatch";
+  const comparison = {
+    schemaVersion: 1,
+    outcome,
+    comparable: comparableVersions || comparableFailures,
+    matches,
+    shadowTarget,
+    legacyTarget,
+    shadowState: String(shadow?.state || "unavailable"),
+    shadowErrorCode,
+    legacyErrorCode,
+    shadowFailureKind,
+    legacyFailureKind,
+    shadowTransactionId: String(shadow?.transactionId || ""),
+    shadowUpdatedAt: String(shadow?.updatedAt || ""),
+    shadow: {
+      available: shadowAvailable,
+      state: String(shadow?.state || "unavailable"),
+      currentVersion: String(shadow?.currentVersion || ""),
+      targetVersion: shadowTarget,
+      validation: !shadowAvailable ? "unavailable" : shadowFailed ? "failed" : "passed",
+      errorCode: shadowErrorCode,
+      failureKind: shadowFailureKind,
+      protocol: Number(shadow?.protocol) || 0,
+      minimumProtocol: Number(shadow?.minimumProtocol) || 0
+    },
+    legacy: {
+      ok: legacySucceeded,
+      available: Boolean(legacyCheck?.available),
+      currentVersion: String(legacyCheck?.currentVersion || ""),
+      targetVersion: legacyTarget,
+      validation: legacySucceeded ? "passed" : "failed",
+      errorCode: legacyErrorCode,
+      failureKind: legacyFailureKind
+    },
+    checkedAt: new Date().toISOString()
+  };
+  const stored = await chrome.storage.local.get(["popoAgentShadowComparisonHistory"]);
+  const priorHistory = Array.isArray(stored.popoAgentShadowComparisonHistory)
+    ? stored.popoAgentShadowComparisonHistory
+        .map(normalizeAgentShadowComparisonHistoryEntry)
+        .filter(Boolean)
+    : [];
+  const historyEntry = normalizeAgentShadowComparisonHistoryEntry(comparison);
+  const history = priorHistory
+    .slice(-(MAX_RETAINED_AGENT_SHADOW_COMPARISONS - 1))
+    .concat(historyEntry ? [historyEntry] : []);
+  await chrome.storage.local.set({
+    popoAgentShadowComparison: comparison,
+    popoAgentShadowComparisonHistory: history
+  });
+  return comparison;
+}
+
+function normalizeAgentShadowComparisonHistoryEntry(value) {
+  const allowedOutcomes = new Set([
+    "matched",
+    "mismatch",
+    "shadow_unavailable",
+    "shadow_failed",
+    "legacy_failed",
+    "matched_failure",
+    "failure_mismatch",
+    "not_comparable"
+  ]);
+  if (!value || Number(value.schemaVersion) !== 1 || !allowedOutcomes.has(value.outcome)) return null;
+  const checkedAt = normalizeUpdateDiagnosticTimestamp(value.checkedAt);
+  if (!checkedAt) return null;
+  const shadowErrorCode = normalizeUpdateDiagnosticErrorCode(value.shadowErrorCode);
+  const legacyErrorCode = normalizeUpdateDiagnosticErrorCode(value.legacyErrorCode);
+  const comparable = new Set([
+    "matched",
+    "mismatch",
+    "matched_failure",
+    "failure_mismatch"
+  ]).has(value.outcome);
+  const matches = value.outcome === "matched" || value.outcome === "matched_failure";
+  return {
+    schemaVersion: 1,
+    outcome: value.outcome,
+    comparable,
+    matches,
+    shadowTarget: normalizeUpdateDiagnosticVersion(value.shadowTarget),
+    legacyTarget: normalizeUpdateDiagnosticVersion(value.legacyTarget),
+    shadowState: normalizeAgentShadowDiagnosticState(value.shadowState),
+    shadowErrorCode,
+    legacyErrorCode,
+    shadowFailureKind: diagnosticFailureKind(shadowErrorCode),
+    legacyFailureKind: diagnosticFailureKind(legacyErrorCode),
+    shadowTransactionId: normalizeShadowDiagnosticTransactionId(value.shadowTransactionId),
+    shadowUpdatedAt: normalizeUpdateDiagnosticTimestamp(value.shadowUpdatedAt),
+    checkedAt
+  };
+}
+
+function normalizeUpdateDiagnosticVersion(value) {
+  const normalized = String(value || "");
+  return /^\d{1,10}(?:\.\d{1,10}){1,3}$/.test(normalized) ? normalized : "";
+}
+
+function normalizeUpdateDiagnosticErrorCode(value) {
+  const normalized = String(value || "");
+  return UPDATE_DIAGNOSTIC_ERROR_CODES.has(normalized) ? normalized : "";
+}
+
+function diagnosticFailureKind(errorCode) {
+  const normalized = normalizeUpdateDiagnosticErrorCode(errorCode);
+  if (normalized.includes("NETWORK")) return "network";
+  if (normalized.includes("TRANSPORT")) return "transport";
+  if (normalized.includes("SIGNATURE")) return "signature";
+  if (normalized.includes("MANIFEST")) return "manifest";
+  if (normalized.includes("CHECK")) return "check";
+  return "";
+}
+
+function normalizeAgentShadowDiagnosticState(value) {
+  const normalized = String(value || "");
+  return AGENT_SHADOW_DIAGNOSTIC_STATES.has(normalized) ? normalized : "unavailable";
+}
+
+function normalizeShadowDiagnosticTransactionId(value) {
+  const normalized = String(value || "");
+  return /^shadow-[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(normalized)
+    ? normalized
+    : "";
+}
+
+function normalizeUpdateDiagnosticTimestamp(value) {
+  const normalized = String(value || "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/.test(normalized) &&
+    Number.isFinite(Date.parse(normalized))
+    ? normalized
+    : "";
+}
+
+function normalizeAgentShadowStatusForDiagnostics(value) {
+  const protocol = (input) => {
+    const normalized = Number(input);
+    return Number.isInteger(normalized) && normalized >= 0 && normalized <= 100
+      ? normalized
+      : 0;
+  };
+  const state = normalizeAgentShadowDiagnosticState(value?.state);
+  return {
+    available: state !== "unavailable" && Boolean(value?.available),
+    state,
+    currentVersion: normalizeUpdateDiagnosticVersion(value?.currentVersion),
+    targetVersion: normalizeUpdateDiagnosticVersion(value?.targetVersion),
+    transactionId: normalizeShadowDiagnosticTransactionId(value?.transactionId),
+    errorCode: normalizeUpdateDiagnosticErrorCode(value?.errorCode),
+    protocol: protocol(value?.protocol),
+    minimumProtocol: protocol(value?.minimumProtocol),
+    updatedAt: normalizeUpdateDiagnosticTimestamp(value?.updatedAt)
+  };
+}
+
+function normalizeLegacyUpdateStatusForDiagnostics(value) {
+  const allowedStates = new Set([
+    "idle",
+    "development",
+    "deferred",
+    "up_to_date",
+    "starting",
+    "checking",
+    "downloading",
+    "installing",
+    "succeeded",
+    "failed"
+  ]);
+  const state = String(value?.state || "");
+  return {
+    state: allowedStates.has(state) ? state : "idle",
+    currentVersion: normalizeUpdateDiagnosticVersion(value?.currentVersion),
+    targetVersion: normalizeUpdateDiagnosticVersion(value?.targetVersion),
+    updatedAt: normalizeUpdateDiagnosticTimestamp(value?.updatedAt)
+  };
+}
+
+async function buildUpdateDiagnostics() {
+  const data = await chrome.storage.local.get([
+    "popoUpdateStatus",
+    "popoAgentShadowStatus",
+    "popoAgentShadowComparison",
+    "popoAgentShadowComparisonHistory"
+  ]);
+  const history = (Array.isArray(data.popoAgentShadowComparisonHistory)
+    ? data.popoAgentShadowComparisonHistory
+    : [])
+    .map(normalizeAgentShadowComparisonHistoryEntry)
+    .filter(Boolean)
+    .slice(-MAX_RETAINED_AGENT_SHADOW_COMPARISONS);
+  const latestComparison = normalizeAgentShadowComparisonHistoryEntry(
+    data.popoAgentShadowComparison
+  ) || history[history.length - 1] || null;
+  const manifest = chrome.runtime.getManifest();
+  const failureOutcomes = new Set([
+    "shadow_failed",
+    "legacy_failed",
+    "matched_failure",
+    "failure_mismatch"
+  ]);
+  return {
+    schemaVersion: 1,
+    phase: "shadow",
+    productVersion: normalizeUpdateDiagnosticVersion(manifest.version_name || manifest.version),
+    generatedAt: new Date().toISOString(),
+    legacyUpdate: normalizeLegacyUpdateStatusForDiagnostics(data.popoUpdateStatus),
+    agent: normalizeAgentShadowStatusForDiagnostics(data.popoAgentShadowStatus),
+    latestComparison,
+    history,
+    summary: {
+      total: history.length,
+      comparable: history.filter((entry) => entry.comparable).length,
+      matched: history.filter((entry) => entry.outcome === "matched" ||
+        entry.outcome === "matched_failure").length,
+      mismatched: history.filter((entry) => entry.outcome === "mismatch" ||
+        entry.outcome === "failure_mismatch").length,
+      unavailable: history.filter((entry) => entry.outcome === "shadow_unavailable").length,
+      failures: history.filter((entry) => failureOutcomes.has(entry.outcome)).length
+    }
+  };
+}
+
 function isDevelopmentBuild() {
   const manifest = typeof chrome.runtime.getManifest === "function"
     ? chrome.runtime.getManifest()
@@ -4317,6 +4886,7 @@ async function runAutomaticUpdateCheck() {
   automaticUpdateLocked = true;
   const currentVersion = chrome.runtime.getManifest().version;
   try {
+    const shadow = await readAgentShadowStatus();
     const { state } = await getStored({ loadItems: false });
     if (updateBlockedByActiveJobs(state)) {
       await saveAutomaticUpdateStatus({
@@ -4327,10 +4897,20 @@ async function runAutomaticUpdateCheck() {
       return;
     }
 
-    const check = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
-      action: "check_update",
-      currentVersion
-    });
+    let check;
+    try {
+      check = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+        action: "check_update",
+        currentVersion
+      });
+    } catch (error) {
+      check = {
+        ok: false,
+        error: String(error?.message || error).replace(/^Error:\s*/, ""),
+        errorCode: "LEGACY_TRANSPORT_ERROR"
+      };
+    }
+    await saveAgentShadowComparison(shadow, check);
     if (!check?.ok) throw new Error(check?.error || "无法读取签名更新清单");
     if (!check.available) {
       await saveAutomaticUpdateStatus({
@@ -4403,12 +4983,14 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({ popoSettings: mergeSettings(data.popoSettings || {}) });
   if (!data.popoState) await chrome.storage.local.set({ popoState: newState() });
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(DIAGNOSTIC_FLUSH_ALARM, { periodInMinutes: 1 });
   scheduleAutomaticUpdates(5);
   schedulePump(1000);
 });
 
 chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.create(DIAGNOSTIC_FLUSH_ALARM, { periodInMinutes: 1 });
   scheduleAutomaticUpdates(2);
   schedulePump(1000);
 });
@@ -4417,6 +4999,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === PUMP_ALARM) void pump();
   if (alarm.name === WATCHDOG_ALARM) void runWatchdog();
   if (alarm.name === UPDATE_ALARM) void runAutomaticUpdateCheck();
+  if (alarm.name === DIAGNOSTIC_FLUSH_ALARM) void flushDiagnostics();
 });
 
 async function runWatchdog() {
@@ -4508,6 +5091,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             updatedAt: ""
           }
         };
+      }
+      case "GET_UPDATE_DIAGNOSTICS":
+        return { ok: true, diagnostics: await buildUpdateDiagnostics() };
+      case "GET_DIAGNOSTIC_STATUS": {
+        const { state } = await getStored({ loadItems: false });
+        return { ok: true, diagnosticStatus: await getDiagnosticStatus(state) };
+      }
+      case "SEND_DIAGNOSTICS": {
+        const { state } = await getStored();
+        queueDiagnosticCandidate(state, "MANUAL_DIAGNOSTIC_SNAPSHOT", "info", {
+          mode: state.mode,
+          phase: state.phase,
+          activeTransfers: (state.activeTransfers || []).length
+        });
+        await saveState(state);
+        return { ok: true, diagnosticStatus: await flushDiagnostics({ manual: true }) };
       }
       case "CHECK_GOPEED": {
         const { settings } = await getStored({ loadItems: false });

@@ -211,7 +211,7 @@ test("文件操作预约按任务与文件幂等且保留 Gopeed 接管事实", 
   assert.equal(await taskStore.readOperation(identity), null);
 });
 
-test("数据库从 v1 升级到 v2 时保留原文件分块并新增工作流账本", async () => {
+test("数据库从 v1 升级到 v3 时保留原文件分块并新增工作流与诊断账本", async () => {
   const openRequest = indexedDB.open("popo-stable-downloader", 1);
   openRequest.onupgradeneeded = () => {
     const database = openRequest.result;
@@ -258,4 +258,38 @@ test("数据库从 v1 升级到 v2 时保留原文件分块并新增工作流账
     snapshot: { version: 1, sequence: 1 }
   });
   assert.equal((await taskStore.readWorkflowCheckpoint("legacy-job")).sequence, 1);
+});
+
+test("诊断离线队列合并同类事件、记录退避并在成功后移除", async () => {
+  const event = {
+    event_id: "0123456789abcdef0123456789abcdef",
+    timestamp: "2026-08-19T00:00:00.000Z",
+    message: "DOWNLOAD_STALLED",
+    fingerprint: ["DOWNLOAD_STALLED", "none"],
+    extra: { occurrenceCount: 1 }
+  };
+  assert.deepEqual(await taskStore.enqueueDiagnosticEvent(event), {
+    eventId: event.event_id,
+    merged: false,
+    occurrenceCount: 1
+  });
+  const duplicate = { ...event, event_id: "fedcba9876543210fedcba9876543210" };
+  assert.deepEqual(await taskStore.enqueueDiagnosticEvent(duplicate), {
+    eventId: event.event_id,
+    merged: true,
+    occurrenceCount: 2
+  });
+  assert.equal((await taskStore.diagnosticOutboxStatus()).pendingCount, 1);
+  const queued = await taskStore.listDiagnosticEvents({ includeDeferred: true });
+  assert.equal(queued[0].occurrenceCount, 2);
+  assert.equal(queued[0].event.extra.occurrenceCount, 2);
+  const retried = await taskStore.markDiagnosticEventRetry({
+    eventId: event.event_id,
+    error: "offline"
+  });
+  assert.equal(retried.attemptCount, 1);
+  assert.equal(await taskStore.listDiagnosticEvents().then((records) => records.length), 0);
+  assert.equal((await taskStore.listDiagnosticEvents({ includeDeferred: true })).length, 1);
+  await taskStore.markDiagnosticEventSent(event.event_id);
+  assert.equal((await taskStore.diagnosticOutboxStatus()).pendingCount, 0);
 });

@@ -4,14 +4,18 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using System.Xml;
 using Microsoft.Win32;
 
 internal static class PopoSetup
 {
     private const string HostName = "com.popo.stable_downloader.folder_picker";
+    private const string AgentTaskNamePrefix = "POPO Stable Downloader Update Agent";
     private const string ProductRegistryPath = @"Software\POPOStableDownloader";
     private const string InstallRootValueName = "InstallRoot";
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer {
@@ -244,6 +248,45 @@ internal static class PopoSetup
         Application.SetCompatibleTextRenderingDefault(false);
         try
         {
+#if POPO_SETUP_TEST
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && HasArgument(args, "--test-verify-agent-startup"))
+            {
+                string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                return AgentStartupDefinitionMatches(testRoot) ? 0 : 2;
+            }
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && HasArgument(args, "--test-validate-agent-startup-xml"))
+            {
+                string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                string xmlPath = Path.GetFullPath(GetArgumentValue(args, "--test-validate-agent-startup-xml"));
+                return AgentStartupXmlMatches(File.ReadAllText(xmlPath, Encoding.UTF8), testRoot) ? 0 : 2;
+            }
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && (HasArgument(args, "--test-agent-startup") ||
+                HasArgument(args, "--test-delete-agent-startup")))
+            {
+                string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                if (HasArgument(args, "--test-delete-agent-startup"))
+                {
+                    StopAgent(testRoot);
+                    DeleteAgentStartup(testRoot);
+                    return 0;
+                }
+                RegisterAgentStartup(testRoot);
+                StartAgent(testRoot);
+                return 0;
+            }
+#endif
             bool quiet = HasArgument(args, "--quiet");
             bool skipRegister = HasArgument(args, "--skip-register");
             string packageRoot = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory);
@@ -261,11 +304,18 @@ internal static class PopoSetup
                 "bin",
                 ".popo-native-version"
             );
+            string sourceAgent = Path.Combine(packageRoot, "agent", "bin");
+            string sourceAgentExecutable = Path.Combine(sourceAgent, "PopoAgent.exe");
+            string sourceAgentVersion = Path.Combine(sourceAgent, ".popo-agent-version");
             RequireFile(Path.Combine(sourceExtension, "manifest.json"));
             RequireFile(Path.Combine(sourceGopeed, "gopeed.exe"));
             RequireFile(Path.Combine(sourceGopeed, "libgopeed.dll"));
             RequireFile(sourceNativeHost);
             RequireFile(sourceNativeVersion);
+            RequireFile(sourceAgentExecutable);
+            RequireFile(sourceAgentVersion);
+            RequireFile(Path.Combine(sourceAgent, "release-manifest.json"));
+            RequireFile(Path.Combine(packageRoot, "release-manifest.json"));
 
             Dictionary<string, object> manifest = Json.Deserialize<Dictionary<string, object>>(
                 File.ReadAllText(Path.Combine(sourceExtension, "manifest.json"), Encoding.UTF8)
@@ -273,6 +323,7 @@ internal static class PopoSetup
             string extensionKey = GetString(manifest, "key");
             string extensionId = ComputeExtensionId(extensionKey);
             string versionName = GetString(manifest, "version_name");
+            ValidateReleaseManifest(packageRoot, versionName);
 
             string productRoot = GetArgumentValue(args, "--install-root");
             string migrateFrom = GetArgumentValue(args, "--migrate-from");
@@ -310,48 +361,88 @@ internal static class PopoSetup
                 chromeExtensionRoot = Path.Combine(existingRoot, "Extension");
             }
             if (String.IsNullOrWhiteSpace(chromeExtensionRoot)) chromeExtensionRoot = extensionRoot;
+#if POPO_SETUP_TEST
             bool simulateUpdateFailure = HasArgument(args, "--test-fail-after-swap") &&
                 String.Equals(
                     Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
                     "1",
                     StringComparison.Ordinal
                 );
+#else
+            bool simulateUpdateFailure = false;
+#endif
+            bool migrationAgentWasRunning = migrating && IsProcessRunningAt(
+                Path.Combine(existingRoot, "Agent", "PopoAgent.exe")
+            );
+            bool migrationStartupExisted = migrating && !skipRegister && AgentStartupExists(existingRoot);
+            bool migrationTargetStartupExisted = migrating && !skipRegister && AgentStartupExists(productRoot);
             if (migrating && IsProcessRunningAt(Path.Combine(existingRoot, "NativeHost", "Gopeed", "gopeed.exe")))
             {
                 throw new InvalidOperationException(
                     "下载服务正在运行。请先从系统托盘退出 Gopeed，再迁移安装位置；下载记录不会丢失。"
                 );
             }
-            ApplyVerifiedUpdate(
-                packageRoot,
-                productRoot,
-                sourceExtension,
-                sourceGopeed,
-                sourceNativeHost,
-                sourceNativeVersion,
-                extensionId,
-                versionName,
-                !skipRegister && !migrating,
-                forceRepair,
-                migrating ? "migration" : forceRepair ? "repair" : "verified-candidate",
-                chromeExtensionRoot,
-                simulateUpdateFailure
-            );
-            if (migrating) SeedMigrationData(existingRoot, productRoot);
-            if (!SamePath(extensionRoot, chromeExtensionRoot))
+            if (migrationAgentWasRunning) StopAgent(existingRoot);
+            try
             {
-                SyncCompatibilityExtension(productRoot, extensionRoot, chromeExtensionRoot);
-            }
-            if (migrating) FinalizeMigration(existingRoot, productRoot, chromeExtensionRoot);
-            if (migrating && !skipRegister)
-            {
-                string nativeRoot = Path.Combine(productRoot, "NativeHost");
-                InstallNativeManifest(
-                    nativeRoot,
-                    Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"),
+                ApplyVerifiedUpdate(
+                    packageRoot,
+                    productRoot,
+                    sourceExtension,
+                    sourceGopeed,
+                    sourceNativeHost,
+                    sourceNativeVersion,
+                    sourceAgent,
                     extensionId,
-                    true
+                    versionName,
+                    !skipRegister && !migrating,
+                    forceRepair,
+                    migrating ? "migration" : forceRepair ? "repair" : "verified-candidate",
+                    chromeExtensionRoot,
+                    simulateUpdateFailure
                 );
+                if (migrating) SeedMigrationData(existingRoot, productRoot);
+                if (!SamePath(extensionRoot, chromeExtensionRoot))
+                {
+                    SyncCompatibilityExtension(productRoot, extensionRoot, chromeExtensionRoot);
+                }
+                if (migrating && !skipRegister)
+                {
+                    string nativeRoot = Path.Combine(productRoot, "NativeHost");
+                    RegisterAgentStartup(productRoot);
+                    StartAgent(productRoot);
+                    InstallNativeManifest(
+                        nativeRoot,
+                        Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"),
+                        extensionId,
+                        true
+                    );
+                    if (migrationStartupExisted) DeleteAgentStartup(existingRoot);
+                }
+                if (migrating) FinalizeMigration(existingRoot, productRoot, chromeExtensionRoot);
+            }
+            catch
+            {
+                if (migrating && !skipRegister && !migrationTargetStartupExisted)
+                {
+                    try { StopAgent(productRoot); } catch {}
+                    try { DeleteAgentStartup(productRoot); } catch {}
+                }
+                if (migrating && !skipRegister)
+                {
+                    string oldNativeRoot = Path.Combine(existingRoot, "NativeHost");
+                    string oldNativeHost = Path.Combine(oldNativeRoot, "PopoFolderPickerHost.exe");
+                    if (File.Exists(oldNativeHost))
+                    {
+                        try { InstallNativeManifest(oldNativeRoot, oldNativeHost, extensionId, true); }
+                        catch {}
+                    }
+                }
+                if (migrationAgentWasRunning && Directory.Exists(Path.Combine(existingRoot, "Agent")))
+                {
+                    StartAgent(existingRoot);
+                }
+                throw;
             }
             if (!skipRegister) SaveInstallRoot(productRoot);
 
@@ -379,6 +470,28 @@ internal static class PopoSetup
         }
         catch (Exception error)
         {
+#if POPO_SETUP_TEST
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ))
+            {
+                try
+                {
+                    string testRoot = GetArgumentValue(args, "--install-root");
+                    if (!String.IsNullOrWhiteSpace(testRoot) && Directory.Exists(testRoot))
+                    {
+                        File.WriteAllText(
+                            Path.Combine(Path.GetFullPath(testRoot), "setup-test-error.txt"),
+                            error.ToString(),
+                            new UTF8Encoding(false)
+                        );
+                    }
+                }
+                catch {}
+            }
+#endif
             if (!HasArgument(args, "--quiet"))
             {
                 MessageBox.Show(
@@ -421,6 +534,16 @@ internal static class PopoSetup
         return value != null && value.TryGetValue(key, out result) && result != null
             ? Convert.ToString(result)
             : "";
+    }
+
+    private static int GetInteger(Dictionary<string, object> value, string key)
+    {
+        object result;
+        int parsed;
+        return value != null && value.TryGetValue(key, out result) && result != null &&
+            Int32.TryParse(Convert.ToString(result), out parsed)
+            ? parsed
+            : 0;
     }
 
     private static string ComputeExtensionId(string publicKey)
@@ -606,6 +729,331 @@ internal static class PopoSetup
         }
     }
 
+    private static void ValidateReleaseManifest(string packageRoot, string versionName)
+    {
+        Dictionary<string, object> release = Json.Deserialize<Dictionary<string, object>>(
+            File.ReadAllText(Path.Combine(packageRoot, "release-manifest.json"), Encoding.UTF8)
+        );
+        foreach (string key in new[] {
+            "releaseVersion",
+            "extensionVersion",
+            "agentVersion",
+            "nativeHostVersion",
+            "installerVersion"
+        })
+        {
+            if (!String.Equals(GetString(release, key), versionName, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The package component versions are inconsistent.");
+            }
+        }
+        if (GetInteger(release, "schemaVersion") != 1 ||
+            GetInteger(release, "updateProtocol") != 2 ||
+            GetInteger(release, "minimumProtocol") != 1)
+        {
+            throw new InvalidDataException("The package update protocol is not supported.");
+        }
+        if (!FilesMatch(
+            Path.Combine(packageRoot, "release-manifest.json"),
+            Path.Combine(packageRoot, "agent", "bin", "release-manifest.json")
+        ))
+        {
+            throw new InvalidDataException("The update agent component manifest does not match the package.");
+        }
+    }
+
+    private static void RegisterAgentStartup(string productRoot)
+    {
+#if POPO_SETUP_TEST
+        if (String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_FAIL_AGENT_STARTUP"),
+            "1",
+            StringComparison.Ordinal
+        ) && String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+            "1",
+            StringComparison.Ordinal
+        ))
+        {
+            throw new InvalidOperationException("Simulated POPO update agent startup registration failure.");
+        }
+#endif
+        string executable = Path.Combine(productRoot, "Agent", "PopoAgent.exe");
+        string taskName = GetAgentTaskName(productRoot);
+        RequireFile(executable);
+        ProcessStartInfo taskInfo = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+            Arguments = "/Create /F /SC ONLOGON /RL LIMITED /TN \"" + taskName +
+                "\" /TR \"\\\"" + executable + "\\\" --product-root \\\"" + productRoot + "\\\"\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (Process task = Process.Start(taskInfo))
+        {
+            if (task == null) throw new InvalidOperationException("Cannot register the POPO update agent startup task.");
+            string taskOutput = task.StandardOutput.ReadToEnd();
+            string taskError = task.StandardError.ReadToEnd();
+            if (!task.WaitForExit(15000))
+            {
+                try { task.Kill(); } catch {}
+                throw new TimeoutException("Registering the POPO update agent startup task timed out.");
+            }
+            if (task.ExitCode != 0)
+            {
+                string detail = String.IsNullOrWhiteSpace(taskError) ? taskOutput : taskError;
+                throw new InvalidOperationException(
+                    "Cannot register the POPO update agent startup task: " + detail.Trim()
+                );
+            }
+        }
+        if (!AgentStartupDefinitionMatches(productRoot))
+        {
+            throw new InvalidOperationException("The POPO update agent startup task definition did not match the fixed Agent command.");
+        }
+    }
+
+    private static bool AgentStartupDefinitionMatches(string productRoot)
+    {
+        ProcessStartInfo queryInfo = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+            Arguments = "/Query /TN \"" + GetAgentTaskName(productRoot) + "\" /XML",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (Process query = Process.Start(queryInfo))
+        {
+            if (query == null) return false;
+            string xml = query.StandardOutput.ReadToEnd();
+            query.StandardError.ReadToEnd();
+            if (!query.WaitForExit(10000))
+            {
+                try { query.Kill(); } catch {}
+                return false;
+            }
+            return query.ExitCode == 0 && AgentStartupXmlMatches(xml, productRoot);
+        }
+    }
+
+    private static bool AgentStartupXmlMatches(string xml, string productRoot)
+    {
+        if (String.IsNullOrWhiteSpace(xml) || String.IsNullOrWhiteSpace(productRoot)) return false;
+        try
+        {
+            XmlDocument document = new XmlDocument { PreserveWhitespace = false };
+            document.LoadXml(xml);
+            XmlNodeList triggers = document.SelectNodes(
+                "/*[local-name()='Task']/*[local-name()='Triggers']/*"
+            );
+            XmlNodeList actions = document.SelectNodes(
+                "/*[local-name()='Task']/*[local-name()='Actions']/*"
+            );
+            XmlNodeList principals = document.SelectNodes(
+                "/*[local-name()='Task']/*[local-name()='Principals']/*[local-name()='Principal']"
+            );
+            if (triggers == null || triggers.Count != 1 ||
+                !String.Equals(triggers[0].LocalName, "LogonTrigger", StringComparison.Ordinal) ||
+                actions == null || actions.Count != 1 ||
+                !String.Equals(actions[0].LocalName, "Exec", StringComparison.Ordinal) ||
+                principals == null || principals.Count != 1)
+            {
+                return false;
+            }
+            XmlNode principal = principals[0];
+            XmlNode runLevel = principal.SelectSingleNode("*[local-name()='RunLevel']");
+            XmlNode userId = principal.SelectSingleNode("*[local-name()='UserId']");
+            XmlNode command = actions[0].SelectSingleNode("*[local-name()='Command']");
+            XmlNode arguments = actions[0].SelectSingleNode("*[local-name()='Arguments']");
+            XmlNode actionsParent = actions[0].ParentNode;
+            XmlAttribute actionContext = actionsParent == null ? null : actionsParent.Attributes["Context"];
+            XmlAttribute principalId = principal.Attributes["id"];
+            string executable = Path.Combine(Path.GetFullPath(productRoot), "Agent", "PopoAgent.exe");
+            string actualCommand = command == null ? "" : command.InnerText.Trim().Trim('"');
+            string expectedArguments = "--product-root " + QuoteArgument(Path.GetFullPath(productRoot));
+            return runLevel != null &&
+                String.Equals(runLevel.InnerText.Trim(), "LeastPrivilege", StringComparison.Ordinal) &&
+                userId != null && AgentStartupUserMatches(userId.InnerText) &&
+                actionContext != null && principalId != null &&
+                String.Equals(actionContext.Value, principalId.Value, StringComparison.Ordinal) &&
+                SamePath(actualCommand, executable) &&
+                arguments != null &&
+                String.Equals(arguments.InnerText.Trim(), expectedArguments, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool AgentStartupUserMatches(string taskUserId)
+    {
+        if (String.IsNullOrWhiteSpace(taskUserId)) return false;
+        SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+        if (currentSid == null) return false;
+        string candidate = taskUserId.Trim();
+        if (String.Equals(candidate, currentSid.Value, StringComparison.OrdinalIgnoreCase)) return true;
+        try
+        {
+            SecurityIdentifier candidateSid = (SecurityIdentifier)new NTAccount(candidate).Translate(
+                typeof(SecurityIdentifier)
+            );
+            return candidateSid.Equals(currentSid);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool AgentStartupExists(string productRoot)
+    {
+        ProcessStartInfo queryInfo = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+            Arguments = "/Query /TN \"" + GetAgentTaskName(productRoot) + "\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        using (Process query = Process.Start(queryInfo))
+        {
+            if (query == null) return false;
+            if (!query.WaitForExit(10000))
+            {
+                try { query.Kill(); } catch {}
+                return false;
+            }
+            return query.ExitCode == 0;
+        }
+    }
+
+    private static void DeleteAgentStartup(string productRoot)
+    {
+        if (!AgentStartupExists(productRoot)) return;
+        ProcessStartInfo deleteInfo = new ProcessStartInfo {
+            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+            Arguments = "/Delete /F /TN \"" + GetAgentTaskName(productRoot) + "\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        using (Process deletion = Process.Start(deleteInfo))
+        {
+            if (deletion == null || !deletion.WaitForExit(10000) || deletion.ExitCode != 0)
+            {
+                throw new InvalidOperationException("Cannot remove the POPO update agent startup task.");
+            }
+        }
+    }
+
+    private static string GetAgentTaskName(string productRoot)
+    {
+        byte[] hash;
+        using (SHA256 sha256 = SHA256.Create())
+        {
+            hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(
+                Path.GetFullPath(productRoot).TrimEnd(Path.DirectorySeparatorChar).ToUpperInvariant()
+            ));
+        }
+        return AgentTaskNamePrefix + " " + BitConverter.ToString(hash, 0, 6).Replace("-", "");
+    }
+
+    private static void StartAgent(string productRoot)
+    {
+        string executable = Path.Combine(productRoot, "Agent", "PopoAgent.exe");
+        if (!File.Exists(executable)) return;
+        if (IsProcessRunningAt(executable))
+        {
+            WaitForAgentReady(productRoot, executable);
+            return;
+        }
+        string endpointPath = Path.Combine(productRoot, "Agent", "endpoint.json");
+        if (File.Exists(endpointPath)) File.Delete(endpointPath);
+        ProcessStartInfo startInfo = new ProcessStartInfo {
+            FileName = executable,
+            Arguments = "--product-root " + QuoteArgument(productRoot),
+            WorkingDirectory = Path.GetDirectoryName(executable),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        Process process = Process.Start(startInfo);
+        if (process == null) throw new InvalidOperationException("Cannot start the POPO update agent.");
+        process.Dispose();
+        WaitForAgentReady(productRoot, executable);
+    }
+
+    private static void WaitForAgentReady(string productRoot, string executable)
+    {
+        string endpointPath = Path.Combine(productRoot, "Agent", "endpoint.json");
+        for (int attempt = 0; attempt < 100; attempt++)
+        {
+            try
+            {
+                if (File.Exists(endpointPath))
+                {
+                    Dictionary<string, object> endpoint = Json.Deserialize<Dictionary<string, object>>(
+                        File.ReadAllText(endpointPath, Encoding.UTF8)
+                    );
+                    int processId = GetInteger(endpoint, "processId");
+                    int port = GetInteger(endpoint, "port");
+                    if (port >= 49152 && port <= 65535 && GetInteger(endpoint, "protocol") == 2 &&
+                        GetInteger(endpoint, "minimumProtocol") == 1)
+                    {
+                        using (Process process = Process.GetProcessById(processId))
+                        {
+                            if (String.Equals(
+                                Path.GetFullPath(process.MainModule.FileName),
+                                Path.GetFullPath(executable),
+                                StringComparison.OrdinalIgnoreCase
+                            )) return;
+                        }
+                    }
+                }
+            }
+            catch {}
+            Thread.Sleep(100);
+        }
+        throw new InvalidOperationException("The POPO update agent did not become ready.");
+    }
+
+    private static void StopAgent(string productRoot)
+    {
+        string executable = Path.Combine(productRoot, "Agent", "PopoAgent.exe");
+        if (!File.Exists(executable) || !IsProcessRunningAt(executable)) return;
+        try
+        {
+            ProcessStartInfo stopInfo = new ProcessStartInfo {
+                FileName = executable,
+                Arguments = "--product-root " + QuoteArgument(productRoot) + " --shutdown",
+                WorkingDirectory = Path.GetDirectoryName(executable),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            using (Process signal = Process.Start(stopInfo))
+            {
+                if (signal != null) signal.WaitForExit(5000);
+            }
+        }
+        catch {}
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            if (!IsProcessRunningAt(executable)) return;
+            Thread.Sleep(100);
+        }
+        throw new InvalidOperationException("The existing POPO update agent did not stop safely.");
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + (value ?? "").Replace("\"", "") + "\"";
+    }
+
     private static void ApplyVerifiedUpdate(
         string packageRoot,
         string productRoot,
@@ -613,6 +1061,7 @@ internal static class PopoSetup
         string sourceGopeed,
         string sourceNativeHost,
         string sourceNativeVersion,
+        string sourceAgent,
         string extensionId,
         string versionName,
         bool registerNativeHost,
@@ -634,9 +1083,12 @@ internal static class PopoSetup
         string candidateGopeed = Path.Combine(candidateNative, "Gopeed");
         string candidateNativeHost = Path.Combine(candidateNative, "PopoFolderPickerHost.exe");
         string candidateNativeVersion = Path.Combine(candidateNative, ".popo-native-version");
+        string candidateAgent = Path.Combine(candidateRoot, "Agent");
+        string transactionInstallState = Path.Combine(candidateRoot, "install-state.before.json");
 
         string extensionRoot = Path.Combine(productRoot, "Extension");
         string nativeRoot = Path.Combine(productRoot, "NativeHost");
+        string agentRoot = Path.Combine(productRoot, "Agent");
         string gopeedRoot = Path.Combine(nativeRoot, "Gopeed");
         string installedNativeHost = Path.Combine(nativeRoot, "PopoFolderPickerHost.exe");
         string installStatePath = Path.Combine(productRoot, "install-state.json");
@@ -645,16 +1097,23 @@ internal static class PopoSetup
         string rollbackRoot = Path.Combine(rollbackParent, transactionId);
         string rollbackExtension = Path.Combine(rollbackRoot, "Extension");
         string rollbackNative = Path.Combine(rollbackRoot, "NativeHost");
+        string rollbackAgent = Path.Combine(rollbackRoot, "Agent");
         string rollbackInstallState = Path.Combine(rollbackRoot, "install-state.json");
 
         bool extensionChanged = false;
         bool nativeChanged = false;
+        bool agentChanged = false;
         bool extensionActivated = false;
         bool nativeActivated = false;
+        bool agentActivated = false;
         bool previousExtensionBackedUp = false;
         bool previousNativeBackedUp = false;
+        bool previousAgentBackedUp = false;
         bool previousStateBackedUp = false;
+        bool transactionStateBackedUp = false;
         bool stateExistedBefore = File.Exists(installStatePath);
+        bool agentWasRunning = IsProcessRunningAt(Path.Combine(agentRoot, "PopoAgent.exe"));
+        bool agentStartupExistedBefore = registerNativeHost && AgentStartupExists(productRoot);
         string previousRollbackPath = ReadExistingRollbackPath(installStatePath);
         bool committed = false;
 
@@ -662,10 +1121,16 @@ internal static class PopoSetup
         Directory.CreateDirectory(candidateNative);
         try
         {
+            if (stateExistedBefore)
+            {
+                File.Copy(installStatePath, transactionInstallState, true);
+                transactionStateBackedUp = true;
+            }
             CopyDirectory(sourceExtension, candidateExtension);
             CopyDirectory(sourceGopeed, candidateGopeed);
             File.Copy(sourceNativeHost, candidateNativeHost, true);
             File.Copy(sourceNativeVersion, candidateNativeVersion, true);
+            CopyDirectory(sourceAgent, candidateAgent);
             InstallNativeManifest(
                 candidateNative,
                 installedNativeHost,
@@ -677,6 +1142,7 @@ internal static class PopoSetup
                 sourceGopeed,
                 sourceNativeHost,
                 sourceNativeVersion,
+                sourceAgent,
                 candidateRoot,
                 extensionId,
                 versionName
@@ -697,6 +1163,7 @@ internal static class PopoSetup
                 Path.Combine("Gopeed", "storage"),
                 nativeCodeVersionMatches ? "PopoFolderPickerHost.exe" : ""
             );
+            agentChanged = forceRepair || !PackagedDirectoryMatches(sourceAgent, agentRoot, "auth.token", "endpoint.json");
             if (nativeChanged && IsProcessRunningAt(Path.Combine(gopeedRoot, "gopeed.exe")))
             {
                 throw new InvalidOperationException(
@@ -704,8 +1171,13 @@ internal static class PopoSetup
                 );
             }
 
+            if (agentChanged && agentWasRunning)
+            {
+                StopAgent(productRoot);
+            }
             if ((extensionChanged && Directory.Exists(extensionRoot)) ||
-                (nativeChanged && Directory.Exists(nativeRoot)))
+                (nativeChanged && Directory.Exists(nativeRoot)) ||
+                (agentChanged && Directory.Exists(agentRoot)))
             {
                 Directory.CreateDirectory(rollbackRoot);
             }
@@ -719,7 +1191,12 @@ internal static class PopoSetup
                 Directory.Move(nativeRoot, rollbackNative);
                 previousNativeBackedUp = true;
             }
-            if ((extensionChanged || nativeChanged) && File.Exists(installStatePath))
+            if (agentChanged && Directory.Exists(agentRoot))
+            {
+                Directory.Move(agentRoot, rollbackAgent);
+                previousAgentBackedUp = true;
+            }
+            if ((extensionChanged || nativeChanged || agentChanged) && File.Exists(installStatePath))
             {
                 Directory.CreateDirectory(rollbackRoot);
                 File.Copy(installStatePath, rollbackInstallState, true);
@@ -760,7 +1237,12 @@ internal static class PopoSetup
                     }
                 }
             }
-            if (simulateUpdateFailure && (extensionChanged || nativeChanged))
+            if (agentChanged)
+            {
+                Directory.Move(candidateAgent, agentRoot);
+                agentActivated = true;
+            }
+            if (simulateUpdateFailure && (extensionChanged || nativeChanged || agentChanged))
             {
                 throw new InvalidOperationException("Simulated failure after candidate activation.");
             }
@@ -768,14 +1250,9 @@ internal static class PopoSetup
             VerifyInstalledLayout(
                 extensionRoot,
                 nativeRoot,
+                agentRoot,
                 extensionId,
                 versionName
-            );
-            InstallNativeManifest(
-                nativeRoot,
-                installedNativeHost,
-                extensionId,
-                registerNativeHost
             );
             CopyOptionalFiles(packageRoot, productRoot);
             WriteInstallState(
@@ -787,6 +1264,17 @@ internal static class PopoSetup
                 chromeExtensionRoot,
                 Directory.Exists(rollbackRoot) ? rollbackRoot : previousRollbackPath
             );
+            if (registerNativeHost)
+            {
+                RegisterAgentStartup(productRoot);
+                StartAgent(productRoot);
+            }
+            InstallNativeManifest(
+                nativeRoot,
+                installedNativeHost,
+                extensionId,
+                registerNativeHost
+            );
             committed = true;
         }
         catch (Exception updateError)
@@ -794,6 +1282,10 @@ internal static class PopoSetup
             Exception rollbackError = null;
             try
             {
+                if (registerNativeHost && !agentStartupExistedBefore)
+                {
+                    DeleteAgentStartup(productRoot);
+                }
                 if (extensionActivated && Directory.Exists(extensionRoot))
                 {
                     DeleteDirectoryInside(productRoot, extensionRoot);
@@ -801,6 +1293,11 @@ internal static class PopoSetup
                 if (nativeActivated && Directory.Exists(nativeRoot))
                 {
                     DeleteDirectoryInside(productRoot, nativeRoot);
+                }
+                if (agentActivated && Directory.Exists(agentRoot))
+                {
+                    StopAgent(productRoot);
+                    DeleteDirectoryInside(productRoot, agentRoot);
                 }
                 if (previousExtensionBackedUp && Directory.Exists(rollbackExtension))
                 {
@@ -810,7 +1307,16 @@ internal static class PopoSetup
                 {
                     Directory.Move(rollbackNative, nativeRoot);
                 }
-                if (previousStateBackedUp && File.Exists(rollbackInstallState))
+                if (previousAgentBackedUp && Directory.Exists(rollbackAgent))
+                {
+                    Directory.Move(rollbackAgent, agentRoot);
+                    if (agentWasRunning) StartAgent(productRoot);
+                }
+                if (transactionStateBackedUp && File.Exists(transactionInstallState))
+                {
+                    File.Copy(transactionInstallState, installStatePath, true);
+                }
+                else if (previousStateBackedUp && File.Exists(rollbackInstallState))
                 {
                     File.Copy(rollbackInstallState, installStatePath, true);
                 }
@@ -856,6 +1362,7 @@ internal static class PopoSetup
         string sourceGopeed,
         string sourceNativeHost,
         string sourceNativeVersion,
+        string sourceAgent,
         string candidateRoot,
         string extensionId,
         string versionName
@@ -863,6 +1370,7 @@ internal static class PopoSetup
     {
         string extensionRoot = Path.Combine(candidateRoot, "Extension");
         string nativeRoot = Path.Combine(candidateRoot, "NativeHost");
+        string agentRoot = Path.Combine(candidateRoot, "Agent");
         string gopeedRoot = Path.Combine(nativeRoot, "Gopeed");
         RequireFile(Path.Combine(extensionRoot, "manifest.json"));
         RequireFile(Path.Combine(extensionRoot, "background.js"));
@@ -876,6 +1384,9 @@ internal static class PopoSetup
         RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
         RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
         RequireFile(Path.Combine(nativeRoot, ".popo-native-version"));
+        RequireFile(Path.Combine(agentRoot, "PopoAgent.exe"));
+        RequireFile(Path.Combine(agentRoot, ".popo-agent-version"));
+        RequireFile(Path.Combine(agentRoot, "release-manifest.json"));
         RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
         RequireFile(Path.Combine(gopeedRoot, "gopeed.exe"));
         RequireFile(Path.Combine(gopeedRoot, "libgopeed.dll"));
@@ -897,12 +1408,17 @@ internal static class PopoSetup
         {
             throw new InvalidDataException("Candidate native version marker does not match its package source.");
         }
+        if (!DirectoriesMatch(sourceAgent, agentRoot))
+        {
+            throw new InvalidDataException("Candidate update agent does not match its package source.");
+        }
         VerifyExtensionManifest(extensionRoot, extensionId, versionName);
     }
 
     private static void VerifyInstalledLayout(
         string extensionRoot,
         string nativeRoot,
+        string agentRoot,
         string extensionId,
         string versionName
     )
@@ -914,6 +1430,9 @@ internal static class PopoSetup
         RequireFile(Path.Combine(extensionRoot, "runtime", "page-ui.js"));
         RequireFile(Path.Combine(nativeRoot, "PopoFolderPickerHost.exe"));
         RequireFile(Path.Combine(nativeRoot, ".popo-native-version"));
+        RequireFile(Path.Combine(agentRoot, "PopoAgent.exe"));
+        RequireFile(Path.Combine(agentRoot, ".popo-agent-version"));
+        RequireFile(Path.Combine(agentRoot, "release-manifest.json"));
         RequireFile(Path.Combine(nativeRoot, HostName + ".json"));
         RequireFile(Path.Combine(nativeRoot, "Gopeed", "gopeed.exe"));
         RequireFile(Path.Combine(nativeRoot, "Gopeed", "libgopeed.dll"));
@@ -1137,7 +1656,8 @@ internal static class PopoSetup
     private static bool IsProcessRunningAt(string expectedPath)
     {
         string fullExpectedPath = Path.GetFullPath(expectedPath);
-        foreach (Process process in Process.GetProcessesByName("gopeed"))
+        string processName = Path.GetFileNameWithoutExtension(fullExpectedPath);
+        foreach (Process process in Process.GetProcessesByName(processName))
         {
             try
             {
@@ -1246,7 +1766,7 @@ internal static class PopoSetup
         }
         string fullExisting = Path.GetFullPath(existingRoot).TrimEnd(Path.DirectorySeparatorChar);
         string keptExtension = Path.GetFullPath(compatibilityExtensionRoot).TrimEnd(Path.DirectorySeparatorChar);
-        foreach (string directoryName in new[] { "NativeHost", "Updates", "Rollback", "licenses" })
+        foreach (string directoryName in new[] { "NativeHost", "Agent", "Updates", "Rollback", "licenses" })
         {
             string directory = Path.Combine(fullExisting, directoryName);
             if (Directory.Exists(directory) && !SamePath(directory, keptExtension))

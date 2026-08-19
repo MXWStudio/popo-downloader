@@ -876,6 +876,140 @@ test("popup uses simple wording and safely removes cancelled history", async () 
   expect(pageErrors).toEqual([]);
 });
 
+test("popup copies a bounded redacted update diagnostic snapshot", async () => {
+  const session = await launchExtension();
+  await session.worker.evaluate(async () => {
+    const outcomes = ["matched", "mismatch", "shadow_unavailable", "matched_failure"];
+    const history = Array.from({ length: 70 }, (_, index) => ({
+      schemaVersion: 1,
+      outcome: outcomes[index % outcomes.length],
+      comparable: index % 4 !== 2,
+      matches: index % 4 === 0 || index % 4 === 3,
+      shadowTarget: "0.7.3",
+      legacyTarget: index % 4 === 1 ? "0.7.2" : "0.7.3",
+      shadowState: index % 4 === 2 ? "unavailable" : "available",
+      shadowErrorCode: index % 4 === 2 ? "AGENT_UNAVAILABLE" : "",
+      legacyErrorCode: "",
+      shadowFailureKind: index % 4 === 2 ? "network" : "",
+      legacyFailureKind: "",
+      shadowTransactionId: `shadow-e2e-${index}`,
+      shadowUpdatedAt: new Date(Date.UTC(2026, 7, 14, 0, index)).toISOString(),
+      checkedAt: new Date(Date.UTC(2026, 7, 14, 1, index)).toISOString(),
+      token: "e2e-history-secret",
+      endpoint: "http://127.0.0.1:54321"
+    }));
+    Object.assign(history[10], {
+      shadowTarget: "https://e2e-secret.example/version",
+      legacyTarget: "D:\\private\\e2e-version.txt",
+      shadowState: "private-state",
+      shadowErrorCode: "SHADOW_E2E_SECRET_TOKEN",
+      legacyErrorCode: "LEGACY_E2E_SECRET_CODE",
+      shadowFailureKind: "e2e-secret-kind",
+      legacyFailureKind: "e2e-secret-kind",
+      shadowTransactionId: "shadow-D:\\private\\e2e-transaction.txt",
+      shadowUpdatedAt: "D:\\private\\e2e-time.txt"
+    });
+    await chrome.storage.local.set({
+      popoUpdateStatus: {
+        state: "up_to_date",
+        currentVersion: "0.7.2",
+        targetVersion: "D:\\private\\legacy-e2e-version.txt",
+        message: "e2e legacy secret message",
+        updatedAt: "2026-08-14T01:00:00.000Z"
+      },
+      popoAgentShadowStatus: {
+        available: true,
+        state: "checking",
+        currentVersion: "0.7.2",
+        targetVersion: "https://agent-e2e-secret.example/version",
+        transactionId: "shadow-e2e-current",
+        message: "D:\\private\\agent.log",
+        errorCode: "AGENT_E2E_SECRET_TOKEN",
+        protocol: 2,
+        minimumProtocol: 1,
+        updatedAt: "2026-08-14T01:01:00.000Z",
+        token: "e2e-agent-secret"
+      },
+      popoAgentShadowComparison: {
+        ...history.at(-1),
+        shadowTransactionId: "shadow-e2e-latest",
+        checkedAt: "2026-08-14T02:00:00.000Z",
+        path: "D:\\private\\package.zip"
+      },
+      popoAgentShadowComparisonHistory: history
+    });
+  });
+
+  const popup = await openPopup(session.extensionId);
+  const pageErrors = [];
+  popup.on("pageerror", (error) => pageErrors.push(String(error)));
+  await popup.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        async writeText(value) {
+          window.__copiedUpdateDiagnostics = value;
+        }
+      }
+    });
+  });
+  const diagnosticsPanel = popup.locator(".update-diagnostics");
+  await diagnosticsPanel.locator(":scope > summary").click();
+  await popup.locator("#copyUpdateDiagnosticsButton").click();
+  await expect(popup.locator("#copyUpdateDiagnosticsButton")).toHaveText("已复制");
+  const copied = await popup.evaluate(() => window.__copiedUpdateDiagnostics || "");
+  const diagnostics = JSON.parse(copied);
+  expect(diagnostics.schemaVersion).toBe(1);
+  expect(diagnostics.phase).toBe("shadow");
+  expect(diagnostics.history).toHaveLength(64);
+  expect(diagnostics.history[0].shadowTransactionId).toBe("shadow-e2e-6");
+  expect(diagnostics.history[4]).toMatchObject({
+    shadowTarget: "",
+    legacyTarget: "",
+    shadowState: "unavailable",
+    shadowErrorCode: "",
+    legacyErrorCode: "",
+    shadowFailureKind: "",
+    legacyFailureKind: "",
+    shadowTransactionId: "",
+    shadowUpdatedAt: ""
+  });
+  expect(diagnostics.latestComparison.shadowTransactionId).toBe("shadow-e2e-latest");
+  expect(diagnostics.agent.transactionId).toBe("shadow-e2e-current");
+  expect(diagnostics.agent.targetVersion).toBe("");
+  expect(diagnostics.agent.errorCode).toBe("");
+  expect(diagnostics.legacyUpdate.targetVersion).toBe("");
+  expect(diagnostics.summary.total).toBe(64);
+  for (const sensitive of [
+    "e2e-history-secret",
+    "e2e-agent-secret",
+    "127.0.0.1:54321",
+    "e2e legacy secret message",
+    "private\\agent.log",
+    "private\\package.zip",
+    "e2e-secret.example/version",
+    "private\\e2e-version.txt",
+    "private-state",
+    "E2E_SECRET_TOKEN",
+    "E2E_SECRET_CODE",
+    "e2e-secret-kind",
+    "private\\e2e-transaction.txt",
+    "private\\e2e-time.txt",
+    "private\\legacy-e2e-version.txt",
+    "agent-e2e-secret.example/version"
+  ]) {
+    expect(copied).not.toContain(sensitive);
+  }
+  const retainedHistoryCount = await session.worker.evaluate(async () => {
+    const { popoAgentShadowComparisonHistory } = await chrome.storage.local.get(
+      "popoAgentShadowComparisonHistory"
+    );
+    return popoAgentShadowComparisonHistory.length;
+  });
+  expect(retainedHistoryCount).toBe(70);
+  expect(pageErrors).toEqual([]);
+});
+
 test("paused IndexedDB task survives popup refresh and browser restart", async () => {
   let session = await launchExtension();
   let popup = await openPopup(session.extensionId);

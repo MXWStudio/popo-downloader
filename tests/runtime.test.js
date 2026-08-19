@@ -35,6 +35,18 @@ test("TypeScript + Zod 运行时契约拒绝未知命令和非法任务状态", 
     { type: "GET_UPDATE_STATUS" }
   );
   assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({ type: "GET_UPDATE_DIAGNOSTICS" }),
+    { type: "GET_UPDATE_DIAGNOSTICS" }
+  );
+  assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({ type: "GET_DIAGNOSTIC_STATUS" }),
+    { type: "GET_DIAGNOSTIC_STATUS" }
+  );
+  assert.deepEqual(
+    runtime.contracts.parseRuntimeCommand({ type: "SEND_DIAGNOSTICS" }),
+    { type: "SEND_DIAGNOSTICS" }
+  );
+  assert.deepEqual(
     runtime.contracts.parseRuntimeCommand({
       type: "REMOVE_DOWNLOAD_BATCH",
       batchId: "batch-a"
@@ -61,6 +73,80 @@ test("TypeScript + Zod 运行时契约拒绝未知命令和非法任务状态", 
       parentUrl: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1"
     }
   );
+});
+
+test("诊断事件只保留脱敏状态、数量和匿名标识", () => {
+  const event = runtime.diagnostics.buildDiagnosticEvent({
+    candidate: {
+      code: "DOWNLOAD_STALLED",
+      level: "warn",
+      at: "2026-08-19T00:00:00.000Z",
+      context: {
+        jobId: "job-secret-123",
+        taskId: "task-secret-456",
+        failureStage: "访问 https://secret.example/file?token=abc",
+        path: "C:\\Users\\Alice\\Private\\movie.mp4",
+        token: "token=super-secret"
+      }
+    },
+    installId: "install-user-machine",
+    release: "0.7.2",
+    state: {
+      mode: "downloading",
+      phase: "downloading",
+      counts: { total: 12, success: 2, failed: 0 }
+    }
+  });
+  const exported = JSON.stringify(event);
+  assert.equal(event.message, "DOWNLOAD_STALLED");
+  assert.equal(event.tags.install.startsWith("h:"), true);
+  assert.equal(event.extra.counts.total, 12);
+  assert.doesNotMatch(exported, /secret\.example|super-secret|Alice|movie\.mp4/);
+  assert.match(exported, /\[url\]|\[path\]/);
+});
+
+test("Sentry DSN 只接受官方 HTTPS 接收域名并生成 envelope 地址", () => {
+  const target = runtime.diagnostics.parseSentryDsn(
+    "https://12345678abcdef@o123.ingest.sentry.io/456"
+  );
+  assert.equal(target.projectId, "456");
+  assert.match(target.envelopeUrl, /\/api\/456\/envelope\//);
+  assert.equal(runtime.diagnostics.parseSentryDsn("http://o123.ingest.sentry.io/456"), null);
+  assert.equal(runtime.diagnostics.parseSentryDsn("https://key@example.com/456"), null);
+});
+
+test("传输连续 90 秒无新增字节只报告一次，恢复进度后可重新计时", () => {
+  const first = runtime.diagnostics.inspectTransferProgress({
+    previousDownloaded: 1024,
+    downloaded: 1024,
+    lastProgressAt: 10_000,
+    status: "active",
+    now: 100_000,
+    thresholdMs: 90_000
+  });
+  assert.equal(first.stalled, true);
+  const duplicate = runtime.diagnostics.inspectTransferProgress({
+    previousDownloaded: first.downloaded,
+    downloaded: first.downloaded,
+    lastProgressAt: first.lastProgressAt,
+    stallReportedAt: first.stallReportedAt,
+    status: "active",
+    now: 110_000,
+    thresholdMs: 90_000
+  });
+  assert.equal(duplicate.stalled, false);
+  const resumed = runtime.diagnostics.inspectTransferProgress({
+    previousDownloaded: duplicate.downloaded,
+    downloaded: 2048,
+    lastProgressAt: duplicate.lastProgressAt,
+    stallReportedAt: duplicate.stallReportedAt,
+    status: "active",
+    now: 120_000,
+    thresholdMs: 90_000
+  });
+  assert.equal(resumed.progressed, true);
+  assert.equal(resumed.lastProgressAt, 120_000);
+  assert.equal(resumed.stallReportedAt, 0);
 });
 
 test("XState 作业状态机只允许声明过的迁移", () => {

@@ -499,6 +499,49 @@ h2 {
   max-height: 220px;
 }
 
+.update-diagnostics {
+  margin-top: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background-color: var(--surface-soft);
+  background-image: var(--gradient-surface);
+  box-shadow: var(--surface-shadow);
+}
+
+.update-diagnostics > summary {
+  font-weight: 650;
+}
+
+.update-diagnostics p {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.update-diagnostics .diagnostic-status {
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--green-ink);
+  background: var(--green-soft);
+}
+
+.update-diagnostics .diagnostic-status[data-configured="false"] {
+  color: var(--neutral-ink);
+  background: var(--neutral-soft);
+}
+
+.update-diagnostics .diagnostic-error {
+  color: var(--red-ink);
+}
+
+.diagnostic-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
 .engine-heading {
   display: flex;
   align-items: center;

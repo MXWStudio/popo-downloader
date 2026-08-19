@@ -54,6 +54,25 @@ interface UpdateStatusResponse {
   updateStatus: UpdateStatus;
 }
 
+interface UpdateDiagnosticsResponse {
+  diagnostics: Record<string, unknown>;
+}
+
+interface DiagnosticStatus {
+  configured: boolean;
+  provider: string;
+  host: string;
+  pendingCount: number;
+  lastSentAt: string;
+  lastAttemptAt: string;
+  lastError: string;
+  sent?: number;
+}
+
+interface DiagnosticStatusResponse {
+  diagnosticStatus: DiagnosticStatus;
+}
+
 async function callExtension<T extends object = Record<string, never>>(
   message: Record<string, unknown>
 ): Promise<T> {
@@ -383,6 +402,104 @@ function updateStatusLabel(status: UpdateStatus | null): string {
   return "";
 }
 
+function UpdateDiagnosticsCard({
+  showError
+}: {
+  showError: (error: unknown) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<DiagnosticStatus | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const response = await callExtension<DiagnosticStatusResponse>({
+        type: "GET_DIAGNOSTIC_STATUS"
+      });
+      setStatus(response.diagnosticStatus);
+    } catch (error) {
+      console.warn("读取诊断回传状态失败", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  const copyDiagnostics = async () => {
+    setBusy(true);
+    try {
+      const response = await callExtension<UpdateDiagnosticsResponse>({
+        type: "GET_UPDATE_DIAGNOSTICS"
+      });
+      await navigator.clipboard.writeText(JSON.stringify(response.diagnostics, null, 2));
+      setCopied(true);
+    } catch (error) {
+      setCopied(false);
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendDiagnostics = async () => {
+    setBusy(true);
+    try {
+      const response = await callExtension<DiagnosticStatusResponse>({
+        type: "SEND_DIAGNOSTICS"
+      });
+      setStatus(response.diagnosticStatus);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const statusText = !status
+    ? "正在读取诊断状态"
+    : status.configured
+      ? status.pendingCount > 0
+        ? `待发送 ${status.pendingCount} 条`
+        : status.lastSentAt
+          ? "最近诊断已发送"
+          : "自动回传已启用"
+      : status.pendingCount > 0
+        ? `接收地址待配置，本机已保存 ${status.pendingCount} 条`
+        : "接收地址待配置，错误会先保存在本机";
+
+  return (
+    <details className="update-diagnostics">
+      <summary>诊断与回传</summary>
+      <div className="engine-settings-body">
+        <p>批量下载停滞、任务丢失和后台异常会自动脱敏并保存；断网时排队，恢复后重试。</p>
+        <p className="diagnostic-status" data-configured={status?.configured ? "true" : "false"}>
+          {statusText}
+        </p>
+        {status?.lastError && <p className="diagnostic-error">最近发送：{status.lastError}</p>}
+        <div className="diagnostic-actions">
+          <button
+            id="sendDiagnosticsButton"
+            type="button"
+            disabled={busy}
+            onClick={() => void sendDiagnostics()}
+          >
+            {busy ? "正在处理" : "立即发送诊断"}
+          </button>
+          <button
+            id="copyUpdateDiagnosticsButton"
+            type="button"
+            disabled={busy}
+            onClick={() => void copyDiagnostics()}
+          >
+            {copied ? "已复制" : "复制诊断信息"}
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function NetworkNoticeCard({
   health,
   refresh,
@@ -705,6 +822,8 @@ function PopupApp() {
         setSettings={setSettings}
         showError={showError}
       />
+
+      <UpdateDiagnosticsCard showError={showError} />
 
       <p id="errorBox" className="error" hidden={!error}>
         {error?.message || ""}

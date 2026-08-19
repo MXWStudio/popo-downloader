@@ -25,9 +25,11 @@ function buildFixture(packageRoot, versionName, marker) {
   const extensionRoot = path.join(packageRoot, "extension");
   const gopeedRoot = path.join(packageRoot, "Gopeed");
   const nativeRoot = path.join(packageRoot, "native-host", "bin");
+  const agentRoot = path.join(packageRoot, "agent", "bin");
   fs.mkdirSync(extensionRoot, { recursive: true });
   fs.mkdirSync(gopeedRoot, { recursive: true });
   fs.mkdirSync(nativeRoot, { recursive: true });
+  fs.mkdirSync(agentRoot, { recursive: true });
   for (const file of extensionFiles) {
     fs.copyFileSync(path.join(repoRoot, file), path.join(extensionRoot, file));
   }
@@ -60,6 +62,24 @@ function buildFixture(packageRoot, versionName, marker) {
     "fixture-native-" + marker,
     "utf8"
   );
+  fs.writeFileSync(path.join(agentRoot, "PopoAgent.exe"), "fixture-agent", "utf8");
+  fs.writeFileSync(
+    path.join(agentRoot, ".popo-agent-version"),
+    "fixture-agent-" + marker,
+    "utf8"
+  );
+  const releaseManifest = JSON.stringify({
+    schemaVersion: 1,
+    releaseVersion: versionName,
+    extensionVersion: versionName,
+    agentVersion: versionName,
+    nativeHostVersion: versionName,
+    installerVersion: versionName,
+    updateProtocol: 2,
+    minimumProtocol: 1
+  }, null, 2);
+  fs.writeFileSync(path.join(packageRoot, "release-manifest.json"), releaseManifest, "utf8");
+  fs.writeFileSync(path.join(agentRoot, "release-manifest.json"), releaseManifest, "utf8");
 }
 
 function compileSetup(packageRoot) {
@@ -67,6 +87,7 @@ function compileSetup(packageRoot) {
   const result = spawnSync(compiler, [
     "/nologo",
     "/target:winexe",
+    "/define:POPO_SETUP_TEST",
     "/optimize+",
     "/codepage:65001",
     "/reference:System.Drawing.dll",
@@ -85,12 +106,9 @@ function compileSetup(packageRoot) {
 }
 
 function runSetup(setupExecutable, installRoot, options = {}) {
-  const args = [
-    "--quiet",
-    "--skip-register",
-    "--install-root",
-    installRoot
-  ];
+  const args = ["--quiet"];
+  if (!options.register) args.push("--skip-register");
+  args.push("--install-root", installRoot);
   if (options.repair) args.push("--repair");
   if (options.migrateFrom) args.push("--migrate-from", options.migrateFrom);
   if (options.failAfterSwap) args.push("--test-fail-after-swap");
@@ -101,7 +119,8 @@ function runSetup(setupExecutable, installRoot, options = {}) {
     timeout: 30_000,
     env: {
       ...process.env,
-      POPO_SETUP_TEST_MODE: options.failAfterSwap ? "1" : ""
+      POPO_SETUP_TEST_MODE: options.failAfterSwap || options.failAgentStartup ? "1" : "",
+      POPO_SETUP_TEST_FAIL_AGENT_STARTUP: options.failAgentStartup ? "1" : ""
     }
   });
 }
@@ -132,6 +151,10 @@ test("verified candidate update restores the previous install on swap failure", 
     );
     assert.match(originalPopup, /candidate-one/);
     assert.equal(readInstallState(installRoot).updateMode, "verified-candidate");
+    assert.equal(
+      fs.readFileSync(path.join(installRoot, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-one"
+    );
     const gopeedStorage = path.join(installRoot, "NativeHost", "Gopeed", "storage");
     const taskDatabase = path.join(gopeedStorage, "gopeed.db");
     const sessionPreferences = path.join(gopeedStorage, "session.json");
@@ -147,6 +170,10 @@ test("verified candidate update restores the previous install on swap failure", 
       originalPopup
     );
     assert.equal(readInstallState(installRoot).version, "0.7.0-test.1");
+    assert.equal(
+      fs.readFileSync(path.join(installRoot, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-one"
+    );
     assert.equal(fs.readFileSync(taskDatabase, "utf8"), "persistent-task-history");
     assert.equal(fs.readFileSync(sessionPreferences, "utf8"), '{"port":10888}');
 
@@ -158,6 +185,10 @@ test("verified candidate update restores the previous install on swap failure", 
       originalPopup
     );
     assert.equal(readInstallState(installRoot).version, "0.7.0-test.1");
+    assert.equal(
+      fs.readFileSync(path.join(installRoot, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-one"
+    );
     assert.equal(fs.readFileSync(taskDatabase, "utf8"), "persistent-task-history");
     assert.equal(fs.readFileSync(sessionPreferences, "utf8"), '{"port":10888}');
     const pendingCandidates = fs.existsSync(path.join(installRoot, "Updates"))
@@ -176,6 +207,10 @@ test("verified candidate update restores the previous install on swap failure", 
     const state = readInstallState(installRoot);
     assert.equal(state.version, "0.7.0-test.2");
     assert.equal(state.updateMode, "verified-candidate");
+    assert.equal(
+      fs.readFileSync(path.join(installRoot, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-two"
+    );
     assert.ok(state.rollbackPath);
     assert.equal(fs.readFileSync(taskDatabase, "utf8"), "persistent-task-history");
     assert.equal(fs.readFileSync(sessionPreferences, "utf8"), '{"port":10888}');
@@ -199,6 +234,10 @@ test("verified candidate update restores the previous install on swap failure", 
       "runtime",
       "popup.js"
     )));
+    assert.equal(
+      fs.readFileSync(path.join(state.rollbackPath, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-one"
+    );
     assert.match(
       fs.readFileSync(
         path.join(state.rollbackPath, "Extension", "runtime", "popup.js"),
@@ -260,6 +299,10 @@ test("verified candidate update restores the previous install on swap failure", 
     const migratedState = readInstallState(migratedRoot);
     assert.equal(migratedState.version, "0.7.0-test.2");
     assert.equal(migratedState.updateMode, "migration");
+    assert.equal(
+      fs.readFileSync(path.join(migratedRoot, "Agent", ".popo-agent-version"), "utf8"),
+      "fixture-agent-candidate-two"
+    );
     assert.equal(migratedState.chromeExtensionPath, path.join(installRoot, "Extension"));
     assert.equal(
       fs.readFileSync(path.join(migratedRoot, "NativeHost", "Gopeed", "storage", "gopeed.db"), "utf8"),
@@ -278,6 +321,7 @@ test("verified candidate update restores the previous install on swap failure", 
     );
     assert.equal(migrationMarker.migratedTo, migratedRoot);
     assert.ok(!fs.existsSync(path.join(installRoot, "NativeHost")));
+    assert.ok(!fs.existsSync(path.join(installRoot, "Agent")));
 
     fs.appendFileSync(
       path.join(packageRoot, "extension", "runtime", "popup.js"),
@@ -298,6 +342,75 @@ test("verified candidate update restores the previous install on swap failure", 
       readInstallState(migratedRoot).chromeExtensionPath,
       path.join(installRoot, "Extension")
     );
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("agent startup registration failure rolls back every newly activated component", {
+  timeout: 60_000
+}, (t) => {
+  if (!fs.existsSync(compiler)) {
+    t.skip("Windows .NET Framework compiler is unavailable");
+    return;
+  }
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-agent-rollback-"));
+  const packageRoot = path.join(sandbox, "package");
+  const installRoot = path.join(sandbox, "installed");
+  try {
+    buildFixture(packageRoot, "0.7.3-test.1", "agent-startup-failure");
+    const setupExecutable = compileSetup(packageRoot);
+    const result = runSetup(setupExecutable, installRoot, {
+      register: true,
+      failAgentStartup: true
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.ok(!fs.existsSync(path.join(installRoot, "Extension")));
+    assert.ok(!fs.existsSync(path.join(installRoot, "NativeHost")));
+    assert.ok(!fs.existsSync(path.join(installRoot, "Agent")));
+    assert.ok(!fs.existsSync(path.join(installRoot, "install-state.json")));
+    const candidates = fs.existsSync(path.join(installRoot, "Updates"))
+      ? fs.readdirSync(path.join(installRoot, "Updates")).filter((name) => name.startsWith("candidate-"))
+      : [];
+    assert.deepEqual(candidates, []);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("agent startup registration failure restores install state when components are unchanged", {
+  timeout: 60_000
+}, (t) => {
+  if (!fs.existsSync(compiler)) {
+    t.skip("Windows .NET Framework compiler is unavailable");
+    return;
+  }
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-agent-state-rollback-"));
+  const packageRoot = path.join(sandbox, "package");
+  const installRoot = path.join(sandbox, "installed");
+  try {
+    buildFixture(packageRoot, "0.7.3-test.2", "agent-state-rollback");
+    const setupExecutable = compileSetup(packageRoot);
+    const initial = runSetup(setupExecutable, installRoot);
+    assert.equal(initial.status, 0, initial.stdout + initial.stderr);
+
+    const installStatePath = path.join(installRoot, "install-state.json");
+    const originalState = readInstallState(installRoot);
+    originalState.installedAt = "2000-01-01T00:00:00.000Z";
+    originalState.transactionSentinel = "must-survive-agent-startup-failure";
+    const originalStateText = JSON.stringify(originalState, null, 2);
+    fs.writeFileSync(installStatePath, originalStateText, "utf8");
+
+    const failed = runSetup(setupExecutable, installRoot, {
+      register: true,
+      failAgentStartup: true
+    });
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.equal(fs.readFileSync(installStatePath, "utf8"), originalStateText);
+    assert.ok(fs.existsSync(path.join(installRoot, "Extension", "manifest.json")));
+    assert.ok(fs.existsSync(path.join(installRoot, "NativeHost", "PopoFolderPickerHost.exe")));
+    assert.ok(fs.existsSync(path.join(installRoot, "Agent", "PopoAgent.exe")));
+    assert.ok(!fs.existsSync(path.join(installRoot, "Rollback")));
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

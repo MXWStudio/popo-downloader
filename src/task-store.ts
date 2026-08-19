@@ -1,7 +1,8 @@
 import { deleteDB, openDB, type DBSchema, type IDBPDatabase } from "idb";
 
 const DATABASE_NAME = "popo-stable-downloader";
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
+const MAX_DIAGNOSTIC_EVENTS = 100;
 
 interface ItemChunkRecord {
   key: string;
@@ -46,6 +47,18 @@ interface OperationRecord {
   updatedAt: string;
 }
 
+interface DiagnosticEventRecord {
+  eventId: string;
+  fingerprint: string;
+  event: unknown;
+  occurrenceCount: number;
+  createdAt: string;
+  lastSeenAt: string;
+  nextAttemptAt: string;
+  attemptCount: number;
+  lastError: string;
+}
+
 interface PopoTaskDatabase extends DBSchema {
   itemChunks: {
     key: string;
@@ -72,6 +85,15 @@ interface PopoTaskDatabase extends DBSchema {
     indexes: {
       "by-job": string;
       "by-job-status": [string, OperationStatus];
+    };
+  };
+  diagnosticEvents: {
+    key: string;
+    value: DiagnosticEventRecord;
+    indexes: {
+      "by-created-at": string;
+      "by-fingerprint": string;
+      "by-next-attempt": string;
     };
   };
 }
@@ -136,6 +158,12 @@ function database() {
           const operations = db.createObjectStore("operations", { keyPath: "key" });
           operations.createIndex("by-job", "jobId");
           operations.createIndex("by-job-status", ["jobId", "status"]);
+        }
+        if (!db.objectStoreNames.contains("diagnosticEvents")) {
+          const events = db.createObjectStore("diagnosticEvents", { keyPath: "eventId" });
+          events.createIndex("by-created-at", "createdAt");
+          events.createIndex("by-fingerprint", "fingerprint");
+          events.createIndex("by-next-attempt", "nextAttemptAt");
         }
       },
       blocking(_currentVersion, _blockedVersion, event) {
@@ -472,6 +500,110 @@ export async function deleteJobWorkflow(jobIdValue: unknown) {
   for (const operation of operations) await tx.objectStore("operations").delete(operation.key);
   await tx.done;
   return operations.length;
+}
+
+function assertDiagnosticEvent(value: unknown) {
+  const event = value && typeof value === "object" && !Array.isArray(value)
+    ? structuredClone(value as Record<string, unknown>)
+    : null;
+  const eventId = String(event?.event_id || "").trim();
+  if (!/^[a-f0-9]{32}$/i.test(eventId)) throw new Error("IndexedDB 诊断事件 ID 无效");
+  const fingerprint = Array.isArray(event?.fingerprint)
+    ? event.fingerprint.map((item) => String(item || "")).join("|").slice(0, 256)
+    : String(event?.message || "UNKNOWN_DIAGNOSTIC").slice(0, 256);
+  if (!fingerprint) throw new Error("IndexedDB 诊断事件指纹无效");
+  return { event, eventId: eventId.toLowerCase(), fingerprint };
+}
+
+export async function enqueueDiagnosticEvent(value: unknown) {
+  const { event, eventId, fingerprint } = assertDiagnosticEvent(value);
+  const db = await database();
+  const tx = db.transaction("diagnosticEvents", "readwrite");
+  const store = tx.objectStore("diagnosticEvents");
+  const matching = await store.index("by-fingerprint").getAll(fingerprint);
+  const now = new Date().toISOString();
+  const recent = matching
+    .filter((record) => Date.now() - Date.parse(record.lastSeenAt) < 15 * 60_000)
+    .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))[0];
+  if (recent) {
+    recent.occurrenceCount = Math.min(10_000, recent.occurrenceCount + 1);
+    recent.lastSeenAt = now;
+    if (recent.event && typeof recent.event === "object") {
+      (recent.event as Record<string, unknown>).timestamp = now;
+      const extra = (recent.event as Record<string, unknown>).extra;
+      if (extra && typeof extra === "object" && !Array.isArray(extra)) {
+        (extra as Record<string, unknown>).occurrenceCount = recent.occurrenceCount;
+      }
+    }
+    await store.put(recent);
+    await tx.done;
+    return { eventId: recent.eventId, merged: true, occurrenceCount: recent.occurrenceCount };
+  }
+  const record: DiagnosticEventRecord = {
+    eventId,
+    fingerprint,
+    event,
+    occurrenceCount: 1,
+    createdAt: now,
+    lastSeenAt: now,
+    nextAttemptAt: now,
+    attemptCount: 0,
+    lastError: ""
+  };
+  await store.put(record);
+  const all = await store.index("by-created-at").getAll();
+  for (const stale of all.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, Math.max(0, all.length - MAX_DIAGNOSTIC_EVENTS))) {
+    await store.delete(stale.eventId);
+  }
+  await tx.done;
+  return { eventId, merged: false, occurrenceCount: 1 };
+}
+
+export async function listDiagnosticEvents(input: { limit?: number; includeDeferred?: boolean } = {}) {
+  const db = await database();
+  const limit = Math.max(1, Math.min(25, Number(input.limit) || 10));
+  const now = new Date().toISOString();
+  const records = await db.getAllFromIndex("diagnosticEvents", "by-created-at");
+  return structuredClone(records
+    .filter((record) => input.includeDeferred || record.nextAttemptAt <= now)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, limit));
+}
+
+export async function markDiagnosticEventSent(eventIdValue: unknown) {
+  const eventId = assertIdentifier(eventIdValue, "diagnostic eventId");
+  const db = await database();
+  await db.delete("diagnosticEvents", eventId);
+}
+
+export async function markDiagnosticEventRetry(input: { eventId: unknown; error: unknown }) {
+  const eventId = assertIdentifier(input.eventId, "diagnostic eventId");
+  const db = await database();
+  const tx = db.transaction("diagnosticEvents", "readwrite");
+  const store = tx.objectStore("diagnosticEvents");
+  const record = await store.get(eventId);
+  if (!record) {
+    await tx.done;
+    return null;
+  }
+  record.attemptCount = Math.min(20, record.attemptCount + 1);
+  const delayMs = Math.min(6 * 60 * 60_000, 30_000 * (2 ** Math.min(8, record.attemptCount - 1)));
+  record.nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
+  record.lastError = String(input.error || "发送失败").slice(0, 200);
+  await store.put(record);
+  await tx.done;
+  return structuredClone(record);
+}
+
+export async function diagnosticOutboxStatus() {
+  const db = await database();
+  const records = await db.getAllFromIndex("diagnosticEvents", "by-created-at");
+  return {
+    pendingCount: records.length,
+    oldestAt: records[0]?.createdAt || "",
+    newestAt: records[records.length - 1]?.createdAt || ""
+  };
 }
 
 export async function closeDatabase() {

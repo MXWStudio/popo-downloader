@@ -38,6 +38,9 @@ const SimpleCommandSchema = z.strictObject({
   type: z.enum([
     "GET_STATE",
     "GET_UPDATE_STATUS",
+    "GET_UPDATE_DIAGNOSTICS",
+    "GET_DIAGNOSTIC_STATUS",
+    "SEND_DIAGNOSTICS",
     "CHECK_GOPEED",
     "CANCEL_FOLDER_TASK",
     "START_DOWNLOAD",

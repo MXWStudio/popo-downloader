@@ -13,6 +13,8 @@ using System.Windows.Forms;
 internal static class FolderPickerHost
 {
     private const int MaxMessageBytes = 1024 * 1024;
+    private const int AgentProtocolVersion = 2;
+    private const int AgentMinimumProtocolVersion = 1;
     private const string UpdateChannel = "stable";
     private const string UpdateManifestUrl = "https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/latest.json";
     private const string UpdateHost = "popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com";
@@ -41,6 +43,7 @@ internal static class FolderPickerHost
                     capabilities = new[] {
                         "choose_folder",
                         "ensure_gopeed",
+                        "agent_connection",
                         "check_update",
                         "apply_update",
                         "update_status"
@@ -51,6 +54,11 @@ internal static class FolderPickerHost
             if (String.Equals(action, "ensure_gopeed", StringComparison.Ordinal))
             {
                 WriteMessage(EnsureGopeed());
+                return 0;
+            }
+            if (String.Equals(action, "agent_connection", StringComparison.Ordinal))
+            {
+                WriteMessage(ReadAgentConnection());
                 return 0;
             }
             if (String.Equals(action, "check_update", StringComparison.Ordinal))
@@ -167,8 +175,20 @@ internal static class FolderPickerHost
         }
         catch (Exception error)
         {
-            return new { ok = false, error = error.Message };
+            return new {
+                ok = false,
+                error = error.Message,
+                errorCode = ClassifyUpdateCheckError(error)
+            };
         }
+    }
+
+    private static string ClassifyUpdateCheckError(Exception error)
+    {
+        if (error is WebException) return "LEGACY_NETWORK_ERROR";
+        if (error is CryptographicException) return "LEGACY_SIGNATURE_INVALID";
+        if (error is InvalidDataException) return "LEGACY_MANIFEST_INVALID";
+        return "LEGACY_CHECK_FAILED";
     }
 
     private static object StartUpdate(string currentVersion)
@@ -760,6 +780,78 @@ internal static class FolderPickerHost
         };
     }
 
+    private static object ReadAgentConnection()
+    {
+        try
+        {
+            string productRoot = GetProductRoot();
+            string agentRoot = Path.Combine(productRoot, "Agent");
+            string endpointPath = Path.Combine(agentRoot, "endpoint.json");
+            string tokenPath = Path.Combine(agentRoot, "auth.token");
+            if (!File.Exists(endpointPath) || !File.Exists(tokenPath))
+            {
+                return new { ok = false, error = "POPO update agent is not running." };
+            }
+            Dictionary<string, object> endpoint = Json.Deserialize<Dictionary<string, object>>(
+                File.ReadAllText(endpointPath, Encoding.UTF8)
+            );
+            int port = GetInteger(endpoint, "port");
+            int processId = GetInteger(endpoint, "processId");
+            int protocol = GetInteger(endpoint, "protocol");
+            int minimumProtocol = GetInteger(endpoint, "minimumProtocol");
+            if (!String.Equals(GetString(endpoint, "address"), "127.0.0.1", StringComparison.Ordinal) ||
+                port < 49152 || port > 65535 || processId <= 0 ||
+                protocol < minimumProtocol ||
+                protocol < AgentMinimumProtocolVersion ||
+                AgentProtocolVersion < minimumProtocol)
+            {
+                throw new InvalidDataException("The POPO update agent endpoint is invalid.");
+            }
+            using (Process agent = Process.GetProcessById(processId))
+            {
+                string expected = Path.GetFullPath(Path.Combine(agentRoot, "PopoAgent.exe"));
+                string actual = Path.GetFullPath(agent.MainModule.FileName);
+                if (!String.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("The POPO update agent process identity does not match.");
+                }
+            }
+            if (!FindListeningPorts(processId).Contains(port))
+            {
+                throw new InvalidDataException("The POPO update agent endpoint does not belong to its process.");
+            }
+
+            byte[] encrypted = File.ReadAllBytes(tokenPath);
+            if (encrypted.Length == 0 || encrypted.Length > 16 * 1024)
+            {
+                throw new InvalidDataException("The encrypted POPO update agent token has an invalid size.");
+            }
+            byte[] entropy = Encoding.UTF8.GetBytes("POPO agent access token v1");
+            byte[] plain = ProtectedData.Unprotect(encrypted, entropy, DataProtectionScope.CurrentUser);
+            string token;
+            try
+            {
+                if (plain.Length != 32)
+                {
+                    throw new InvalidDataException("The POPO update agent token has an invalid size.");
+                }
+                token = Convert.ToBase64String(plain);
+            }
+            finally { Array.Clear(plain, 0, plain.Length); }
+            return new {
+                ok = true,
+                endpoint = "http://127.0.0.1:" + port,
+                token = token,
+                protocol = protocol,
+                minimumProtocol = minimumProtocol
+            };
+        }
+        catch (Exception error)
+        {
+            return new { ok = false, error = error.Message };
+        }
+    }
+
     private static bool TryFindGopeedEndpoint(
         string expectedPath,
         out int port,
@@ -979,5 +1071,15 @@ internal static class FolderPickerHost
         return value != null && value.TryGetValue(key, out result) && result != null
             ? Convert.ToString(result)
             : "";
+    }
+
+    private static int GetInteger(Dictionary<string, object> value, string key)
+    {
+        object result;
+        int parsed;
+        return value != null && value.TryGetValue(key, out result) && result != null &&
+            Int32.TryParse(Convert.ToString(result), out parsed)
+            ? parsed
+            : 0;
     }
 }
