@@ -157,7 +157,14 @@ internal static class PopoAgent
                 {
                     client.ReceiveTimeout = 3000;
                     client.SendTimeout = 3000;
-                    HandleClient(client);
+                    try
+                    {
+                        HandleClient(client);
+                    }
+                    catch (Exception error)
+                    {
+                        TryLog("warning", "AGENT_CLIENT_ERROR", error.Message, "");
+                    }
                 }
             }
         }
