@@ -28,6 +28,7 @@ const {
   reusableTaskTargetKeys,
   selectTaskByIdentity: selectGopeedTaskByIdentity,
   startOrReplaceTask: startOrReplaceGopeedTask,
+  successfulTaskFileRecords,
   splitDownloadTarget
 } = PopoGopeed;
 const {
@@ -75,6 +76,9 @@ const ITEM_CHUNK_SIZE = 200;
 const ITEM_STORAGE_PREFIX = "popoItems";
 const MAX_RETAINED_TERMINAL_JOBS = 20;
 const MAX_RETAINED_FOLDER_RECEIPTS = 500;
+const FOLDER_RECEIPT_FEEDBACK_MS = 2 * 60 * 1000;
+const DOWNLOAD_RECEIPT_VERIFICATION_VERSION = 1;
+const MAX_DIRECTORY_RESOLVE_RETRIES = 2;
 const WORKER_UNAVAILABLE_CODE = "POPO_WORKER_UNAVAILABLE";
 const POPUP_UI_PORT_NAME = "popo-popup-ui";
 const MIN_DOWNLOAD_CONCURRENCY = 1;
@@ -330,9 +334,11 @@ function normalizeFolderReceipts(receipts) {
     .slice(0, MAX_RETAINED_FOLDER_RECEIPTS);
 }
 
-function removeFolderReceipt(state, key) {
-  state.folderReceipts = normalizeFolderReceipts(state.folderReceipts)
-    .filter((receipt) => receipt.key !== key);
+function folderReceiptInFeedbackWindow(receipt, now = Date.now()) {
+  const completedAt = Date.parse(String(receipt?.completedAt || ""));
+  if (!Number.isFinite(completedAt)) return false;
+  const age = Math.max(0, now - completedAt);
+  return age < FOLDER_RECEIPT_FEEDBACK_MS;
 }
 
 function verifiedFolderReceipt(state, job) {
@@ -510,6 +516,7 @@ function newState() {
     runToken: createId("run"),
     jobs: [],
     folderReceipts: [],
+    downloadReceiptVerificationVersion: DOWNLOAD_RECEIPT_VERIFICATION_VERSION,
     activeJobId: null,
     mode: "idle",
     phase: "idle",
@@ -597,7 +604,11 @@ function migrateStoredState(storedState, settings) {
       teamSpaceKey,
       teamSpaceId: storedState.teamSpaceKey ? storedState.teamSpaceId || "" : "",
       jobs: checkedJobs.jobs,
-      folderReceipts: normalizeFolderReceipts(storedState.folderReceipts),
+      folderReceipts: storedState.downloadReceiptVerificationVersion ===
+        DOWNLOAD_RECEIPT_VERIFICATION_VERSION
+        ? normalizeFolderReceipts(storedState.folderReceipts)
+        : [],
+      downloadReceiptVerificationVersion: DOWNLOAD_RECEIPT_VERIFICATION_VERSION,
       networkHealth: normalizeNetworkHealth(storedState.networkHealth),
       workflow: normalizePersistentWorkflow(storedState.workflow),
       runtimeHealth: normalizeRuntimeHealth(storedState.runtimeHealth)
@@ -1551,6 +1562,161 @@ function gopeedTaskDefinition(state, item, url) {
   };
 }
 
+function itemDownloadTargetKey(state, item) {
+  const relativeFilename = buildDownloadFilename(item, state.settings);
+  const target = splitDownloadTarget(state.gopeedDownloadDir, relativeFilename);
+  return normalizeGopeedTargetKey(`${target.path}/${target.name}`);
+}
+
+async function ensureSuccessfulDownloadRecords(state) {
+  const job = activeJob(state);
+  if (!job) return { ready: false, identityKeys: [], targetKeys: [], records: [] };
+  const cached = successfulDownloadRecordCache.get(job.id);
+  if (cached) return { ready: true, ...cached };
+
+  try {
+    const tasks = await listGopeedTasks(state.settings, { timeoutMs: 10000 });
+    if (!Array.isArray(tasks)) throw new Error("Gopeed 任务列表格式不正确");
+    const records = successfulTaskFileRecords(tasks);
+    const targetKeys = [...new Set(records.map((record) => record.targetKey).filter(Boolean))];
+    const identityKeys = [...new Set(records.map((record) => record.identityKey).filter(Boolean))];
+    const recordsByIdentity = new Map();
+    const recordsByTarget = new Map();
+    for (const record of records) {
+      if (record.identityKey) {
+        const matching = recordsByIdentity.get(record.identityKey) || [];
+        matching.push(record);
+        recordsByIdentity.set(record.identityKey, matching);
+      }
+      if (record.targetKey) {
+        const matching = recordsByTarget.get(record.targetKey) || [];
+        matching.push(record);
+        recordsByTarget.set(record.targetKey, matching);
+      }
+    }
+    const cachedRecords = {
+      identityKeys,
+      targetKeys,
+      records,
+      recordsByIdentity,
+      recordsByTarget,
+      verifiedByRecord: new Map()
+    };
+    successfulDownloadRecordCache.set(job.id, cachedRecords);
+    job.downloadDedupeIdentityCount = identityKeys.length;
+    job.downloadDedupeTargetCount = targetKeys.length;
+    job.downloadDedupeLoadedAt = new Date().toISOString();
+    job.downloadDedupeError = "";
+    job.downloadDedupeLastErrorAt = "";
+    pushRuntimeEvent(
+      state,
+      "DOWNLOAD_DEDUPE_READY",
+      "info",
+      "已读取 Gopeed 成功记录，将逐文件跳过重复下载",
+      `successfulIdentities=${identityKeys.length}; successfulTargets=${targetKeys.length}`,
+      {
+        jobId: job.id,
+        successfulIdentities: identityKeys.length,
+        successfulTargets: targetKeys.length
+      }
+    );
+    return { ready: true, ...cachedRecords };
+  } catch (error) {
+    const detail = String(error?.message || error).replace(/^Error:\s*/, "");
+    const lastErrorAt = Date.parse(job.downloadDedupeLastErrorAt || "");
+    if (job.downloadDedupeError !== detail || !Number.isFinite(lastErrorAt) ||
+        Date.now() - lastErrorAt >= 30000) {
+      pushRuntimeEvent(
+        state,
+        "DOWNLOAD_DEDUPE_HISTORY_ERROR",
+        "warn",
+        "暂时无法核对已下载记录，未创建新下载任务",
+        detail,
+        { jobId: job.id }
+      );
+      job.downloadDedupeLastErrorAt = new Date().toISOString();
+    }
+    job.downloadDedupeError = detail;
+    return { ready: false, identityKeys: [], targetKeys: [], records: [] };
+  }
+}
+
+function successfulDownloadCandidates(downloadHistory, identityKey, targetKey) {
+  const candidates = [];
+  const seen = new Set();
+  for (const record of [
+    ...(downloadHistory.recordsByIdentity?.get(identityKey) || []),
+    ...(downloadHistory.recordsByTarget?.get(targetKey) || [])
+  ]) {
+    if (!record?.recordKey || seen.has(record.recordKey)) continue;
+    seen.add(record.recordKey);
+    candidates.push(record);
+  }
+  return candidates;
+}
+
+async function verifySuccessfulDownloadCandidates(state, downloadHistory, currentCandidates) {
+  const recordsToVerify = [];
+  const seen = new Set();
+  const addCandidates = (candidates) => {
+    for (const record of candidates) {
+      if (!record?.recordKey || seen.has(record.recordKey) ||
+          downloadHistory.verifiedByRecord.has(record.recordKey)) continue;
+      seen.add(record.recordKey);
+      recordsToVerify.push(record);
+    }
+  };
+  addCandidates(currentCandidates);
+
+  for (const queuedItem of state.items || []) {
+    if (queuedItem.selected === false || !["pending", "preparing"].includes(queuedItem.status)) continue;
+    let queuedTargetKey = "";
+    try {
+      queuedTargetKey = itemDownloadTargetKey(state, queuedItem);
+    } catch {
+      continue;
+    }
+    const queuedIdentityKey = gopeedTaskIdentityLabels(state, queuedItem).popoTaskKey || "";
+    addCandidates(successfulDownloadCandidates(
+      downloadHistory,
+      queuedIdentityKey,
+      queuedTargetKey
+    ));
+  }
+
+  for (let offset = 0; offset < recordsToVerify.length; offset += 200) {
+    const batch = recordsToVerify.slice(offset, offset + 200);
+    const nativeResult = await withTimeout(
+      chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+        action: "verify_files",
+        files: batch.map((record) => ({
+          key: record.recordKey,
+          path: record.filePath,
+          expectedSize: record.expectedSize
+        }))
+      }),
+      10000,
+      "核对本机文件"
+    );
+    if (!nativeResult?.ok || !Array.isArray(nativeResult.files)) {
+      throw new Error(nativeResult?.error || "本机助手未返回文件核对结果");
+    }
+    const results = new Map(nativeResult.files.map((file) => [String(file?.key || ""), file]));
+    for (const record of batch) {
+      const result = results.get(record.recordKey);
+      if (!result) throw new Error("本机助手返回的文件核对结果不完整");
+      downloadHistory.verifiedByRecord.set(
+        record.recordKey,
+        result.exists === true && result.sizeMatches === true
+      );
+    }
+  }
+
+  return currentCandidates.filter((record) =>
+    downloadHistory.verifiedByRecord.get(record.recordKey) === true
+  );
+}
+
 function timeoutPromise(ms, label) {
   return new Promise((_, reject) => {
     setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms);
@@ -1949,6 +2115,7 @@ function schedulePump(delayMs = 500) {
 }
 
 let pumpLocked = false;
+const successfulDownloadRecordCache = new Map();
 
 function clearEngineFields(state) {
   state.scanQueue = [];
@@ -1972,6 +2139,13 @@ function clearEngineFields(state) {
 
 function prepareJobForExecution(state, job, reuseWorker) {
   clearEngineFields(state);
+  successfulDownloadRecordCache.delete(job.id);
+  delete job.downloadDedupeIdentityCount;
+  delete job.downloadDedupeTargetCount;
+  delete job.downloadDedupeLoadedAt;
+  delete job.downloadDedupeError;
+  delete job.downloadDedupeLastErrorAt;
+  job.downloadDedupeSkipped = 0;
   state.activeJobId = job.id;
   state.triggerMode = "folder_button";
   state.sourceTabId = job.sourceTabId;
@@ -2167,6 +2341,7 @@ async function finalizeActiveJob(state, status, message, notification = null, fo
     completedAt: state.completedAt,
     lastMessage: message
   });
+  successfulDownloadRecordCache.delete(job.id);
   if (status === "complete") recordVerifiedFolderReceipt(state, job);
   const source = {
     sourceTabId: state.sourceTabId,
@@ -2430,6 +2605,28 @@ async function processScanStep(state) {
           state,
           "POPO 页面刷新中；当前子文件夹稍后自动继续，不计为扫描失败"
         );
+        return;
+      }
+      folder.resolveRetries = Math.max(0, Number(folder.resolveRetries) || 0) + 1;
+      if (folder.resolveRetries <= MAX_DIRECTORY_RESOLVE_RETRIES) {
+        const path = [...folder.parentPath, folder.name].join("/");
+        pushRuntimeEvent(
+          state,
+          "DIRECTORY_RESOLVE_RETRY",
+          "warn",
+          `子文件夹暂未定位，正在自动重试（${folder.resolveRetries}/${MAX_DIRECTORY_RESOLVE_RETRIES}）`,
+          String(error),
+          {
+            jobId: activeJob(state)?.id || "",
+            path
+          }
+        );
+        await saveState(state);
+        await notifySource(state, {
+          type: "FOLDER_TASK_STATUS",
+          message: `正在重新查找：${path}`
+        });
+        schedulePump(400);
         return;
       }
       state.scanFailures.push({
@@ -3469,13 +3666,6 @@ async function processDownloadStep(state, { duringScan = false, skipTransferSync
     schedulePump(100);
     return;
   }
-  if (state.triggerMode === "folder_button" && state.workerFrameId == null && selectedPendingItem(state)) {
-    await waitForWorkerReconnect(
-      state,
-      "等待 POPO 页面恢复；已开始的 Gopeed 下载继续，未开始文件保持排队"
-    );
-    return;
-  }
   if (state.activeTransfers.length >= state.settings.concurrency) {
     if (duringScan) {
       updatePersistentWorkflow(state, { nextAction: "scan" });
@@ -3534,6 +3724,97 @@ async function processDownloadStep(state, { duringScan = false, skipTransferSync
         successCount,
         failedCount
       }
+    );
+    return;
+  }
+
+  const downloadHistory = await ensureSuccessfulDownloadRecords(state);
+  if (!downloadHistory.ready) {
+    state.phase = "checking_download_history";
+    await saveState(state);
+    schedulePump(2000);
+    return;
+  }
+  const targetKey = itemDownloadTargetKey(state, item);
+  const identityKey = gopeedTaskIdentityLabels(state, item).popoTaskKey || "";
+  const candidateRecords = successfulDownloadCandidates(downloadHistory, identityKey, targetKey);
+  let verifiedRecords = [];
+  if (candidateRecords.length) {
+    try {
+      verifiedRecords = await verifySuccessfulDownloadCandidates(
+        state,
+        downloadHistory,
+        candidateRecords
+      );
+    } catch (error) {
+      const detail = String(error?.message || error).replace(/^Error:\s*/, "");
+      const job = activeJob(state);
+      pushRuntimeEvent(
+        state,
+        "DOWNLOAD_DEDUPE_FILE_VERIFY_ERROR",
+        "warn",
+        "暂时无法核对本地已下载文件，未创建新下载任务",
+        detail,
+        { jobId: job?.id || "", itemId: item.id }
+      );
+      if (job) job.downloadDedupeError = detail;
+      state.phase = "checking_download_files";
+      await saveState(state);
+      schedulePump(2000);
+      return;
+    }
+  }
+  const matchedIdentity = Boolean(identityKey && verifiedRecords.some(
+    (record) => record.identityKey === identityKey
+  ));
+  const matchedTarget = verifiedRecords.some((record) => record.targetKey === targetKey);
+  if (matchedIdentity || matchedTarget) {
+    const now = new Date().toISOString();
+    item.status = "success";
+    item.stage = "已成功下载，已跳过";
+    item.failureStage = "";
+    item.error = "";
+    item.completedAt = now;
+    item.deduplicated = true;
+    const job = activeJob(state);
+    if (job) job.downloadDedupeSkipped = (Number(job.downloadDedupeSkipped) || 0) + 1;
+    state.activeItemId = state.activeTransfers[0]?.itemId ?? null;
+    updatePersistentWorkflow(state, { nextAction: "scan" });
+    pushRuntimeEvent(
+      state,
+      "DOWNLOAD_DUPLICATE_SKIPPED",
+      "info",
+      `已下载文件自动跳过：${item.name}`,
+      matchedIdentity
+        ? "Gopeed 成功记录中的 POPO 素材身份与本次文件一致"
+        : "Gopeed 成功记录中的保存路径与本次目标路径一致",
+      { jobId: job?.id || "", matchType: matchedIdentity ? "identity" : "target" }
+    );
+    await saveState(state);
+    await notifySource(state, {
+      type: "FOLDER_TASK_STATUS",
+      message: `已下载，自动跳过：${item.name}`
+    });
+    schedulePump(100);
+    return;
+  }
+
+  if (candidateRecords.length) {
+    const job = activeJob(state);
+    pushRuntimeEvent(
+      state,
+      "DOWNLOAD_DEDUPE_STALE_RECORD",
+      "info",
+      `历史记录对应的本地文件不存在，将重新下载：${item.name}`,
+      `staleCandidates=${candidateRecords.length}`,
+      { jobId: job?.id || "", itemId: item.id, staleCandidates: candidateRecords.length }
+    );
+  }
+
+  if (state.triggerMode === "folder_button" && state.workerFrameId == null) {
+    await waitForWorkerReconnect(
+      state,
+      "等待 POPO 页面恢复；已开始的 Gopeed 下载继续，未开始文件保持排队"
     );
     return;
   }
@@ -3826,6 +4107,29 @@ async function startFolderScan(message, sourceTabId) {
     };
   }
 
+  const completedReceipt = normalizeFolderReceipts(state.folderReceipts)
+    .find((receipt) => receipt.key === key && folderReceiptInFeedbackWindow(receipt));
+  if (completedReceipt) {
+    return {
+      state,
+      job: {
+        id: `receipt:${completedReceipt.key}`,
+        key: completedReceipt.key,
+        status: "complete",
+        folderName: completedReceipt.folderName,
+        folderItemIndex: completedReceipt.folderItemIndex,
+        parentUrl: completedReceipt.parentUrl,
+        completedAt: completedReceipt.completedAt,
+        counts: completedReceipt.counts,
+        verifiedCompletion: true
+      },
+      duplicate: true,
+      alreadyCompleted: true,
+      queuePosition: 0,
+      needsWorker: false
+    };
+  }
+
   const job = createQueuedFolderJob({
     key,
     sourceTabId,
@@ -3834,7 +4138,6 @@ async function startFolderScan(message, sourceTabId) {
     parentUrl,
     scope: "folder"
   });
-  removeFolderReceipt(state, key);
   const needsWorker = await appendQueuedFolderJob(state, job);
   return {
     state,
@@ -3938,7 +4241,9 @@ async function startPageDownload(message, sourceTabId, discovery) {
     };
   }
 
-  const receipts = new Set(normalizeFolderReceipts(state.folderReceipts).map((receipt) => receipt.key));
+  const receipts = new Set(normalizeFolderReceipts(state.folderReceipts)
+    .filter((receipt) => folderReceiptInFeedbackWindow(receipt))
+    .map((receipt) => receipt.key));
   const existingBatchJob = [...(state.jobs || [])]
     .reverse()
     .find((job) =>
@@ -5146,6 +5451,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           state: publicState(result.state),
           job: result.job,
           duplicate: result.duplicate,
+          alreadyCompleted: result.alreadyCompleted || false,
           coveredByPageDownload: result.coveredByPageDownload || false,
           queuePosition: result.queuePosition,
           needsWorker: result.needsWorker

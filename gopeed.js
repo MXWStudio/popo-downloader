@@ -226,6 +226,77 @@
       .filter(Boolean))];
   }
 
+  function successfulTaskTargetKey(task) {
+    if (task?.meta?.req?.labels?.source !== "popo-stable-downloader") return "";
+    if (classifyTaskStatus(task?.status) !== "success") return "";
+
+    const options = task?.meta?.opts || {};
+    const name = options.name || task?.name || task?.meta?.res?.files?.[0]?.name || "";
+    if (!options.path || !name) return "";
+    return normalizeTargetKey(`${options.path}/${name}`);
+  }
+
+  function successfulTaskTargetKeys(tasks) {
+    return [...new Set((Array.isArray(tasks) ? tasks : [])
+      .map((task) => successfulTaskTargetKey(task))
+      .filter(Boolean))];
+  }
+
+  function successfulTaskFileRecord(task) {
+    const targetKey = successfulTaskTargetKey(task);
+    if (!targetKey) return null;
+
+    const options = task?.meta?.opts || {};
+    const name = options.name || task?.name || task?.meta?.res?.files?.[0]?.name || "";
+    const directory = String(options.path || "").replace(/[\\/]+$/, "");
+    if (!directory || !name) return null;
+    const separator = directory.includes("\\") ? "\\" : "/";
+    const responseFiles = Array.isArray(task?.meta?.res?.files) ? task.meta.res.files : [];
+    const responseFile = responseFiles.find((file) =>
+      String(file?.name || "").toLowerCase() === String(name).toLowerCase()
+    ) || responseFiles[0];
+    const rawExpectedSize = responseFile?.size ?? task?.meta?.res?.size ?? task?.progress?.downloaded;
+    const expectedSize = Number.isSafeInteger(Number(rawExpectedSize)) && Number(rawExpectedSize) > 0
+      ? Number(rawExpectedSize)
+      : 0;
+    const taskId = String(task?.id || "").trim();
+    const identityKey = successfulTaskIdentityKey(task);
+
+    return {
+      recordKey: `file:${stableTaskIdentityKey(`${taskId}\u0000${identityKey}\u0000${targetKey}\u0000${expectedSize}`)}`,
+      taskId,
+      identityKey,
+      targetKey,
+      filePath: `${directory}${separator}${name}`,
+      expectedSize
+    };
+  }
+
+  function successfulTaskFileRecords(tasks) {
+    const records = [];
+    const seen = new Set();
+    for (const task of Array.isArray(tasks) ? tasks : []) {
+      const record = successfulTaskFileRecord(task);
+      if (!record || seen.has(record.recordKey)) continue;
+      seen.add(record.recordKey);
+      records.push(record);
+    }
+    return records;
+  }
+
+  function successfulTaskIdentityKey(task) {
+    if (task?.meta?.req?.labels?.source !== "popo-stable-downloader") return "";
+    if (classifyTaskStatus(task?.status) !== "success") return "";
+    const taskKey = String(task?.meta?.req?.labels?.popoTaskKey || "").trim().toLowerCase();
+    return /^[a-f0-9]{16}$/.test(taskKey) ? taskKey : "";
+  }
+
+  function successfulTaskIdentityKeys(tasks) {
+    return [...new Set((Array.isArray(tasks) ? tasks : [])
+      .map((task) => successfulTaskIdentityKey(task))
+      .filter(Boolean))];
+  }
+
   function managedTaskIdentity(task) {
     const labels = task?.meta?.req?.labels;
     if (labels?.source !== "popo-stable-downloader") return null;
@@ -385,6 +456,12 @@
     reusableTaskTargetKey,
     reusableTaskTargetKeys,
     selectTaskByIdentity,
+    successfulTaskFileRecord,
+    successfulTaskFileRecords,
+    successfulTaskIdentityKey,
+    successfulTaskIdentityKeys,
+    successfulTaskTargetKey,
+    successfulTaskTargetKeys,
     startOrReplaceTask,
     splitDownloadTarget
   };

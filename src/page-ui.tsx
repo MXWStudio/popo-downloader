@@ -31,6 +31,7 @@ import {
   findPageDownloadBatch,
   findMatchingFolderJob,
   findMatchingFolderReceipt,
+  folderReceiptFeedbackRemaining,
   folderButtonDisplay,
   inferVirtualListItemCount,
   jobDetail,
@@ -68,6 +69,8 @@ const SELECTORS = {
 const ROOT_ID = "popo-react-page-root";
 const GLOBAL_STYLE_ID = "popo-react-page-global-style";
 const PROJECT_COUNT_ID = "popo-stable-project-count";
+const DIRECTORY_TRANSITION_OVERLAY_ID = "popo-directory-transition-overlay";
+const DIRECTORY_TRANSITION_ATTRIBUTE = "data-popo-directory-transition";
 const DOWNLOAD_ANCHOR_CLASS = "popo-react-download-anchor";
 const DOWNLOAD_BUTTON_CLASS = "popo-stable-download-button";
 const DOWNLOAD_HOST_ATTRIBUTE = "data-popo-download-host";
@@ -75,11 +78,15 @@ const OWNED_SELECTOR = [
   "#" + ROOT_ID,
   "#" + GLOBAL_STYLE_ID,
   "#" + PROJECT_COUNT_ID,
+  "#" + DIRECTORY_TRANSITION_OVERLAY_ID,
   "." + DOWNLOAD_ANCHOR_CLASS,
   "." + DOWNLOAD_BUTTON_CLASS
 ].join(",");
 const ENSURE_WORKER_EVENT = "popo-stable-download:ensure-worker";
+const PAGE_ROUTE_CHANGE_EVENT = "popo-stable-download:page-route-change";
 const PAGE_DETAIL_PATTERN = /\/pageDetail\/[a-z0-9]+/i;
+const DIRECTORY_CONTENT_SETTLE_MS = 80;
+const DIRECTORY_TRANSITION_TIMEOUT_MS = 5000;
 
 interface FolderItem {
   name: string;
@@ -99,6 +106,17 @@ interface PageSnapshot {
   rawCount: number | null;
   countTarget: HTMLElement | null;
   folderTargets: FolderPortalTarget[];
+}
+
+interface DirectoryFingerprint {
+  pageName: string;
+  scroller: HTMLElement | null;
+  rows: HTMLElement[];
+  scrollerId: number;
+  rowSignature: string;
+  ready: boolean;
+  explicitEmpty: boolean;
+  contradictory: boolean;
 }
 
 interface ToastRecord extends UiNotification {
@@ -123,6 +141,26 @@ function currentDirectoryName(): string {
   return candidates[candidates.length - 1] || "POPO目录";
 }
 
+function isElementRenderable(element: HTMLElement): boolean {
+  if (!element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    const style = getComputedStyle(current);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.visibility === "collapse" ||
+      Number(style.opacity) === 0
+    ) return false;
+  }
+  return true;
+}
+
+function isRowRenderable(element: HTMLElement): boolean {
+  return element.isConnected && element.offsetParent !== null && element.getClientRects().length > 0;
+}
+
 function parseFolderRow(row: Element): FolderItem | null {
   const name = normalizeText(row.querySelector(SELECTORS.name)?.textContent);
   if (!name || !row.querySelector(SELECTORS.folderIcon)) return null;
@@ -137,7 +175,7 @@ function parseFolderRow(row: Element): FolderItem | null {
 
 function directoryScrollers(): HTMLElement[] {
   return Array.from(document.querySelectorAll<HTMLElement>(SELECTORS.scroller))
-    .filter((scroller) => scroller.isConnected)
+    .filter(isElementRenderable)
     .sort((left, right) => {
       const rowDifference =
         right.querySelectorAll(SELECTORS.row).length -
@@ -162,11 +200,15 @@ function hasExplicitEmptyState(): boolean {
   });
 }
 
-function currentVirtualListItemCount(): number | null {
-  if (hasExplicitEmptyState()) return 0;
-  const scroller = currentDirectoryScroller();
+function currentVirtualListItemCount(
+  scroller: HTMLElement | null = currentDirectoryScroller(),
+  rows = Array.from(scroller?.querySelectorAll<HTMLElement>(SELECTORS.row) || [])
+    .filter(isRowRenderable)
+): number | null {
+  const explicitEmpty = hasExplicitEmptyState();
+  if (explicitEmpty && rows.length) return null;
+  if (explicitEmpty) return 0;
   if (!scroller) return null;
-  const rows = Array.from(scroller.querySelectorAll(SELECTORS.row));
   const itemList = scroller.querySelector<HTMLElement>('[data-test-id="virtuoso-item-list"]');
   if (!rows.length || !itemList) return null;
   return inferVirtualListItemCount({
@@ -194,7 +236,10 @@ function ensureProjectCountTarget(): HTMLElement | null {
     return null;
   }
   const placement = projectCountPlacement();
-  if (!placement) return null;
+  if (!placement) {
+    document.getElementById(PROJECT_COUNT_ID)?.remove();
+    return null;
+  }
   let target = document.getElementById(PROJECT_COUNT_ID);
   if (!target) {
     target = document.createElement("span");
@@ -211,14 +256,90 @@ function ensureProjectCountTarget(): HTMLElement | null {
   return target;
 }
 
-function ensureFolderTargets(): FolderPortalTarget[] {
+function clearFolderTargets(): void {
+  for (const anchor of document.querySelectorAll("." + DOWNLOAD_ANCHOR_CLASS)) anchor.remove();
+  for (const host of document.querySelectorAll(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
+    host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
+  }
+}
+
+function clearDirectoryTransitionOverlay(): void {
+  document.documentElement.removeAttribute(DIRECTORY_TRANSITION_ATTRIBUTE);
+  document.getElementById(DIRECTORY_TRANSITION_OVERLAY_ID)?.remove();
+}
+
+function ensureDirectoryTransitionOverlay(
+  expectedName = "",
+  blockInteraction = false
+): HTMLElement | null {
+  if (!PAGE_DETAIL_PATTERN.test(location.href)) {
+    clearDirectoryTransitionOverlay();
+    return null;
+  }
+  document.documentElement.setAttribute(DIRECTORY_TRANSITION_ATTRIBUTE, "true");
+  let overlay = document.getElementById(DIRECTORY_TRANSITION_OVERLAY_ID);
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = DIRECTORY_TRANSITION_OVERLAY_ID;
+    overlay.dataset.popoReactOwned = "true";
+    overlay.setAttribute("role", "status");
+    overlay.setAttribute("aria-live", "polite");
+    overlay.setAttribute("aria-busy", "true");
+
+    const shell = document.createElement("div");
+    shell.className = "popo-directory-transition-shell";
+    const heading = document.createElement("div");
+    heading.className = "popo-directory-transition-heading";
+    const folder = document.createElement("span");
+    folder.className = "popo-directory-transition-folder";
+    folder.setAttribute("aria-hidden", "true");
+    const label = document.createElement("strong");
+    label.className = "popo-directory-transition-label";
+    heading.append(folder, label);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "popo-directory-transition-toolbar";
+    for (let index = 0; index < 5; index += 1) {
+      const control = document.createElement("span");
+      control.className = "popo-directory-transition-control";
+      toolbar.append(control);
+    }
+
+    const rows = document.createElement("div");
+    rows.className = "popo-directory-transition-rows";
+    for (let index = 0; index < 7; index += 1) {
+      const row = document.createElement("span");
+      row.className = "popo-directory-transition-row";
+      const icon = document.createElement("i");
+      const line = document.createElement("i");
+      row.append(icon, line);
+      rows.append(row);
+    }
+    shell.append(heading, toolbar, rows);
+    overlay.append(shell);
+    (document.body || document.documentElement).append(overlay);
+  }
+  if (blockInteraction) overlay.dataset.blockInteraction = "true";
+  else if (!overlay.dataset.blockInteraction) overlay.dataset.blockInteraction = "false";
+  const label = overlay.querySelector<HTMLElement>(".popo-directory-transition-label");
+  if (label) {
+    const target = normalizeText(expectedName);
+    label.textContent = target ? `正在打开“${target}”…` : "正在加载目录…";
+  }
+  return overlay;
+}
+
+function ensureFolderTargets(
+  scroller: HTMLElement | null = currentDirectoryScroller(),
+  rows = Array.from(scroller?.querySelectorAll<HTMLElement>(SELECTORS.row) || [])
+): FolderPortalTarget[] {
   const activeAnchors = new Set<HTMLElement>();
   const activeHosts = new Set<HTMLElement>();
   const targets: FolderPortalTarget[] = [];
-  for (const row of document.querySelectorAll<HTMLElement>(SELECTORS.row)) {
+  for (const row of rows) {
     const item = parseFolderRow(row);
     const existing = row.querySelector<HTMLElement>("." + DOWNLOAD_ANCHOR_CLASS);
-    if (!item) {
+    if (!item || !isRowRenderable(row)) {
       existing?.remove();
       for (const host of row.querySelectorAll<HTMLElement>(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
         host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
@@ -227,7 +348,7 @@ function ensureFolderTargets(): FolderPortalTarget[] {
     }
     const nameNode = row.querySelector<HTMLElement>(SELECTORS.name);
     const nameHost = row.querySelector<HTMLElement>(SELECTORS.nameHost) || nameNode?.parentElement;
-    if (!nameHost) {
+    if (!nameNode || !nameHost || !isRowRenderable(nameNode) || !isRowRenderable(nameHost)) {
       existing?.remove();
       continue;
     }
@@ -274,21 +395,239 @@ function mutationNeedsReconcile(mutation: MutationRecord): boolean {
   return nodes.length === 0 || !nodes.every(isOwnedNode);
 }
 
+function createDirectoryFingerprintReader(): () => DirectoryFingerprint {
+  const scrollerIds = new WeakMap<HTMLElement, number>();
+  let nextScrollerId = 1;
+  return () => {
+    const pageName = currentDirectoryName();
+    const rawExplicitEmpty = hasExplicitEmptyState();
+    const scroller = currentDirectoryScroller();
+    if (!scroller) {
+      return {
+        pageName,
+        scroller: null,
+        rows: [],
+        scrollerId: 0,
+        rowSignature: "",
+        ready: rawExplicitEmpty,
+        explicitEmpty: rawExplicitEmpty,
+        contradictory: false
+      };
+    }
+    let scrollerId = scrollerIds.get(scroller);
+    if (!scrollerId) {
+      scrollerId = nextScrollerId;
+      nextScrollerId += 1;
+      scrollerIds.set(scroller, scrollerId);
+    }
+    const renderedRows = Array.from(scroller.querySelectorAll<HTMLElement>(SELECTORS.row))
+      .filter(isRowRenderable);
+    const itemList = scroller.querySelector<HTMLElement>('[data-test-id="virtuoso-item-list"]');
+    const nativeRows = renderedRows.filter((row) =>
+      normalizeText(row.querySelector(SELECTORS.name)?.textContent)
+    );
+    const rowSignature = nativeRows.map((row) => {
+      const itemIndex = row.getAttribute("data-item-index") || row.getAttribute("data-index") || "";
+      const name = normalizeText(row.querySelector(SELECTORS.name)?.textContent);
+      const type = row.querySelector(SELECTORS.folderIcon) ? "folder" : "file";
+      return `${itemIndex}:${type}:${name}`;
+    }).join("\u001e");
+    const hasRows = Boolean(itemList && nativeRows.length && rowSignature);
+    const contradictory = rawExplicitEmpty && hasRows;
+    return {
+      pageName,
+      scroller,
+      rows: nativeRows,
+      scrollerId,
+      rowSignature,
+      ready: !contradictory && (rawExplicitEmpty || hasRows),
+      explicitEmpty: rawExplicitEmpty && !hasRows,
+      contradictory
+    };
+  };
+}
+
 function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () => void {
   let frame = 0;
   let disposed = false;
+  let observedUrl = location.href;
+  let routeReady = false;
+  let acceptedFingerprint: DirectoryFingerprint | null = null;
+  let transitionBaseline: DirectoryFingerprint | null = null;
+  let expectedPageName = "";
+  let transitionStartedAt = 0;
+  let candidateSignature = "";
+  let candidateSince = 0;
+  let candidateRounds = 0;
+  let settleTimer = 0;
+  const readFingerprint = createDirectoryFingerprintReader();
+
+  const clearSettleTimer = () => {
+    if (!settleTimer) return;
+    window.clearTimeout(settleTimer);
+    settleTimer = 0;
+  };
+
+  const beginRouteTransition = (
+    nextUrl = location.href,
+    expectedName = "",
+    showOverlay = true,
+    blockInteraction = false
+  ) => {
+    observedUrl = nextUrl;
+    routeReady = false;
+    transitionBaseline = acceptedFingerprint;
+    expectedPageName = normalizeText(expectedName) || expectedPageName;
+    transitionStartedAt = Date.now();
+    candidateSignature = "";
+    candidateSince = 0;
+    candidateRounds = 0;
+    clearSettleTimer();
+    document.getElementById(PROJECT_COUNT_ID)?.remove();
+    clearFolderTargets();
+    if (showOverlay) ensureDirectoryTransitionOverlay(expectedPageName, blockInteraction);
+    onSnapshot({
+      url: nextUrl,
+      pageName: currentDirectoryName(),
+      rawCount: null,
+      countTarget: null,
+      folderTargets: []
+    });
+  };
 
   const reconcile = () => {
     frame = 0;
     if (disposed) return;
+    if (observedUrl !== location.href) {
+      beginRouteTransition(location.href, expectedPageName, true, true);
+    }
+    const isDirectoryPage = PAGE_DETAIL_PATTERN.test(location.href);
+    const fingerprint = readFingerprint();
+    if (
+      routeReady &&
+      acceptedFingerprint &&
+      fingerprint.pageName !== acceptedFingerprint.pageName
+    ) {
+      beginRouteTransition(location.href, fingerprint.pageName, true, true);
+    }
+    if (routeReady && (!fingerprint.ready || fingerprint.contradictory)) {
+      routeReady = false;
+      // The current route was already accepted once. POPO can briefly hide or
+      // remount that same list after the first paint, so allow the identical
+      // native rows to settle again instead of leaving controls removed forever.
+      transitionBaseline = null;
+      candidateSignature = "";
+      candidateSince = 0;
+      candidateRounds = 0;
+      clearSettleTimer();
+      transitionStartedAt = Date.now();
+      ensureDirectoryTransitionOverlay(fingerprint.pageName, true);
+    }
+    if (routeReady && fingerprint.ready && !fingerprint.contradictory) {
+      acceptedFingerprint = fingerprint;
+    }
+    if (isDirectoryPage && !routeReady) {
+      const expectedPageReached = !expectedPageName ||
+        fingerprint.pageName === expectedPageName ||
+        fingerprint.pageName.includes(expectedPageName);
+      const baselineChanged = !transitionBaseline || (
+        fingerprint.explicitEmpty
+          ? fingerprint.pageName !== transitionBaseline.pageName
+          : fingerprint.rowSignature !== transitionBaseline.rowSignature && (
+              fingerprint.pageName !== transitionBaseline.pageName ||
+              fingerprint.scrollerId !== transitionBaseline.scrollerId
+            )
+      );
+      const signature = [
+        location.href,
+        fingerprint.pageName,
+        fingerprint.scrollerId,
+        fingerprint.rowSignature,
+        fingerprint.explicitEmpty ? "empty" : "rows"
+      ].join("\u0000");
+      if (fingerprint.ready && baselineChanged && expectedPageReached) {
+        if (candidateSignature !== signature) {
+          candidateSignature = signature;
+          candidateSince = Date.now();
+          candidateRounds = 1;
+          clearSettleTimer();
+          settleTimer = window.setTimeout(() => {
+            settleTimer = 0;
+            schedule();
+          }, DIRECTORY_CONTENT_SETTLE_MS + 1);
+        } else {
+          candidateRounds += 1;
+        }
+        if (candidateRounds >= 2 && Date.now() - candidateSince >= DIRECTORY_CONTENT_SETTLE_MS) {
+          routeReady = true;
+          acceptedFingerprint = fingerprint;
+          expectedPageName = "";
+          transitionStartedAt = 0;
+          clearSettleTimer();
+          clearDirectoryTransitionOverlay();
+        }
+      } else {
+        candidateSignature = "";
+        candidateSince = 0;
+        candidateRounds = 0;
+        clearSettleTimer();
+      }
+      if (
+        expectedPageName &&
+        transitionBaseline &&
+        Date.now() - transitionStartedAt >= 5000 &&
+        fingerprint.ready &&
+        fingerprint.pageName === transitionBaseline.pageName &&
+        fingerprint.rowSignature === transitionBaseline.rowSignature
+      ) {
+        expectedPageName = "";
+        transitionBaseline = null;
+        transitionStartedAt = 0;
+        clearDirectoryTransitionOverlay();
+        schedule();
+      }
+      if (
+        transitionStartedAt &&
+        Date.now() - transitionStartedAt >= DIRECTORY_TRANSITION_TIMEOUT_MS
+      ) {
+        expectedPageName = "";
+        transitionBaseline = null;
+        candidateSignature = "";
+        candidateSince = 0;
+        candidateRounds = 0;
+        clearSettleTimer();
+        clearDirectoryTransitionOverlay();
+        transitionStartedAt = 0;
+        schedule();
+      }
+    }
+    if (!isDirectoryPage) clearDirectoryTransitionOverlay();
+    const rawCount = isDirectoryPage && routeReady
+      ? currentVirtualListItemCount(fingerprint.scroller, fingerprint.rows)
+      : null;
+    if (routeReady && rawCount == null) {
+      routeReady = false;
+      transitionBaseline = null;
+      transitionStartedAt = Date.now();
+      ensureDirectoryTransitionOverlay(fingerprint.pageName, true);
+    }
+    const countTarget = isDirectoryPage && routeReady && rawCount != null
+      ? ensureProjectCountTarget()
+      : null;
+    if (!countTarget) document.getElementById(PROJECT_COUNT_ID)?.remove();
+    let folderTargets: FolderPortalTarget[] = [];
+    if (isDirectoryPage && countTarget && routeReady && !fingerprint.explicitEmpty) {
+      folderTargets = ensureFolderTargets(fingerprint.scroller, fingerprint.rows);
+    }
+    else clearFolderTargets();
     onSnapshot({
       url: location.href,
-      pageName: currentDirectoryName(),
-      rawCount: PAGE_DETAIL_PATTERN.test(location.href)
-        ? currentVirtualListItemCount()
-        : null,
-      countTarget: ensureProjectCountTarget(),
-      folderTargets: PAGE_DETAIL_PATTERN.test(location.href) ? ensureFolderTargets() : []
+      pageName: fingerprint.pageName,
+      rawCount: routeReady ? rawCount : null,
+      countTarget,
+      // POPO switches the URL before its directory toolbar and list finish
+      // mounting. Do not portal buttons into stale virtual rows during that gap.
+      folderTargets
     });
   };
 
@@ -308,29 +647,77 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     subtree: true
   });
   const timer = window.setInterval(schedule, 350);
-  window.addEventListener("popstate", schedule);
+  const handleRouteChange = () => {
+    beginRouteTransition(location.href, expectedPageName, true, true);
+    schedule();
+  };
+  const directoryItemFromPointer = (event: MouseEvent) => {
+    if (
+      event.button !== 0 ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    ) return null;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest(OWNED_SELECTOR)) return null;
+    const nameHost = target.closest(SELECTORS.nameHost);
+    const row = nameHost?.closest(SELECTORS.row);
+    return row ? parseFolderRow(row) : null;
+  };
+  const handleDirectoryDoubleClick = (event: MouseEvent) => {
+    const item = directoryItemFromPointer(event);
+    if (!item) return;
+    // POPO opens folders on a native double click. Keep the first two pointer
+    // sequences click-through, then block further input once dblclick itself
+    // already targets the native row and can finish bubbling to POPO.
+    beginRouteTransition(location.href, item.name, true, true);
+    schedule();
+  };
+  window.addEventListener(PAGE_ROUTE_CHANGE_EVENT, handleRouteChange);
+  window.addEventListener("popstate", handleRouteChange);
   window.addEventListener("hashchange", schedule);
+  document.addEventListener("dblclick", handleDirectoryDoubleClick, true);
+  beginRouteTransition(location.href, "", false);
   schedule();
 
   return () => {
     disposed = true;
     observer.disconnect();
     window.clearInterval(timer);
-    window.removeEventListener("popstate", schedule);
+    clearSettleTimer();
+    window.removeEventListener(PAGE_ROUTE_CHANGE_EVENT, handleRouteChange);
+    window.removeEventListener("popstate", handleRouteChange);
     window.removeEventListener("hashchange", schedule);
+    document.removeEventListener("dblclick", handleDirectoryDoubleClick, true);
     if (frame) cancelAnimationFrame(frame);
     document.getElementById(PROJECT_COUNT_ID)?.remove();
-    for (const anchor of document.querySelectorAll("." + DOWNLOAD_ANCHOR_CLASS)) anchor.remove();
-    for (const host of document.querySelectorAll(`[${DOWNLOAD_HOST_ATTRIBUTE}]`)) {
-      host.removeAttribute(DOWNLOAD_HOST_ATTRIBUTE);
-    }
+    clearFolderTargets();
+    clearDirectoryTransitionOverlay();
   };
 }
 
 function globalStyles(): string {
   return [
+    "html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [role='tooltip'],html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [class*='tooltip'],html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [class*='Tooltip']{visibility:hidden!important;opacity:0!important;pointer-events:none!important;}",
+    "#" + DIRECTORY_TRANSITION_OVERLAY_ID + "{all:initial!important;box-sizing:border-box!important;position:fixed!important;z-index:2147483000!important;inset:60px 0 0!important;display:block!important;overflow:hidden!important;color:#526173!important;background:rgba(255,255,255,.985)!important;cursor:progress!important;pointer-events:none!important;font-family:'Segoe UI','Microsoft YaHei',sans-serif!important;color-scheme:light!important;}",
+    "#" + DIRECTORY_TRANSITION_OVERLAY_ID + "[data-block-interaction='true']{pointer-events:auto!important;}",
+    "#" + DIRECTORY_TRANSITION_OVERLAY_ID + " *{box-sizing:border-box!important;}",
+    ".popo-directory-transition-shell{width:100%!important;height:100%!important;padding:38px clamp(28px,6.6vw,92px)!important;}",
+    ".popo-directory-transition-heading{display:flex!important;align-items:center!important;gap:12px!important;height:46px!important;}",
+    ".popo-directory-transition-folder{position:relative!important;display:block!important;width:40px!important;height:29px!important;border-radius:4px!important;background:#ffd064!important;box-shadow:inset 0 0 0 1px rgba(184,125,0,.08)!important;}",
+    ".popo-directory-transition-folder:before{content:''!important;position:absolute!important;top:-5px!important;left:3px!important;width:17px!important;height:8px!important;border-radius:4px 4px 0 0!important;background:#ffc64a!important;}",
+    ".popo-directory-transition-label{display:block!important;color:#667487!important;font:600 15px/1.2 'Segoe UI','Microsoft YaHei',sans-serif!important;white-space:nowrap!important;}",
+    ".popo-directory-transition-toolbar{display:flex!important;align-items:center!important;justify-content:flex-end!important;gap:10px!important;height:70px!important;border-bottom:1px solid #eef1f5!important;}",
+    ".popo-directory-transition-control{display:block!important;width:92px!important;height:32px!important;border-radius:7px!important;background:#f1f4f7!important;}",
+    ".popo-directory-transition-control:first-child{margin-right:auto!important;width:96px!important;}",
+    ".popo-directory-transition-rows{display:grid!important;gap:0!important;}",
+    ".popo-directory-transition-row{display:flex!important;align-items:center!important;gap:12px!important;height:48px!important;border-bottom:1px solid #f5f6f8!important;}",
+    ".popo-directory-transition-row i:first-child{display:block!important;width:24px!important;height:18px!important;border-radius:4px!important;background:#f5cf72!important;}",
+    ".popo-directory-transition-row i:last-child{display:block!important;width:min(34vw,330px)!important;height:11px!important;border-radius:999px!important;background:linear-gradient(90deg,#edf1f5 20%,#f7f9fb 45%,#edf1f5 70%)!important;background-size:220% 100%!important;animation:popo-directory-transition-shimmer 1.35s ease-in-out infinite!important;}",
+    "@keyframes popo-directory-transition-shimmer{0%{background-position:130% 0}100%{background-position:-130% 0}}",
     "[" + DOWNLOAD_HOST_ATTRIBUTE + "]{box-sizing:border-box!important;position:relative!important;padding-right:244px!important;}",
-    "." + DOWNLOAD_ANCHOR_CLASS + "{position:absolute!important;top:0!important;right:0!important;bottom:0!important;z-index:2!important;display:inline-flex!important;align-items:center!important;justify-content:flex-end!important;width:244px!important;}",
+    "." + DOWNLOAD_ANCHOR_CLASS + "{position:absolute!important;top:0!important;right:0!important;bottom:0!important;z-index:0!important;isolation:isolate!important;display:inline-flex!important;align-items:center!important;justify-content:flex-end!important;width:244px!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "{--popo-gradient-surface:linear-gradient(145deg,#1d2a39 0%,#111923 100%);--popo-gradient-highlight:none;--popo-surface-border:#415267;--popo-surface-ink:#9ec9ff;box-sizing:border-box!important;position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 30px!important;width:30px!important;height:30px!important;overflow:visible!important;margin:0 3px!important;padding:0!important;border:1px solid var(--popo-surface-border)!important;border-radius:8px!important;color:var(--popo-surface-ink)!important;background-color:#111923!important;background-image:var(--popo-gradient-highlight),var(--popo-gradient-surface)!important;background-size:220% 100%,100% 100%!important;background-position:-130% 0,0 0!important;background-repeat:no-repeat!important;font:600 11px/1 'Segoe UI','Microsoft YaHei',sans-serif!important;white-space:nowrap!important;cursor:pointer!important;box-shadow:0 7px 18px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.055)!important;color-scheme:dark;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-expanded='true']{justify-content:flex-start!important;overflow:hidden!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='queued']{flex-basis:124px!important;width:124px!important;height:32px!important;padding:0 8px!important;}",
@@ -350,6 +737,8 @@ function globalStyles(): string {
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{--popo-gradient-highlight:linear-gradient(105deg,transparent 28%,rgba(255,255,255,.035) 39%,rgba(142,208,255,.17) 48%,rgba(255,255,255,.05) 57%,transparent 69%);animation:popo-gradient-surface-flow 4.8s ease-in-out infinite!important;}",
     ".popo-download-idle-icon{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:18px!important;height:18px!important;}",
     ".popo-download-idle-icon svg{display:block!important;width:18px!important;height:18px!important;}",
+    ".popo-download-complete-marker{box-sizing:border-box!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 22px!important;width:22px!important;height:22px!important;margin:0 2px!important;border:1px solid #3e7566!important;border-radius:50%!important;color:#75dbb9!important;background:rgba(11,155,116,.14)!important;box-shadow:0 4px 12px rgba(4,46,35,.2),inset 0 1px 0 rgba(255,255,255,.08)!important;pointer-events:none!important;}",
+    ".popo-download-complete-marker svg{display:block!important;width:14px!important;height:14px!important;}",
     ".popo-download-content{position:relative!important;z-index:5!important;display:flex!important;align-items:center!important;width:100%!important;min-width:0!important;gap:6px!important;overflow:hidden!important;}",
     ".popo-download-state-icon{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 20px!important;width:20px!important;height:22px!important;overflow:visible!important;}",
     ".popo-download-state-icon-motion{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:14px!important;height:14px!important;transform-origin:50% 50%!important;}",
@@ -373,7 +762,7 @@ function globalStyles(): string {
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='success'] .popo-download-fill,." + DOWNLOAD_BUTTON_CLASS + "[data-state='ready'] .popo-download-fill{background:#0b9b74!important;}",
     "." + DOWNLOAD_BUTTON_CLASS + "[data-state='failed'] .popo-download-fill{background:#d64550!important;}",
     "@keyframes popo-gradient-surface-flow{0%,100%{background-position:-130% 0,0 0;box-shadow:0 7px 18px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.055)}50%{background-position:130% 0,0 0;box-shadow:0 10px 25px rgba(16,82,126,.3),inset 0 1px 0 rgba(255,255,255,.075)}}",
-    "@media(prefers-reduced-motion:reduce){." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{animation:none!important;background-position:50% 0,0 0!important;}.popo-download-fill,.popo-download-estimate-fill{transition:none!important;}}",
+    "@media(prefers-reduced-motion:reduce){." + DOWNLOAD_BUTTON_CLASS + "[data-state='scanning'],." + DOWNLOAD_BUTTON_CLASS + "[data-state='downloading']{animation:none!important;background-position:50% 0,0 0!important;}.popo-download-fill,.popo-download-estimate-fill,.popo-directory-transition-row i:last-child{transition:none!important;animation:none!important;}}",
     "#" + PROJECT_COUNT_ID + "{display:contents!important;}",
     ".popo-react-project-count{all:initial;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;min-width:72px;height:32px;margin-left:10px;margin-right:auto;padding:0 10px;border:1px solid #526f8f;border-radius:7px;color:#eef6ff;background-color:#132235;background-image:radial-gradient(circle at 18% 0%,rgba(111,186,255,.26),transparent 58%),linear-gradient(135deg,#2c4968 0%,#19334d 52%,#0f1a26 100%);background-size:100% 100%;box-shadow:0 6px 16px rgba(4,10,18,.22),inset 0 1px 0 rgba(255,255,255,.09);font:600 13px/1 'Segoe UI','Microsoft YaHei',sans-serif;white-space:nowrap;color-scheme:dark;}",
     ".popo-react-project-count[data-state='loading']{color:#91a0b2;}",
@@ -533,44 +922,6 @@ function usePageSnapshot(): PageSnapshot {
     });
   }), []);
   return snapshot;
-}
-
-function useStableCount(url: string, rawCount: number | null): number | null {
-  const [confirmed, setConfirmed] = useState<number | null>(null);
-  const tracker = useRef({ url: "", candidate: null as number | null, since: 0 });
-
-  useEffect(() => {
-    const now = Date.now();
-    if (tracker.current.url !== url) {
-      tracker.current = { url, candidate: null, since: now };
-      setConfirmed(null);
-    }
-    if (!Number.isInteger(rawCount) || rawCount == null || rawCount < 0) {
-      tracker.current.candidate = null;
-      tracker.current.since = now;
-      setConfirmed(null);
-      return;
-    }
-    if (tracker.current.candidate !== rawCount) {
-      tracker.current.candidate = rawCount;
-      tracker.current.since = now;
-      setConfirmed(null);
-    }
-    const candidateUrl = url;
-    const candidateCount = rawCount;
-    const timer = window.setTimeout(() => {
-      if (
-        tracker.current.url === candidateUrl &&
-        tracker.current.candidate === candidateCount &&
-        Date.now() - tracker.current.since >= 240
-      ) {
-        setConfirmed(candidateCount);
-      }
-    }, 260);
-    return () => window.clearTimeout(timer);
-  }, [url, rawCount]);
-
-  return confirmed;
 }
 
 function useExtensionState(onNotification: (notification: UiNotification) => void): {
@@ -1268,10 +1619,13 @@ function FolderDownloadButton({
 }) {
   const [starting, setStarting] = useState(false);
   const [outcome, setOutcome] = useState<QueueJob | null>(null);
+  const [receiptClock, setReceiptClock] = useState(() => Date.now());
   const lastActiveJob = useRef<QueueJob | null>(null);
   const reducedMotion = useReducedMotion();
   const activeJob = findMatchingFolderJob(state, item);
   const receipt = findMatchingFolderReceipt(state, item);
+  const receiptFeedbackRemaining = folderReceiptFeedbackRemaining(receipt, receiptClock);
+  const receiptFeedbackVisible = receiptFeedbackRemaining > 0;
   const receiptJob = useMemo<QueueJob | null>(() => receipt ? {
     id: `receipt:${receipt.key}`,
     key: receipt.key,
@@ -1288,7 +1642,8 @@ function FolderDownloadButton({
         candidate.id === lastActiveJob.current?.id && jobIsTerminal(candidate)
       ) || null
     : null;
-  const visibleJob = activeJob || transitionOutcome || outcome || receiptJob;
+  const visibleJob = activeJob || transitionOutcome || outcome ||
+    (receiptFeedbackVisible ? receiptJob : null);
   const display = folderButtonDisplay(visibleJob, starting);
   const motionKey = `${visibleJob?.id || "transient"}:${display.visualState}`;
   const terminalJob = visibleJob && jobIsTerminal(visibleJob) ? visibleJob : null;
@@ -1298,14 +1653,25 @@ function FolderDownloadButton({
     : activeJob
       ? `${statusText || "任务进行中"}，点击查看任务`
       : receiptJob && visibleJob === receiptJob
-        ? "已核对完成，数量一致且无遗漏；点击可重新下载"
+        ? "已成功下载，数量一致且无遗漏；2 分钟后可重新查重"
       : terminalJob
         ? `${statusText}，点击${terminalJob.status === "cancelled" && recoverableCount(terminalJob) > 0
             ? "继续"
             : terminalJob.status === "complete" && display.visualState === "success"
               ? "重新查找"
               : "重试"}`
-        : "稳定下载此文件夹";
+        : receipt
+          ? "已下载过；点击重新查重，已有文件会跳过，缺少文件会下载"
+          : "稳定下载此文件夹";
+
+  useEffect(() => {
+    const now = Date.now();
+    setReceiptClock(now);
+    const remaining = folderReceiptFeedbackRemaining(receipt, now);
+    if (remaining <= 0) return;
+    const timer = window.setTimeout(() => setReceiptClock(Date.now()), remaining + 20);
+    return () => window.clearTimeout(timer);
+  }, [receipt?.completedAt, receipt?.key]);
 
   useEffect(() => {
     if (activeJob) {
@@ -1337,6 +1703,7 @@ function FolderDownloadButton({
       needsWorker?: boolean;
       job?: QueueJob;
       coveredByPageDownload?: boolean;
+      alreadyCompleted?: boolean;
     }>({
       type: "START_FOLDER_SCAN",
       folderName: item.name,
@@ -1384,7 +1751,11 @@ function FolderDownloadButton({
     }
   };
 
+  const showDownloadedMarker = Boolean(receipt) && !receiptFeedbackVisible &&
+    !activeJob && !transitionOutcome && !outcome && !starting;
+
   return (
+    <>
     <motion.button
       layout
       initial={false}
@@ -1453,6 +1824,24 @@ function FolderDownloadButton({
         scanStartedAt={visibleJob?.startedAt}
       />
     </motion.button>
+    <AnimatePresence>
+      {showDownloadedMarker && (
+        <motion.span
+          className="popo-download-complete-marker"
+          data-popo-downloaded-marker="true"
+          role="img"
+          aria-label={`${item.name}：已下载过`}
+          title="已下载过；点击左侧下载按钮重新查重"
+          initial={reducedMotion ? false : { opacity: 0, scale: .72 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: reducedMotion ? 1 : 0, scale: reducedMotion ? 1 : .72 }}
+          transition={{ duration: reducedMotion ? 0 : .18 }}
+        >
+          <Check aria-hidden="true" focusable="false" strokeWidth={2.2} />
+        </motion.span>
+      )}
+    </AnimatePresence>
+    </>
   );
 }
 
@@ -1766,7 +2155,7 @@ function ToastViewport({
 
 function PageEnhancerApp() {
   const snapshot = usePageSnapshot();
-  const count = useStableCount(snapshot.url, snapshot.rawCount);
+  const count = snapshot.rawCount;
   const { toasts, pushToast, dismissToast } = useToasts();
   const { state, refresh } = useExtensionState(pushToast);
   const [expanded, setExpanded] = useState(false);

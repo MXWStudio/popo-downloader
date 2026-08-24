@@ -337,7 +337,7 @@ test("虚拟列表项目数与行按钮使用相同稳定页面标识", () => {
   );
 });
 
-test("数量闭环凭证可让单项和一键任务持续显示绿色无遗漏反馈", () => {
+test("数量闭环凭证保留历史记录并只在两分钟内显示完整绿色反馈", () => {
   const parentUrl = "https://docs.popo.netease.com/team/pc/team/pageDetail/folder";
   const key = uiModel.makeFolderJobKey({
     parentUrl,
@@ -358,6 +358,10 @@ test("数量闭环凭证可让单项和一键任务持续显示绿色无遗漏�
     itemIndex: "8",
     name: "完整素材"
   }), receipt);
+  const completedAt = Date.parse(receipt.completedAt);
+  assert.equal(uiModel.folderReceiptFeedbackRemaining(receipt, completedAt + 119999), 1);
+  assert.equal(uiModel.folderReceiptFeedbackRemaining(receipt, completedAt + 120000), 0);
+  assert.equal(uiModel.folderReceiptFeedbackRemaining({ ...receipt, completedAt: "" }, completedAt), 0);
   assert.deepEqual(uiModel.folderButtonDisplay({
     id: `receipt:${key}`,
     status: "complete",

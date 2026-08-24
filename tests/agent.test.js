@@ -63,6 +63,29 @@ function invokeNativeHost(executable, message) {
   return JSON.parse(result.stdout.subarray(4).toString("utf8"));
 }
 
+test("native host verifies that a completed task file still exists with the expected size", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "popo-native-file-check-"));
+  try {
+    const executable = path.join(temporaryRoot, "PopoFolderPickerHost.exe");
+    compileNativeHost(executable);
+    const expectedSize = fs.statSync(__filename).size;
+    const response = invokeNativeHost(executable, {
+      action: "verify_files",
+      files: [
+        { key: "present", path: __filename, expectedSize },
+        { key: "missing", path: path.join(temporaryRoot, "missing.bin"), expectedSize: 10 }
+      ]
+    });
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.files, [
+      { key: "present", exists: true, size: expectedSize, sizeMatches: true },
+      { key: "missing", exists: false, size: 0, sizeMatches: false }
+    ]);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 function writeAgentReleaseManifest(agentRoot, version = "0.7.2") {
   fs.writeFileSync(path.join(agentRoot, "release-manifest.json"), JSON.stringify({
     schemaVersion: 1,

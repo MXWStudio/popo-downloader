@@ -5,6 +5,7 @@
   const RESPONSE_SOURCE = "popo-stable-downloader-page";
   const OBSERVED_DOWNLOAD_URL_EVENT = "popo-stable-download:observed-url";
   const REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT = "popo-stable-download:request-observed-urls";
+  const PAGE_ROUTE_CHANGE_EVENT = "popo-stable-download:page-route-change";
   const ALLOWED_PATHS = new Set([
     "/api/bs-team-space/web/v1/page/download",
     "/api/bs-team-space/web/v1/teamSpace/id"
@@ -13,6 +14,29 @@
   const observedResources = new WeakSet();
   const observedUrls = [];
   const MAX_OBSERVED_URLS = 120;
+
+  function reportPageRouteChange(previousUrl) {
+    if (window.location.href === previousUrl) return;
+    window.dispatchEvent(new CustomEvent(PAGE_ROUTE_CHANGE_EVENT, {
+      detail: { url: window.location.href }
+    }));
+  }
+
+  for (const method of ["pushState", "replaceState"]) {
+    const original = window.history[method];
+    if (typeof original !== "function") continue;
+    window.history[method] = function (...args) {
+      const previousUrl = window.location.href;
+      const result = original.apply(this, args);
+      reportPageRouteChange(previousUrl);
+      return result;
+    };
+  }
+  window.addEventListener("popstate", () => {
+    window.dispatchEvent(new CustomEvent(PAGE_ROUTE_CHANGE_EVENT, {
+      detail: { url: window.location.href }
+    }));
+  });
 
   function reportObservedUrl(value) {
     const candidate = String(value || "").trim();

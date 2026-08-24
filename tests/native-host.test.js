@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-test("本机助手只提供系统文件夹选择并使用 Native Messaging 二进制协议", () => {
+test("本机助手以 Native Messaging 提供受限的系统操作", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "native-host", "FolderPickerHost.cs"),
     "utf8"
@@ -13,6 +13,10 @@ test("本机助手只提供系统文件夹选择并使用 Native Messaging 二�
   assert.match(source, /FolderBrowserDialog/);
   assert.match(source, /String\.Equals\(action, "ping"/);
   assert.match(source, /String\.Equals\(action, "ensure_gopeed"/);
+  assert.match(source, /String\.Equals\(action, "verify_files"/);
+  assert.match(source, /FileInfo/);
+  assert.match(source, /sizeMatches/);
+  assert.match(source, /MaxVerifyFileCount/);
   assert.match(source, /String\.Equals\(action, "agent_connection"/);
   assert.match(source, /String\.Equals\(action, "check_update"/);
   assert.match(source, /String\.Equals\(action, "apply_update"/);
@@ -49,6 +53,8 @@ test("安装脚本把当前扩展 ID 写入允许来源并注册到当前用户"
   assert.match(installer, /Chrome extension ID was not found/);
   assert.match(installer, /Secure Preferences/);
   assert.match(installer, /BundledGopeedRoot/);
+  assert.match(installer, /System\.IO\.Compression\.dll/);
+  assert.match(installer, /System\.IO\.Compression\.FileSystem\.dll/);
   assert.match(installer, /Join-Path \$InstallRoot 'Gopeed'/);
   assert.match(installer, /HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts/);
   assert.doesNotMatch(installer, /HKEY_LOCAL_MACHINE|HKLM:/);

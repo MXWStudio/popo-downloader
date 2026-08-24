@@ -15,6 +15,12 @@ const {
   reusableTaskTargetKeys,
   selectTaskByIdentity,
   startOrReplaceTask,
+  successfulTaskFileRecord,
+  successfulTaskFileRecords,
+  successfulTaskIdentityKey,
+  successfulTaskIdentityKeys,
+  successfulTaskTargetKey,
+  successfulTaskTargetKeys,
   splitDownloadTarget
 } = require("../gopeed.js");
 
@@ -185,6 +191,82 @@ test("旧任务恢复只把 POPO 已完成或进行中的保存路径作为去�
   ]);
   assert.equal(normalizeTargetKey("POPO稳定下载\\母文件 A\\DONE.PSD"),
     "popo稳定下载/母文件 a/done.psd");
+});
+
+test("逐文件查重只采用 POPO 已成功任务的完整绝对保存路径", () => {
+  const makeTask = (status, path, name, source = "popo-stable-downloader") => ({
+    status,
+    name,
+    meta: {
+      req: { labels: { source } },
+      opts: { path, name }
+    }
+  });
+  const done = makeTask("done", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\素材包", "视频.MP4");
+  assert.equal(
+    successfulTaskTargetKey(done),
+    "c:/users/edy/downloads/popo稳定下载/素材包/视频.mp4"
+  );
+  assert.deepEqual(successfulTaskTargetKeys([
+    done,
+    makeTask("running", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\素材包", "进行中.mp4"),
+    makeTask("pause", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\素材包", "暂停.mp4"),
+    makeTask("error", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\素材包", "失败.mp4"),
+    makeTask("done", "D:\\Downloads\\POPO稳定下载\\素材包", "视频.mp4"),
+    makeTask("done", "C:\\Users\\EDY\\Downloads\\POPO稳定下载\\素材包", "外部.mp4", "other")
+  ]), [
+    "c:/users/edy/downloads/popo稳定下载/素材包/视频.mp4",
+    "d:/downloads/popo稳定下载/素材包/视频.mp4"
+  ]);
+});
+
+test("逐文件查重用稳定素材身份跨越本地保存目录变化", () => {
+  const labels = buildTaskIdentityLabels({
+    jobId: "job-old",
+    taskIdentity: "https://docs.popo.netease.com/team/pc/team1/pageDetail/folder1\u00007\u0000视频.mp4"
+  });
+  const done = {
+    status: "done",
+    meta: { req: { labels: { source: "popo-stable-downloader", ...labels } } }
+  };
+  assert.equal(successfulTaskIdentityKey(done), labels.popoTaskKey);
+  assert.deepEqual(successfulTaskIdentityKeys([
+    done,
+    { ...done, status: "running" },
+    {
+      status: "done",
+      meta: { req: { labels: { source: "other", ...labels } } }
+    },
+    {
+      status: "done",
+      meta: { req: { labels: { source: "popo-stable-downloader", popoTaskKey: "invalid" } } }
+    }
+  ]), [labels.popoTaskKey]);
+});
+
+test("成功任务记录保留实际文件路径和预期大小供本机复核", () => {
+  const labels = buildTaskIdentityLabels({ jobId: "job-old", taskIdentity: "material-1" });
+  const done = {
+    id: "task-done",
+    status: "done",
+    progress: { downloaded: 4096 },
+    meta: {
+      req: { labels: { source: "popo-stable-downloader", ...labels } },
+      opts: { path: "D:\\Downloads\\POPO稳定下载\\素材包", name: "视频.mp4" },
+      res: { files: [{ name: "视频.mp4", size: 4096 }] }
+    }
+  };
+  const record = successfulTaskFileRecord(done);
+  assert.match(record.recordKey, /^file:[a-f0-9]{16}$/);
+  assert.deepEqual({ ...record, recordKey: "stable" }, {
+    recordKey: "stable",
+    taskId: "task-done",
+    identityKey: labels.popoTaskKey,
+    targetKey: "d:/downloads/popo稳定下载/素材包/视频.mp4",
+    filePath: "D:\\Downloads\\POPO稳定下载\\素材包\\视频.mp4",
+    expectedSize: 4096
+  });
+  assert.equal(successfulTaskFileRecords([done, { ...done, status: "error" }]).length, 1);
 });
 
 test("读取 Gopeed 全部任务调用 tasks 列表接口", async () => {

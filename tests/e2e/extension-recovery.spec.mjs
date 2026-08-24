@@ -210,6 +210,28 @@ test("single React page root renders project count and recycled folder-row porta
           return { ok: true, connection: { connected: true }, settings: {} };
         }
         if (message.type === "START_FOLDER_SCAN") {
+          const receipt = state.folderReceipts.find((candidate) =>
+            candidate.parentUrl === message.parentUrl &&
+            candidate.folderItemIndex === message.folderItemIndex &&
+            candidate.folderName === message.folderName
+          );
+          const receiptAge = receipt ? Date.now() - Date.parse(receipt.completedAt) : Infinity;
+          if (receipt && receiptAge >= 0 && receiptAge < 2 * 60 * 1000) {
+            return {
+              ok: true,
+              duplicate: true,
+              alreadyCompleted: true,
+              job: {
+                id: `receipt:${receipt.key}`,
+                status: "complete",
+                verifiedCompletion: true,
+                ...receipt
+              },
+              state: JSON.parse(JSON.stringify(state)),
+              queuePosition: 0,
+              needsWorker: false
+            };
+          }
           const job = {
             id: "job-" + (state.jobs.length + 1),
             status: "queued",
@@ -564,6 +586,34 @@ test("single React page root renders project count and recycled folder-row porta
   await expect(firstButton).toHaveAttribute("data-state", "success");
   await expect(firstButton).toContainText("已下载 383 个");
   await expect(firstButton).toContainText("无遗漏");
+  const completedJobCount = await page.evaluate(() => window.__popoUiTest.state.jobs.length);
+  await firstButton.click();
+  await expect(firstButton).toHaveAttribute("data-state", "success");
+  await expect(firstButton).toHaveAttribute("title", /2 分钟后可重新查重/);
+  await expect.poll(() => page.evaluate(() => window.__popoUiTest.state.jobs.length))
+    .toBe(completedJobCount);
+  await expect.poll(() => page.evaluate(() =>
+    window.__popoUiTest.calls.filter((message) => message.type === "START_FOLDER_SCAN").at(-1)
+  )).toMatchObject({ folderName: "文件夹 A", folderItemIndex: "0" });
+  await page.evaluate(() => {
+    window.__popoUiTest.state.folderReceipts[0].completedAt =
+      new Date(Date.now() - (2 * 60 * 1000 - 100)).toISOString();
+    for (const listener of window.__popoUiTest.listeners) {
+      listener({ type: "FOLDER_TASK_STATUS" });
+    }
+  });
+  await expect(firstButton).toHaveAttribute("data-state", "idle", { timeout: 2000 });
+  await expect(firstButton).toHaveAttribute("title", /已有文件会跳过，缺少文件会下载/);
+  const downloadedMarker = page.locator(
+    "[data-item-index='0'] [data-popo-downloaded-marker='true']"
+  );
+  await expect(downloadedMarker).toBeVisible();
+  await expect(downloadedMarker).toHaveAttribute("aria-label", "文件夹 A：已下载过");
+  await firstButton.click();
+  await expect(firstButton).toHaveAttribute("data-state", "queued");
+  await expect(downloadedMarker).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__popoUiTest.state.jobs.length))
+    .toBe(completedJobCount + 1);
   await page.evaluate(() => {
     window.__popoUiTest.state.popupOpen = false;
     for (const listener of window.__popoUiTest.listeners) {
@@ -615,13 +665,208 @@ test("single React page root renders project count and recycled folder-row porta
   await expect(recycledButton).toHaveAttribute("data-state", "failed");
   await expect(recycledButton).toContainText("未完成 1 个");
   await expect(recycledButton).toContainText("重试");
+  const startCountBeforeRetry = await page.evaluate(() =>
+    window.__popoUiTest.calls.filter(
+      (message) => message.type === "START_FOLDER_SCAN"
+    ).length
+  );
   await recycledButton.click();
   await expect.poll(() => page.evaluate(() =>
     window.__popoUiTest.calls.filter(
       (message) => message.type === "START_FOLDER_SCAN"
     ).length
-  )).toBe(3);
+  )).toBe(startCountBeforeRetry + 1);
   await expect(recycledButton).toHaveAttribute("data-state", "queued");
+});
+
+test("directory navigation keeps controls below native cover and mounts them once", async () => {
+  await launchExtension();
+  const page = await context.newPage();
+  await page.route("https://example.test/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<!doctype html><html><body></body></html>"
+  }));
+  await page.goto("https://example.test/team/pc/test/pageDetail/folder-a");
+  await page.setContent(`
+    <title>目录 A</title>
+    <div id="toolbar-a"><button><span>所有类型</span></button></div>
+    <div data-test-id="virtuoso-scroller">
+      <div data-test-id="virtuoso-item-list">
+        <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">旧目录文件夹</span></div>
+        </div>
+      </div>
+    </div>
+  `);
+  await page.evaluate(() => {
+    const runtime = {
+      getURL: () => "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+      sendMessage: async (message) => message.type === "GET_STATE"
+        ? { ok: true, state: { jobs: [], folderReceipts: [], activeJobId: null, mode: "idle", popupOpen: false }, settings: {} }
+        : { ok: true, connection: { connected: true }, settings: {} },
+      onMessage: { addListener() {}, removeListener() {} }
+    };
+    window.chrome = window.chrome || {};
+    Object.defineProperty(window.chrome, "runtime", { configurable: true, value: runtime });
+  });
+  await page.addScriptTag({ path: resolve(projectRoot, "page-api.js") });
+  await page.addScriptTag({ path: resolve(projectRoot, "runtime/page-ui.js") });
+
+  await expect(page.locator("button.popo-stable-download-button")).toHaveCount(1);
+  await expect(page.locator("#popo-directory-transition-overlay")).toHaveCount(0);
+  const transitionCoverHidesButton = await page.evaluate(() => {
+    const cover = document.createElement("div");
+    cover.className = "popo-native-transition-cover";
+    Object.assign(cover.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: "1",
+      background: "white"
+    });
+    document.body.append(cover);
+    const button = document.querySelector("button.popo-stable-download-button");
+    const rect = button.getBoundingClientRect();
+    const topmost = document.elementFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2
+    );
+    return Boolean(topmost?.closest(".popo-native-transition-cover"));
+  });
+  expect(transitionCoverHidesButton).toBe(true);
+  await page.evaluate(() => document.querySelector(".popo-native-transition-cover").remove());
+  await page.evaluate(() => {
+    const tooltip = document.createElement("div");
+    tooltip.className = "popo-native-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.textContent = "旧目录文件名";
+    Object.assign(tooltip.style, {
+      position: "fixed",
+      top: "260px",
+      left: "180px",
+      zIndex: "999999",
+      padding: "8px",
+      background: "#111923",
+      color: "white"
+    });
+    document.body.append(tooltip);
+    history.pushState({}, "", "/team/pc/test/pageDetail/folder-b");
+  });
+  await expect(page.locator("button.popo-stable-download-button")).toHaveCount(0);
+  await expect(page.locator(".popo-react-project-count")).toHaveCount(0);
+  const transitionOverlay = page.locator("#popo-directory-transition-overlay");
+  await expect(transitionOverlay).toBeVisible();
+  await expect(transitionOverlay).toContainText("正在加载目录");
+  await expect(page.locator("html")).toHaveAttribute("data-popo-directory-transition", "true");
+  await expect(page.locator(".popo-native-tooltip")).toHaveCSS("visibility", "hidden");
+  const overlayCoversListArea = await page.evaluate(() => {
+    const overlay = document.querySelector("#popo-directory-transition-overlay");
+    const rect = overlay.getBoundingClientRect();
+    return document.elementFromPoint(
+      rect.left + rect.width / 2,
+      Math.min(rect.bottom - 20, rect.top + 240)
+    )?.closest("#popo-directory-transition-overlay") === overlay;
+  });
+  expect(overlayCoversListArea).toBe(true);
+  await page.waitForTimeout(150);
+  await expect(page.locator("button.popo-stable-download-button")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    document.title = "目录 B";
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "该文件夹暂无内容";
+    document.body.append(empty);
+  });
+  await page.waitForTimeout(200);
+  await expect(page.locator("button.popo-stable-download-button")).toHaveCount(0);
+  await expect(page.locator(".popo-react-project-count")).toHaveCount(0);
+  await expect(page.getByText("正在统计…")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    document.querySelector(".empty-state").remove();
+    document.querySelector('[data-test-id="virtuoso-scroller"]').style.opacity = "0";
+    const scroller = document.createElement("div");
+    scroller.dataset.testId = "virtuoso-scroller";
+    scroller.innerHTML = `
+      <div data-test-id="virtuoso-item-list">
+        <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+          <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">新目录文件夹</span></div>
+        </div>
+      </div>
+    `;
+    document.body.append(scroller);
+  });
+  const button = page.locator("button.popo-stable-download-button");
+  await expect(button).toHaveCount(1);
+  await expect(button).toHaveAttribute("data-folder-name", "新目录文件夹");
+  await expect(page.locator('[style*="opacity: 0"] button.popo-stable-download-button')).toHaveCount(0);
+  await expect(page.locator(".popo-react-project-count")).toHaveText("1 个项目");
+  await expect(transitionOverlay).toHaveCount(0);
+  await expect(page.locator("html")).not.toHaveAttribute("data-popo-directory-transition", "true");
+  await page.evaluate(() => document.querySelector(".popo-native-tooltip")?.remove());
+  await expect(page.getByText("正在统计…")).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const empty = document.createElement("div");
+    empty.className = "empty-state late-transition";
+    empty.textContent = "该文件夹暂无内容";
+    document.body.append(empty);
+  });
+  await expect(button).toHaveCount(0);
+  await expect(page.locator(".popo-react-project-count")).toHaveCount(0);
+  await page.evaluate(() => document.querySelector(".late-transition").remove());
+  await expect(button).toHaveCount(1);
+  await expect(button).toHaveAttribute("data-folder-name", "新目录文件夹");
+  await page.waitForTimeout(450);
+  await expect(button).toHaveCount(1);
+
+  const sameUrl = page.url();
+  await page.evaluate(() => {
+    window.__popoNativeDirectoryEvents = { pointerup: 0, click: 0, dblclick: 0 };
+    const name = document.querySelector(
+      '[data-test-id="virtuoso-scroller"]:not([style*="opacity: 0"]) .topName'
+    );
+    for (const type of ["pointerup", "click", "dblclick"]) {
+      name.addEventListener(type, () => {
+        window.__popoNativeDirectoryEvents[type] += 1;
+      });
+    }
+  });
+  await page.locator('[data-test-id="virtuoso-scroller"]:not([style*="opacity: 0"]) .topName').dblclick();
+  await expect.poll(() => page.evaluate(() => window.__popoNativeDirectoryEvents)).toEqual({
+    pointerup: 2,
+    click: 2,
+    dblclick: 1
+  });
+  await expect(page).toHaveURL(sameUrl);
+  await expect(button).toHaveCount(0);
+  await expect(page.locator(".popo-react-project-count")).toHaveCount(0);
+  await page.evaluate(() => {
+    document.title = "新目录文件夹";
+    const empty = document.createElement("div");
+    empty.className = "empty-state same-url-transition";
+    empty.textContent = "该文件夹暂无内容";
+    document.body.append(empty);
+  });
+  await page.waitForTimeout(150);
+  await expect(button).toHaveCount(0);
+  await page.evaluate(() => {
+    document.querySelector(".same-url-transition").remove();
+    document.querySelectorAll('[data-test-id="virtuoso-scroller"]')[1]
+      .querySelector(".topName").textContent = "同地址子目录";
+  });
+  await expect(button).toHaveCount(1);
+  await expect(button).toHaveAttribute("data-folder-name", "同地址子目录");
+  await expect(page).toHaveURL(sameUrl);
+
+  await page.locator('[data-test-id="virtuoso-scroller"]:not([style*="opacity: 0"]) .topName').dblclick();
+  await expect(transitionOverlay).toBeVisible();
+  await expect(button).toHaveCount(0);
+  await page.waitForTimeout(5_200);
+  await expect(transitionOverlay).toHaveCount(0);
+  await expect(page.locator("html")).not.toHaveAttribute("data-popo-directory-transition", "true");
+  await expect(button).toHaveCount(1);
+  await expect(button).toHaveAttribute("data-folder-name", "同地址子目录");
 });
 
 test("active folder motion starts on page load and restarts after row and UI remounts", async () => {
@@ -633,6 +878,7 @@ test("active folder motion starts on page load and restarts after row and UI rem
   }));
   await page.goto("https://example.test/team/pc/test/pageDetail/motion-recovery");
   await page.setContent(`
+    <div id="toolbar"><button><span>所有类型</span></button></div>
     <div data-test-id="virtuoso-scroller">
       <div data-test-id="virtuoso-item-list">
         <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">

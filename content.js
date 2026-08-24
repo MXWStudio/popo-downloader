@@ -983,10 +983,12 @@
       if (!response?.ok) throw new Error(response?.error || "无法开始扫描");
       button.disabled = false;
       button.dataset.state = response.job?.status || "queued";
-      button.textContent = response.job?.status === "queued" ? "✓" : "…";
+      button.textContent = ["queued", "complete"].includes(response.job?.status) ? "✓" : "…";
       if (response.needsWorker) createHiddenWorkerFrame(location.href);
       const position = response.queuePosition || 0;
-      const message = response.duplicate
+      const message = response.alreadyCompleted
+        ? "已成功下载，无需重复下载"
+        : response.duplicate
         ? position > 0
           ? `已添加下载，排队中（第 ${position} 位）`
           : "该文件夹已经在处理中"

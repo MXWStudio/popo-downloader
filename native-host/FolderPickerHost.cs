@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -13,6 +14,7 @@ using System.Windows.Forms;
 internal static class FolderPickerHost
 {
     private const int MaxMessageBytes = 1024 * 1024;
+    private const int MaxVerifyFileCount = 256;
     private const int AgentProtocolVersion = 2;
     private const int AgentMinimumProtocolVersion = 1;
     private const string UpdateChannel = "stable";
@@ -43,6 +45,7 @@ internal static class FolderPickerHost
                     capabilities = new[] {
                         "choose_folder",
                         "ensure_gopeed",
+                        "verify_files",
                         "agent_connection",
                         "check_update",
                         "apply_update",
@@ -54,6 +57,11 @@ internal static class FolderPickerHost
             if (String.Equals(action, "ensure_gopeed", StringComparison.Ordinal))
             {
                 WriteMessage(EnsureGopeed());
+                return 0;
+            }
+            if (String.Equals(action, "verify_files", StringComparison.Ordinal))
+            {
+                WriteMessage(VerifyFiles(request));
                 return 0;
             }
             if (String.Equals(action, "agent_connection", StringComparison.Ordinal))
@@ -780,6 +788,73 @@ internal static class FolderPickerHost
         };
     }
 
+    private static object VerifyFiles(Dictionary<string, object> request)
+    {
+        object rawFiles;
+        IList files = request != null && request.TryGetValue("files", out rawFiles)
+            ? rawFiles as IList
+            : null;
+        if (files == null || files.Count == 0 || files.Count > MaxVerifyFileCount)
+        {
+            return new { ok = false, error = "本机文件核对请求数量不正确" };
+        }
+
+        List<object> results = new List<object>();
+        foreach (object rawFile in files)
+        {
+            Dictionary<string, object> file = rawFile as Dictionary<string, object>;
+            string key = GetString(file, "key");
+            string requestedPath = GetString(file, "path");
+            long expectedSize = GetLong(file, "expectedSize");
+            if (String.IsNullOrWhiteSpace(key) || key.Length > 512 ||
+                String.IsNullOrWhiteSpace(requestedPath) || requestedPath.Length > 32767 ||
+                !IsLocalDriveAbsolutePath(requestedPath))
+            {
+                return new { ok = false, error = "本机文件核对路径不正确" };
+            }
+
+            string fullPath;
+            try
+            {
+                fullPath = Path.GetFullPath(requestedPath);
+            }
+            catch
+            {
+                return new { ok = false, error = "本机文件核对路径无法解析" };
+            }
+
+            bool exists = false;
+            long actualSize = 0;
+            try
+            {
+                FileInfo info = new FileInfo(fullPath);
+                exists = info.Exists;
+                if (exists) actualSize = info.Length;
+            }
+            catch
+            {
+                exists = false;
+                actualSize = 0;
+            }
+            bool sizeMatches = exists && actualSize > 0 &&
+                (expectedSize <= 0 || actualSize == expectedSize);
+            results.Add(new {
+                key = key,
+                exists = exists,
+                size = actualSize,
+                sizeMatches = sizeMatches
+            });
+        }
+        return new { ok = true, files = results.ToArray() };
+    }
+
+    private static bool IsLocalDriveAbsolutePath(string value)
+    {
+        return !String.IsNullOrWhiteSpace(value) && value.Length >= 3 &&
+            Char.IsLetter(value[0]) && value[1] == ':' &&
+            (value[2] == '\\' || value[2] == '/');
+    }
+
     private static object ReadAgentConnection()
     {
         try
@@ -1079,6 +1154,16 @@ internal static class FolderPickerHost
         int parsed;
         return value != null && value.TryGetValue(key, out result) && result != null &&
             Int32.TryParse(Convert.ToString(result), out parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static long GetLong(Dictionary<string, object> value, string key)
+    {
+        object result;
+        long parsed;
+        return value != null && value.TryGetValue(key, out result) && result != null &&
+            Int64.TryParse(Convert.ToString(result), out parsed)
             ? parsed
             : 0;
     }

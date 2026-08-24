@@ -27,6 +27,8 @@ if (Test-Path -LiteralPath $compiler) {
   & $compiler /nologo /target:winexe /optimize+ /codepage:65001 `
     /reference:System.Windows.Forms.dll `
     /reference:System.Drawing.dll `
+    /reference:System.IO.Compression.dll `
+    /reference:System.IO.Compression.FileSystem.dll `
     /reference:System.Web.Extensions.dll `
     /out:$builtExe $sourceFile
   if ($LASTEXITCODE -ne 0) {

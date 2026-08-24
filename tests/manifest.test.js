@@ -10,8 +10,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.3");
-  assert.equal(manifest.version_name, "0.7.3");
+  assert.equal(manifest.version, "0.7.4");
+  assert.equal(manifest.version_name, "0.7.4");
   assert.equal(manifest.name, "POPO 稳定下载助手");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";
@@ -283,6 +283,9 @@ test("下载由 Gopeed 统一管理且并行上限可在 1 到 5 之间调节", 
   assert.match(pageApi, /PerformanceObserver/);
   assert.match(pageApi, /popo-stable-download:observed-url/);
   assert.match(pageApi, /popo-stable-download:request-observed-urls/);
+  assert.match(pageApi, /popo-stable-download:page-route-change/);
+  assert.match(pageApi, /pushState/);
+  assert.match(pageApi, /replaceState/);
   assert.match(background, /const currentVersion = chrome\.runtime\.getManifest\(\)\.version;/);
   assert.doesNotMatch(background, /const currentVersion = chrome\.runtime\.getManifest\(\)\.version_name/);
   assert.match(background, /function isDevelopmentBuild\(\)/);

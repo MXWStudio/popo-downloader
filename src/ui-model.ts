@@ -66,6 +66,18 @@ export interface FolderCompletionReceipt {
   counts?: JobCounts | undefined;
 }
 
+export const FOLDER_RECEIPT_FEEDBACK_MS = 2 * 60 * 1000;
+
+export function folderReceiptFeedbackRemaining(
+  receipt: FolderCompletionReceipt | null | undefined,
+  now = Date.now()
+): number {
+  const completedAt = Date.parse(String(receipt?.completedAt || ""));
+  if (!Number.isFinite(completedAt)) return 0;
+  const age = Math.max(0, now - completedAt);
+  return Math.max(0, FOLDER_RECEIPT_FEEDBACK_MS - age);
+}
+
 export interface QueueState {
   jobs?: QueueJob[] | undefined;
   folderReceipts?: FolderCompletionReceipt[] | undefined;
