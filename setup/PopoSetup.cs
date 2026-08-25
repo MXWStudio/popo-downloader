@@ -227,12 +227,7 @@ internal static class PopoSetup
                     dialog.SelectedPath = parent;
                 }
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                string selected = Path.GetFullPath(dialog.SelectedPath);
-                pathBox.Text = String.Equals(
-                    Path.GetFileName(selected),
-                    ProductDirectoryName,
-                    StringComparison.OrdinalIgnoreCase
-                ) ? selected : Path.Combine(selected, ProductDirectoryName);
+                pathBox.Text = ResolveBrowsedInstallRoot(dialog.SelectedPath);
             }
         }
 
@@ -312,6 +307,117 @@ internal static class PopoSetup
         }
     }
 
+    private sealed class GopeedExitForm : Form
+    {
+        private readonly string executable;
+        private readonly Label statusLabel = new Label();
+        private readonly Button retryButton = new Button();
+        private readonly Button cancelButton = new Button();
+        private readonly System.Windows.Forms.Timer pollTimer = new System.Windows.Forms.Timer();
+
+        public GopeedExitForm(string gopeedExecutable)
+        {
+            executable = gopeedExecutable;
+            Text = ProductShortName + " · 需要退出 Gopeed";
+            StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(560, 292);
+            MinimumSize = new Size(560, 292);
+            MaximumSize = new Size(560, 292);
+            BackColor = Color.White;
+            Font = new Font("Segoe UI", 10F);
+            MaximizeBox = false;
+            MinimizeBox = false;
+
+            Label heading = new Label {
+                Text = "请先退出 Gopeed",
+                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(30, 26)
+            };
+            Label instructions = new Label {
+                Text = "安装器未能自动关闭 Gopeed，请执行：\r\n\r\n" +
+                    "1. 打开任务栏右下角的隐藏图标\r\n" +
+                    "2. 右键 Gopeed 图标，选择“退出”\r\n" +
+                    "3. 无需再点击，退出后安装会自动继续\r\n\r\n" +
+                    "下载记录和设置会保留。",
+                AutoSize = false,
+                Location = new Point(32, 70),
+                Size = new Size(496, 112)
+            };
+            statusLabel.Text = "正在等待 Gopeed 退出…";
+            statusLabel.ForeColor = Color.FromArgb(37, 99, 235);
+            statusLabel.AutoSize = false;
+            statusLabel.Location = new Point(32, 188);
+            statusLabel.Size = new Size(496, 24);
+
+            retryButton.Text = "再次自动退出";
+            retryButton.Size = new Size(148, 38);
+            retryButton.Location = new Point(224, 230);
+            retryButton.Click += RetryAutomaticExit;
+
+            cancelButton.Text = "取消安装";
+            cancelButton.Size = new Size(138, 38);
+            cancelButton.Location = new Point(390, 230);
+            cancelButton.DialogResult = DialogResult.Cancel;
+
+            Controls.Add(heading);
+            Controls.Add(instructions);
+            Controls.Add(statusLabel);
+            Controls.Add(retryButton);
+            Controls.Add(cancelButton);
+            AcceptButton = retryButton;
+            CancelButton = cancelButton;
+
+            pollTimer.Interval = 500;
+            pollTimer.Tick += CheckGopeedExit;
+            Shown += delegate { pollTimer.Start(); };
+            FormClosed += delegate { pollTimer.Stop(); pollTimer.Dispose(); };
+        }
+
+        private void CheckGopeedExit(object sender, EventArgs eventArgs)
+        {
+            if (!IsProcessRunningAt(executable)) ContinueInstall();
+        }
+
+        private void RetryAutomaticExit(object sender, EventArgs eventArgs)
+        {
+            statusLabel.Text = "正在再次自动关闭 Gopeed…";
+            Refresh();
+            if (TryStopGopeed(executable)) ContinueInstall();
+            else statusLabel.Text = "仍在等待。请在系统托盘右键 Gopeed 并选择“退出”。";
+        }
+
+        private void ContinueInstall()
+        {
+            pollTimer.Stop();
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+    }
+
+    private static string ResolveBrowsedInstallRoot(string selectedPath)
+    {
+        if (String.IsNullOrWhiteSpace(selectedPath))
+        {
+            throw new ArgumentException("请选择有效的安装位置。", "selectedPath");
+        }
+        string selected = Path.GetFullPath(selectedPath);
+        string root = Path.GetPathRoot(selected);
+        if (!String.Equals(selected, root, StringComparison.OrdinalIgnoreCase))
+        {
+            selected = selected.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar
+            );
+        }
+        DirectoryInfo selectedDirectory = new DirectoryInfo(selected);
+        return String.Equals(
+            selectedDirectory.Name,
+            ProductDirectoryName,
+            StringComparison.OrdinalIgnoreCase
+        ) ? selected : Path.Combine(selected, ProductDirectoryName);
+    }
+
     private static string GetTestRegistryRoot()
     {
 #if POPO_SETUP_TEST
@@ -370,6 +476,16 @@ internal static class PopoSetup
         try
         {
 #if POPO_SETUP_TEST
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && HasArgument(args, "--test-resolve-browsed-install-root"))
+            {
+                string selectedPath = GetArgumentValue(args, "--selected-path");
+                string expectedPath = GetArgumentValue(args, "--expected-path");
+                return SamePath(ResolveBrowsedInstallRoot(selectedPath), expectedPath) ? 0 : 2;
+            }
             if (String.Equals(
                 Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
                 "1",
@@ -617,6 +733,20 @@ internal static class PopoSetup
             AppendSetupLog("安装事务完成。");
             return 0;
         }
+        catch (OperationCanceledException canceled)
+        {
+            AppendSetupLog("用户取消了安装，原版本未更改。", canceled);
+            if (!HasArgument(args, "--quiet"))
+            {
+                MessageBox.Show(
+                    "安装已取消，原版本未更改。",
+                    ProductShortName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information
+                );
+            }
+            return 2;
+        }
         catch (Exception error)
         {
             AppendSetupLog("安装失败，已请求回滚。", error);
@@ -736,9 +866,10 @@ internal static class PopoSetup
         string details = String.Join("\n", GetExceptionChain(error).ToArray());
         string reason;
         if (details.IndexOf("下载服务正在运行", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            details.IndexOf("下载服务仍在运行", StringComparison.OrdinalIgnoreCase) >= 0)
+            details.IndexOf("下载服务仍在运行", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            details.IndexOf("无法自动退出下载服务", StringComparison.OrdinalIgnoreCase) >= 0)
         {
-            reason = "安装器已暂停 Gopeed 自动启动，但下载服务尚未正常退出。请从系统托盘退出后重试；下载记录不会丢失。";
+            reason = "安装器无法结束 Gopeed。请在系统托盘右键 Gopeed 选择“退出”，再重新安装；下载记录不会丢失。";
         }
         else if (details.IndexOf("startup task or current-user Run fallback", StringComparison.OrdinalIgnoreCase) >= 0 ||
             details.IndexOf("Run startup", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -1729,6 +1860,7 @@ internal static class PopoSetup
                     new AggregateException(updateError, rollbackError)
                 );
             }
+            if (updateError is OperationCanceledException) throw updateError;
             throw new InvalidOperationException(
                 "The verified update failed; the previous installation was restored.",
                 updateError
@@ -2120,41 +2252,59 @@ internal static class PopoSetup
     {
         string executable = Path.Combine(productRoot, "NativeHost", "Gopeed", "gopeed.exe");
         if (!IsProcessRunningAt(executable)) return;
-        AppendSetupLog("维护模式正在等待 Gopeed 正常退出。");
+        AppendSetupLog("维护模式正在自动退出 Gopeed。");
+        if (TryStopGopeed(executable))
+        {
+            AppendSetupLog("Gopeed 已由安装器自动退出，安装继续。");
+            return;
+        }
         if (!quiet)
         {
-            while (IsProcessRunningAt(executable))
+            using (GopeedExitForm form = new GopeedExitForm(executable))
             {
-                DialogResult result = MessageBox.Show(
-                    "安装器已暂停扩展自动启动 Gopeed。\r\n\r\n" +
-                    "请从系统托盘正常退出 Gopeed，然后点击“重试”。退出后不会再被自动拉起，安装会继续进行。\r\n\r\n" +
-                    "下载记录和设置都会保留。",
-                    ProductDisplayName + " · 等待退出 Gopeed",
-                    MessageBoxButtons.RetryCancel,
-                    MessageBoxIcon.Information
-                );
-                if (result == DialogResult.Cancel)
+                if (form.ShowDialog() != DialogResult.OK)
                 {
                     throw new OperationCanceledException("用户取消了等待 Gopeed 退出的安装操作。");
                 }
-                for (int attempt = 0; attempt < 40 && IsProcessRunningAt(executable); attempt++)
-                {
-                    Thread.Sleep(250);
-                }
             }
+            AppendSetupLog("检测到 Gopeed 已退出，安装自动继续。");
             return;
         }
 
-        for (int attempt = 0; attempt < 240 && IsProcessRunningAt(executable); attempt++)
+        throw new InvalidOperationException(
+            "无法自动退出下载服务。维护模式已阻止自动重启，但当前用户无权结束 Gopeed。"
+        );
+    }
+
+    private static bool TryStopGopeed(string expectedPath)
+    {
+        string fullExpectedPath = Path.GetFullPath(expectedPath);
+        string processName = Path.GetFileNameWithoutExtension(fullExpectedPath);
+        foreach (Process process in Process.GetProcessesByName(processName))
         {
-            Thread.Sleep(250);
+            try
+            {
+                if (!String.Equals(
+                    Path.GetFullPath(process.MainModule.FileName),
+                    fullExpectedPath,
+                    StringComparison.OrdinalIgnoreCase
+                )) continue;
+
+                try
+                {
+                    if (process.CloseMainWindow()) process.WaitForExit(1500);
+                }
+                catch {}
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+            }
+            catch {}
+            finally { process.Dispose(); }
         }
-        if (IsProcessRunningAt(executable))
-        {
-            throw new InvalidOperationException(
-                "下载服务仍在运行。维护模式已阻止自动重启，但静默更新无法代替用户强制结束 Gopeed。"
-            );
-        }
+        return !IsProcessRunningAt(fullExpectedPath);
     }
 
     private static bool IsProcessRunningAt(string expectedPath)

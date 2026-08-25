@@ -174,7 +174,7 @@ internal static class GopeedSentinel
             registration = value == null ? "paused" : "registered";
         }
         File.WriteAllText(evidence, "marker=active;nativeHost=" + registration);
-        Thread.Sleep(500);
+        Thread.Sleep(Timeout.Infinite);
         return 0;
     }
 }
@@ -216,6 +216,83 @@ function snapshotRegistryKey(keyPath) {
 function readInstallState(installRoot) {
   return JSON.parse(fs.readFileSync(path.join(installRoot, "install-state.json"), "utf8"));
 }
+
+function verifyBrowsedInstallRoot(setupExecutable, selectedPath, expectedPath) {
+  return spawnSync(setupExecutable, [
+    "--test-resolve-browsed-install-root",
+    "--selected-path",
+    selectedPath,
+    "--expected-path",
+    expectedPath
+  ], {
+    cwd: path.dirname(setupExecutable),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      POPO_SETUP_TEST_MODE: "1"
+    }
+  });
+}
+
+test("浏览安装位置不会在同名产品目录后重复追加一层", {
+  timeout: 60_000
+}, (t) => {
+  if (!fs.existsSync(compiler)) {
+    t.skip("Windows .NET Framework compiler is unavailable");
+    return;
+  }
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-install-root-selection-"));
+  const stablePackage = path.join(sandbox, "stable-package");
+  const devPackage = path.join(sandbox, "dev-package");
+  try {
+    fs.mkdirSync(stablePackage, { recursive: true });
+    fs.mkdirSync(devPackage, { recursive: true });
+    const stableSetup = compileSetup(stablePackage);
+    const devSetup = compileSetup(devPackage, { dev: true });
+    const cases = [
+      {
+        selected: "D:\\",
+        stable: "D:\\POPOStableDownloader",
+        dev: "D:\\POPODevDownloader"
+      },
+      {
+        selected: "D:\\InstallParent",
+        stable: "D:\\InstallParent\\POPOStableDownloader",
+        dev: "D:\\InstallParent\\POPODevDownloader"
+      },
+      {
+        selected: "D:\\POPOStableDownloader",
+        stable: "D:\\POPOStableDownloader"
+      },
+      {
+        selected: "D:\\POPOStableDownloader\\",
+        stable: "D:\\POPOStableDownloader"
+      },
+      {
+        selected: "D:\\POPODevDownloader",
+        dev: "D:\\POPODevDownloader"
+      },
+      {
+        selected: "D:\\POPODevDownloader\\",
+        dev: "D:\\POPODevDownloader"
+      }
+    ];
+    for (const item of cases) {
+      if (item.stable) {
+        const result = verifyBrowsedInstallRoot(stableSetup, item.selected, item.stable);
+        assert.equal(result.status, 0, `stable ${item.selected}: ${result.stdout}${result.stderr}`);
+      }
+      if (item.dev) {
+        const result = verifyBrowsedInstallRoot(devSetup, item.selected, item.dev);
+        assert.equal(result.status, 0, `dev ${item.selected}: ${result.stdout}${result.stderr}`);
+      }
+    }
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
 
 test("development green install cannot overwrite a stable green install", {
   timeout: 60_000
@@ -272,7 +349,7 @@ test("development green install cannot overwrite a stable green install", {
   }
 });
 
-test("修复时先暂停扩展自动拉起 Gopeed，等待其退出后继续并恢复本机助手", {
+test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复本机助手", {
   timeout: 60_000
 }, (t) => {
   if (!fs.existsSync(compiler)) {

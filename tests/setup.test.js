@@ -37,7 +37,12 @@ test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册�
   assert.match(setupSource, /%LOCALAPPDATA%\\/);
   assert.match(setupSource, /DescribeInstallFailure/);
   assert.match(setupSource, /安装未完成，已自动回滚到原版本/);
-  assert.match(setupSource, /安装器已暂停 Gopeed 自动启动/);
+  assert.match(setupSource, /维护模式正在自动退出 Gopeed/);
+  assert.match(setupSource, /TryStopGopeed/);
+  assert.match(setupSource, /process\.CloseMainWindow\(\)/);
+  assert.match(setupSource, /process\.Kill\(\)/);
+  assert.match(setupSource, /无需再点击，退出后安装会自动继续/);
+  assert.match(setupSource, /安装已取消，原版本未更改/);
   assert.match(setupSource, /Registry\.CurrentUser/);
   assert.match(setupSource, /allowed_origins/);
   assert.doesNotMatch(setupSource, /Registry\.LocalMachine|HKEY_LOCAL_MACHINE/);
@@ -76,6 +81,9 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.doesNotMatch(setupSource, /private readonly Label explanationLabel/);
   assert.doesNotMatch(setupSource, /程序位置：/);
   assert.match(setupSource, /FolderBrowserDialog/);
+  assert.match(setupSource, /ResolveBrowsedInstallRoot/);
+  assert.match(setupSource, /selected\.TrimEnd\(/);
+  assert.match(setupSource, /selectedDirectory\.Name/);
   assert.match(setupSource, /GetSuggestedInstallRoot/);
   assert.match(setupSource, /FindExistingInstallRoot/);
   assert.match(setupSource, /SaveInstallRoot/);
