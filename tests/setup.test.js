@@ -17,6 +17,10 @@ const releaseVerifier = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "verify-release-package.ps1"),
   "utf8"
 );
+const nativeUninstallSource = fs.readFileSync(
+  path.join(__dirname, "..", "native-host", "uninstall.ps1"),
+  "utf8"
+);
 
 test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册表", () => {
   assert.match(setupSource, /ComputeExtensionId/);
@@ -25,14 +29,52 @@ test("绿色安装助手固定扩展 ID 并仅写入当前用户目录和注册�
   assert.match(setupSource, /NativeMessagingHosts/);
   assert.match(setupSource, /AgentTaskNamePrefix/);
   assert.match(setupSource, /\/SC ONLOGON \/RL LIMITED/);
+  assert.match(setupSource, /Software\\Microsoft\\Windows\\CurrentVersion\\Run/);
+  assert.match(setupSource, /RegisterAgentRunStartup/);
+  assert.match(setupSource, /AgentRunStartupDefinitionMatches/);
+  assert.match(setupSource, /DeleteAgentTaskStartup/);
+  assert.match(setupSource, /SetupLogFileName = "setup\.log"/);
+  assert.match(setupSource, /%LOCALAPPDATA%\\/);
+  assert.match(setupSource, /DescribeInstallFailure/);
+  assert.match(setupSource, /安装未完成，已自动回滚到原版本/);
+  assert.match(setupSource, /安装器已暂停 Gopeed 自动启动/);
   assert.match(setupSource, /Registry\.CurrentUser/);
   assert.match(setupSource, /allowed_origins/);
   assert.doesNotMatch(setupSource, /Registry\.LocalMachine|HKEY_LOCAL_MACHINE/);
+  assert.match(nativeUninstallSource, /Get-AgentTaskName/);
+  assert.match(nativeUninstallSource, /schtasks\.exe \/Delete \/F \/TN/);
+  assert.match(nativeUninstallSource, /CurrentVersion\\Run/);
+  assert.match(nativeUninstallSource, /Remove-ItemProperty/);
+});
+
+test("开发绿色版与正式版使用独立安装身份", () => {
+  assert.match(setupSource, /#if POPO_DEV_BUILD/);
+  assert.match(setupSource, /com\.popo\.dev_downloader\.folder_picker/);
+  assert.match(setupSource, /Software\\POPODevDownloader/);
+  assert.match(setupSource, /ProductDirectoryName = "POPODevDownloader"/);
+  assert.match(setupSource, /POPO Dev Downloader Update Agent/);
+  assert.match(setupSource, /ProductDisplayName = "POPO Dev 下载助手"/);
+  assert.match(setupSource, /ProductShortName = "POPO Dev"/);
+  assert.match(buildSource, /ValidateSet\('Stable', 'Dev'\)/);
+  assert.match(buildSource, /\/define:POPO_DEV_BUILD/);
+  assert.match(buildSource, /POPO-Dev-Setup\.exe/);
+  assert.match(buildSource, /POPO-Dev-Downloader-/);
+  assert.match(buildSource, /folfhehnopknchpoaajfpboibbhnlanf/);
+  assert.match(buildSource, /if \(-not \$isDev\) \{[\s\S]*signature = \$signature/);
 });
 
 test("绿色安装助手自动准备完整运行目录并引导加载扩展", () => {
   assert.match(setupSource, /ApplyVerifiedUpdate/);
   assert.match(setupSource, /InstallOptionsForm/);
+  assert.match(setupSource, /detectionLabel\.Text = "安装版本  " \+ packageVersion/);
+  assert.match(setupSource, /installedVersion \+ "  →  " \+ packageVersion/);
+  assert.match(setupSource, /\? "覆盖升级"/);
+  assert.match(setupSource, /operation = "修复"/);
+  assert.doesNotMatch(setupSource, /CheckBox repairBox|重新校验并修复全部/);
+  assert.doesNotMatch(setupSource, /安装助手会根据本机现状自动选择正确操作/);
+  assert.doesNotMatch(setupSource, /private readonly Label operationLabel/);
+  assert.doesNotMatch(setupSource, /private readonly Label explanationLabel/);
+  assert.doesNotMatch(setupSource, /程序位置：/);
   assert.match(setupSource, /FolderBrowserDialog/);
   assert.match(setupSource, /GetSuggestedInstallRoot/);
   assert.match(setupSource, /FindExistingInstallRoot/);
@@ -65,7 +107,7 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.doesNotMatch(setupSource, /InstallGopeed\(sourceGopeed, gopeedRoot, nativeRoot\)/);
   assert.doesNotMatch(setupSource, /chrome:\/\/extensions|OpenChromeExtensions/);
   assert.match(setupSource, /OpenFolder\(chromeExtensionRoot\)/);
-  assert.match(setupSource, /加载已解压的扩展程序/);
+  assert.match(setupSource, /请加载即将打开的 Extension 文件夹/);
   assert.match(setupSource, /--quiet/);
   assert.match(setupSource, /if \(!quiet\)\s*\{\s*try \{ Clipboard\.SetText/);
   assert.match(setupSource, /--install-root/);

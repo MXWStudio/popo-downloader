@@ -1,6 +1,6 @@
 {
   "name": "popo-stable-downloader",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "private": true,
   "description": "POPO 稳定下载助手 Chrome 扩展",
   "scripts": {
@@ -20,8 +20,9 @@
     "test:agent-security:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agent-security.ps1",
     "test:agent-security:scan": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agent-security.ps1 -RunScan",
     "verify:agent-shadow-cycle": "node scripts/verify-shadow-cycle.mjs",
-    "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
-    "build:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1",
+    "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev",
+    "build:dev-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev",
+    "build:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Stable",
     "verify:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-package.ps1",
     "release:check-version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/assert-release-version.ps1",
     "release:notes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/get-release-notes.ps1"

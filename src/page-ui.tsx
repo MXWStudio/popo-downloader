@@ -71,6 +71,7 @@ const GLOBAL_STYLE_ID = "popo-react-page-global-style";
 const PROJECT_COUNT_ID = "popo-stable-project-count";
 const DIRECTORY_TRANSITION_OVERLAY_ID = "popo-directory-transition-overlay";
 const DIRECTORY_TRANSITION_ATTRIBUTE = "data-popo-directory-transition";
+const DIRECTORY_POINTER_INTENT_ATTRIBUTE = "data-popo-directory-pointer-intent";
 const DOWNLOAD_ANCHOR_CLASS = "popo-react-download-anchor";
 const DOWNLOAD_BUTTON_CLASS = "popo-stable-download-button";
 const DOWNLOAD_HOST_ATTRIBUTE = "data-popo-download-host";
@@ -87,6 +88,7 @@ const PAGE_ROUTE_CHANGE_EVENT = "popo-stable-download:page-route-change";
 const PAGE_DETAIL_PATTERN = /\/pageDetail\/[a-z0-9]+/i;
 const DIRECTORY_CONTENT_SETTLE_MS = 80;
 const DIRECTORY_TRANSITION_TIMEOUT_MS = 5000;
+const DIRECTORY_POINTER_INTENT_TIMEOUT_MS = 700;
 
 interface FolderItem {
   name: string;
@@ -266,6 +268,11 @@ function clearFolderTargets(): void {
 function clearDirectoryTransitionOverlay(): void {
   document.documentElement.removeAttribute(DIRECTORY_TRANSITION_ATTRIBUTE);
   document.getElementById(DIRECTORY_TRANSITION_OVERLAY_ID)?.remove();
+}
+
+function setDirectoryPointerIntent(active: boolean): void {
+  if (active) document.documentElement.setAttribute(DIRECTORY_POINTER_INTENT_ATTRIBUTE, "true");
+  else document.documentElement.removeAttribute(DIRECTORY_POINTER_INTENT_ATTRIBUTE);
 }
 
 function ensureDirectoryTransitionOverlay(
@@ -460,6 +467,7 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
   let candidateSince = 0;
   let candidateRounds = 0;
   let settleTimer = 0;
+  let pointerIntentTimer = 0;
   const readFingerprint = createDirectoryFingerprintReader();
 
   const clearSettleTimer = () => {
@@ -468,12 +476,30 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     settleTimer = 0;
   };
 
+  const clearPointerIntent = () => {
+    if (pointerIntentTimer) {
+      window.clearTimeout(pointerIntentTimer);
+      pointerIntentTimer = 0;
+    }
+    setDirectoryPointerIntent(false);
+  };
+
+  const armPointerIntent = () => {
+    clearPointerIntent();
+    setDirectoryPointerIntent(true);
+    pointerIntentTimer = window.setTimeout(() => {
+      pointerIntentTimer = 0;
+      setDirectoryPointerIntent(false);
+    }, DIRECTORY_POINTER_INTENT_TIMEOUT_MS);
+  };
+
   const beginRouteTransition = (
     nextUrl = location.href,
     expectedName = "",
     showOverlay = true,
     blockInteraction = false
   ) => {
+    clearPointerIntent();
     observedUrl = nextUrl;
     routeReady = false;
     transitionBaseline = acceptedFingerprint;
@@ -637,7 +663,26 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
   };
 
   const observer = new MutationObserver((mutations) => {
-    if (mutations.some(mutationNeedsReconcile)) schedule();
+    if (!mutations.some(mutationNeedsReconcile)) return;
+    if (routeReady) {
+      const fingerprint = readFingerprint();
+      const acceptedPageChanged = acceptedFingerprint &&
+        fingerprint.pageName !== acceptedFingerprint.pageName;
+      if (
+        observedUrl !== location.href ||
+        !fingerprint.ready ||
+        fingerprint.contradictory ||
+        acceptedPageChanged
+      ) {
+        beginRouteTransition(
+          location.href,
+          expectedPageName || fingerprint.pageName,
+          true,
+          true
+        );
+      }
+    }
+    schedule();
   });
   observer.observe(document.documentElement, {
     attributes: true,
@@ -674,9 +719,13 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     beginRouteTransition(location.href, item.name, true, true);
     schedule();
   };
+  const handleDirectoryPointerDown = (event: PointerEvent) => {
+    if (directoryItemFromPointer(event)) armPointerIntent();
+  };
   window.addEventListener(PAGE_ROUTE_CHANGE_EVENT, handleRouteChange);
   window.addEventListener("popstate", handleRouteChange);
   window.addEventListener("hashchange", schedule);
+  document.addEventListener("pointerdown", handleDirectoryPointerDown, true);
   document.addEventListener("dblclick", handleDirectoryDoubleClick, true);
   beginRouteTransition(location.href, "", false);
   schedule();
@@ -686,9 +735,11 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
     observer.disconnect();
     window.clearInterval(timer);
     clearSettleTimer();
+    clearPointerIntent();
     window.removeEventListener(PAGE_ROUTE_CHANGE_EVENT, handleRouteChange);
     window.removeEventListener("popstate", handleRouteChange);
     window.removeEventListener("hashchange", schedule);
+    document.removeEventListener("pointerdown", handleDirectoryPointerDown, true);
     document.removeEventListener("dblclick", handleDirectoryDoubleClick, true);
     if (frame) cancelAnimationFrame(frame);
     document.getElementById(PROJECT_COUNT_ID)?.remove();
@@ -700,6 +751,7 @@ function createPageDomAdapter(onSnapshot: (snapshot: PageSnapshot) => void): () 
 function globalStyles(): string {
   return [
     "html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [role='tooltip'],html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [class*='tooltip'],html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] [class*='Tooltip']{visibility:hidden!important;opacity:0!important;pointer-events:none!important;}",
+    "html[" + DIRECTORY_POINTER_INTENT_ATTRIBUTE + "='true'] ." + DOWNLOAD_ANCHOR_CLASS + ",html[" + DIRECTORY_POINTER_INTENT_ATTRIBUTE + "='true'] #" + PROJECT_COUNT_ID + ",html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] ." + DOWNLOAD_ANCHOR_CLASS + ",html[" + DIRECTORY_TRANSITION_ATTRIBUTE + "='true'] #" + PROJECT_COUNT_ID + "{visibility:hidden!important;opacity:0!important;pointer-events:none!important;}",
     "#" + DIRECTORY_TRANSITION_OVERLAY_ID + "{all:initial!important;box-sizing:border-box!important;position:fixed!important;z-index:2147483000!important;inset:60px 0 0!important;display:block!important;overflow:hidden!important;color:#526173!important;background:rgba(255,255,255,.985)!important;cursor:progress!important;pointer-events:none!important;font-family:'Segoe UI','Microsoft YaHei',sans-serif!important;color-scheme:light!important;}",
     "#" + DIRECTORY_TRANSITION_OVERLAY_ID + "[data-block-interaction='true']{pointer-events:auto!important;}",
     "#" + DIRECTORY_TRANSITION_OVERLAY_ID + " *{box-sizing:border-box!important;}",

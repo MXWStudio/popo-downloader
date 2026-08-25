@@ -17,6 +17,7 @@ internal static class FolderPickerHost
     private const int MaxVerifyFileCount = 256;
     private const int AgentProtocolVersion = 2;
     private const int AgentMinimumProtocolVersion = 1;
+    private const string MaintenanceFileName = "maintenance.json";
     private const string UpdateChannel = "stable";
     private const string UpdateManifestUrl = "https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/latest.json";
     private const string UpdateHost = "popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com";
@@ -169,13 +170,21 @@ internal static class FolderPickerHost
     {
         try
         {
+            string productRoot = GetProductRoot();
+            string installedVersion = GetInstalledVersion(productRoot);
             UpdateManifest manifest = ReadAndValidateUpdateManifest();
-            bool available = CompareVersions(manifest.version, currentVersion) > 0;
+            bool available = CompareVersions(manifest.version, installedVersion) > 0;
             return new {
                 ok = true,
                 available = available,
                 channel = manifest.channel,
                 currentVersion = currentVersion,
+                installedVersion = installedVersion,
+                runtimeMatchesInstalled = String.Equals(
+                    currentVersion,
+                    installedVersion,
+                    StringComparison.OrdinalIgnoreCase
+                ),
                 version = manifest.version,
                 publishedAt = manifest.publishedAt,
                 notes = manifest.notes
@@ -203,18 +212,25 @@ internal static class FolderPickerHost
     {
         try
         {
+            string productRoot = GetProductRoot();
+            string installedVersion = GetInstalledVersion(productRoot);
             UpdateManifest manifest = ReadAndValidateUpdateManifest();
-            if (CompareVersions(manifest.version, currentVersion) <= 0)
+            if (CompareVersions(manifest.version, installedVersion) <= 0)
             {
                 return new {
                     ok = true,
                     started = false,
                     available = false,
+                    installedVersion = installedVersion,
+                    runtimeMatchesInstalled = String.Equals(
+                        currentVersion,
+                        installedVersion,
+                        StringComparison.OrdinalIgnoreCase
+                    ),
                     version = manifest.version
                 };
             }
 
-            string productRoot = GetProductRoot();
             string updaterRoot = Path.Combine(
                 Path.GetTempPath(),
                 "POPOStableDownloader",
@@ -226,7 +242,7 @@ internal static class FolderPickerHost
             WriteUpdateStatus(
                 productRoot,
                 "starting",
-                currentVersion,
+                installedVersion,
                 manifest.version,
                 "Verified update is starting."
             );
@@ -234,7 +250,7 @@ internal static class FolderPickerHost
             ProcessStartInfo startInfo = new ProcessStartInfo {
                 FileName = updaterExecutable,
                 Arguments = "--apply-update --product-root " + QuoteArgument(productRoot) +
-                    " --current-version " + QuoteArgument(currentVersion) +
+                    " --current-version " + QuoteArgument(installedVersion) +
                     " --target-version " + QuoteArgument(manifest.version) +
                     " --parent-pid " + Process.GetCurrentProcess().Id,
                 WorkingDirectory = updaterRoot,
@@ -615,6 +631,21 @@ internal static class FolderPickerHost
         return productRoot;
     }
 
+    private static string GetInstalledVersion(string productRoot)
+    {
+        string statePath = Path.Combine(productRoot, "install-state.json");
+        Dictionary<string, object> state = Json.Deserialize<Dictionary<string, object>>(
+            File.ReadAllText(statePath, Encoding.UTF8)
+        );
+        string installedVersion = GetString(state, "version");
+        Version parsed;
+        if (!Version.TryParse(installedVersion, out parsed))
+        {
+            throw new InvalidDataException("The managed POPO install version is invalid.");
+        }
+        return installedVersion;
+    }
+
     private static int CompareVersions(string left, string right)
     {
         Version leftVersion;
@@ -711,6 +742,16 @@ internal static class FolderPickerHost
 
     private static object EnsureGopeed()
     {
+        string maintenanceMessage;
+        if (IsMaintenanceActive(out maintenanceMessage))
+        {
+            return new {
+                ok = false,
+                maintenance = true,
+                retryable = true,
+                error = maintenanceMessage
+            };
+        }
         string gopeedPath = Path.GetFullPath(Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
             "Gopeed",
@@ -786,6 +827,51 @@ internal static class FolderPickerHost
             started = started,
             processId = startedProcessId
         };
+    }
+
+    private static bool IsMaintenanceActive(out string message)
+    {
+        message = "POPO 正在安装或修复，Gopeed 自动启动已暂时暂停。完成后会自动恢复。";
+        string nativeRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar
+        );
+        DirectoryInfo parent = Directory.GetParent(nativeRoot);
+        if (parent == null) return false;
+        string markerPath = Path.Combine(parent.FullName, "Updates", MaintenanceFileName);
+        if (!File.Exists(markerPath)) return false;
+
+        bool active = false;
+        try
+        {
+            Dictionary<string, object> marker = Json.Deserialize<Dictionary<string, object>>(
+                File.ReadAllText(markerPath, Encoding.UTF8)
+            );
+            int processId = GetInteger(marker, "processId");
+            DateTimeOffset expiresAt;
+            if (processId > 0 &&
+                DateTimeOffset.TryParse(GetString(marker, "expiresAt"), out expiresAt) &&
+                expiresAt > DateTimeOffset.Now)
+            {
+                using (Process installer = Process.GetProcessById(processId))
+                {
+                    active = !installer.HasExited;
+                }
+            }
+        }
+        catch {}
+
+        if (!active)
+        {
+            try
+            {
+                active = File.GetLastWriteTimeUtc(markerPath) > DateTime.UtcNow.AddMinutes(-2);
+            }
+            catch {}
+        }
+        if (active) return true;
+        try { File.Delete(markerPath); } catch {}
+        return false;
     }
 
     private static object VerifyFiles(Dictionary<string, object> request)

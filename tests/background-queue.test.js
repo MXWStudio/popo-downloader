@@ -342,6 +342,158 @@ test("incompatible agent shadow status falls back to the existing signed update 
   }
 });
 
+test("reading a saved update failure immediately retries and clears a stale failure", async () => {
+  const harness = createHarness(
+    {
+      popoUpdateStatus: {
+        state: "failed",
+        currentVersion: "0.7.5",
+        targetVersion: "",
+        message: "previous transport failure",
+        updatedAt: "2026-08-25T00:00:00.000Z"
+      },
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.5", version_name: "0.7.5" },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          throw new Error("shadow agent is optional");
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: false,
+            currentVersion: "0.7.5",
+            installedVersion: "0.7.5",
+            runtimeMatchesInstalled: true,
+            version: "0.7.4"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    const response = await harness.send({ type: "GET_UPDATE_STATUS" });
+    assert.equal(response.ok, true);
+    assert.equal(response.updateStatus.state, "checking");
+    assert.doesNotMatch(response.updateStatus.message, /failure/i);
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "up_to_date");
+    assert.equal(harness.stored.popoUpdateStatus.currentVersion, "0.7.5");
+    assert.equal(harness.stored.popoUpdateStatus.targetVersion, "0.7.4");
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("repeated reads throttle a failing immediate update retry", async () => {
+  const harness = createHarness(
+    {
+      popoUpdateStatus: {
+        state: "failed",
+        currentVersion: "0.7.5",
+        targetVersion: "",
+        message: "previous transport failure",
+        updatedAt: "2026-08-25T00:00:00.000Z"
+      },
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.5", version_name: "0.7.5" },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          throw new Error("shadow agent unavailable");
+        }
+        if (message.action === "check_update") {
+          throw new Error("legacy native host disconnected");
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    const first = await harness.send({ type: "GET_UPDATE_STATUS" });
+    assert.equal(first.updateStatus.state, "checking");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "failed");
+    const messageCount = harness.nativeMessages.length;
+    const second = await harness.send({ type: "GET_UPDATE_STATUS" });
+    assert.equal(second.updateStatus.state, "failed");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(harness.nativeMessages.length, messageCount);
+    assert.equal(messageCount, 2);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("automatic update reports a managed-install path mismatch instead of claiming up to date", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.4", version_name: "0.7.4" },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") {
+          throw new Error("agent unavailable in mismatch test");
+        }
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: false,
+            currentVersion: "0.7.4",
+            installedVersion: "0.7.2",
+            runtimeMatchesInstalled: false,
+            version: "0.7.2"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "path_mismatch");
+    assert.equal(harness.stored.popoUpdateStatus.currentVersion, "0.7.4");
+    assert.equal(harness.stored.popoUpdateStatus.targetVersion, "0.7.2");
+    assert.match(harness.stored.popoUpdateStatus.message, /运行版本与绿色安装版本不一致/);
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test("matching agent and legacy checks persist a comparable shadow diagnostic", async () => {
   const existingHistory = Array.from({ length: 64 }, (_, index) => ({
     schemaVersion: 1,

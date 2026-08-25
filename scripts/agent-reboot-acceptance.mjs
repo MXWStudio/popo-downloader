@@ -96,7 +96,11 @@ function compileSetup() {
 }
 
 function setupEnvironment() {
-  return { ...process.env, POPO_SETUP_TEST_MODE: "1" };
+  return {
+    ...process.env,
+    POPO_SETUP_TEST_MODE: "1",
+    POPO_SETUP_TEST_REGISTRY_ROOT: "Software\\POPOSetupTests\\AgentRebootAcceptance"
+  };
 }
 
 function runSetup(args) {
@@ -306,6 +310,11 @@ function cleanupAcceptance() {
   stopAgent();
   deleteTask();
   if (fs.existsSync(acceptanceRoot)) fs.rmSync(acceptanceRoot, { recursive: true, force: true });
+  run("reg.exe", [
+    "delete",
+    "HKCU\\Software\\POPOSetupTests\\AgentRebootAcceptance",
+    "/f"
+  ]);
   if (fs.existsSync(acceptanceRoot) || taskExists()) {
     throw new Error("The reboot acceptance cleanup did not finish.");
   }

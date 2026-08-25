@@ -23,7 +23,11 @@ internal static class PopoAgent
     private const int MaximumHeaderBytes = 16 * 1024;
     private const int LogRotateBytes = 2 * 1024 * 1024;
     private const int CheckIntervalMilliseconds = 6 * 60 * 60 * 1000;
+#if POPO_DEV_BUILD
+    private const string ExtensionId = "folfhehnopknchpoaajfpboibbhnlanf";
+#else
     private const string ExtensionId = "coocdgkmbpkacapjlmnmemebmmdahjaa";
+#endif
     private const string AllowedOrigin = "chrome-extension://" + ExtensionId;
     private const string ManifestUrl = "https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable/latest.json";
     private const string UpdateChannel = "stable";
@@ -183,6 +187,19 @@ internal static class PopoAgent
         string transactionId = "shadow-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N");
         Dictionary<string, object> installed = ReadJsonObject(Path.Combine(productRoot, "install-state.json"));
         string currentVersion = GetString(installed, "version");
+#if POPO_DEV_BUILD
+        WriteState(
+            "idle",
+            currentVersion,
+            "",
+            transactionId,
+            "开发版已停用正式更新影子检查。",
+            "",
+            false,
+            null
+        );
+        return;
+#else
         WriteState("checking", currentVersion, "", transactionId, "正在影子检查正式更新。", "", false, null);
         try
         {
@@ -207,6 +224,7 @@ internal static class PopoAgent
             WriteState("failed", currentVersion, "", transactionId, "影子检查失败；不会影响现有更新和下载。", errorCode, true, null);
             TryLog("error", errorCode, error.Message, transactionId);
         }
+#endif
     }
 
     private static string ClassifyShadowCheckError(Exception error)

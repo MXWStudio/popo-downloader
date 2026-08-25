@@ -10,8 +10,8 @@ const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest
 
 test("Manifest V3 仅申请任务所需权限", () => {
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.7.4");
-  assert.equal(manifest.version_name, "0.7.4");
+  assert.equal(manifest.version, "0.7.5");
+  assert.equal(manifest.version_name, "0.7.5");
   assert.equal(manifest.name, "POPO 稳定下载助手");
   const digest = crypto.createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest();
   const alphabet = "abcdefghijklmnop";

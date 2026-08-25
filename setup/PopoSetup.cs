@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -14,13 +16,79 @@ using Microsoft.Win32;
 
 internal static class PopoSetup
 {
+#if POPO_DEV_BUILD
+    private const string HostName = "com.popo.dev_downloader.folder_picker";
+    private const string AgentTaskNamePrefix = "POPO Dev Downloader Update Agent";
+    private const string ProductRegistryPath = @"Software\POPODevDownloader";
+    private const string ProductDirectoryName = "POPODevDownloader";
+    private const string ProductDisplayName = "POPO Dev 下载助手";
+    private const string ProductShortName = "POPO Dev";
+#else
     private const string HostName = "com.popo.stable_downloader.folder_picker";
     private const string AgentTaskNamePrefix = "POPO Stable Downloader Update Agent";
     private const string ProductRegistryPath = @"Software\POPOStableDownloader";
+    private const string ProductDirectoryName = "POPOStableDownloader";
+    private const string ProductDisplayName = "POPO 稳定下载助手";
+    private const string ProductShortName = "POPO 正式版";
+#endif
     private const string InstallRootValueName = "InstallRoot";
+    private const string AgentRunRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string SetupLogFileName = "setup.log";
+    private const string MaintenanceFileName = "maintenance.json";
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer {
         MaxJsonLength = Int32.MaxValue
     };
+
+    private sealed class MaintenanceSession : IDisposable
+    {
+        private readonly string markerPath;
+        private readonly object previousRegistryValue;
+        private readonly RegistryValueKind previousRegistryKind;
+        private readonly bool registryValueRemoved;
+        private bool completed;
+        private bool disposed;
+
+        public MaintenanceSession(
+            string path,
+            object registryValue,
+            RegistryValueKind registryKind,
+            bool removed
+        )
+        {
+            markerPath = path;
+            previousRegistryValue = registryValue;
+            previousRegistryKind = registryKind;
+            registryValueRemoved = removed;
+        }
+
+        public void Complete()
+        {
+            completed = true;
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            try
+            {
+                if (File.Exists(markerPath)) File.Delete(markerPath);
+            }
+            catch {}
+            if (completed || !registryValueRemoved) return;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(GetNativeHostRegistryPath()))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue("", previousRegistryValue, previousRegistryKind);
+                    }
+                }
+            }
+            catch {}
+        }
+    }
 
     private sealed class InstallOptionsForm : Form
     {
@@ -29,9 +97,7 @@ internal static class PopoSetup
         private readonly string packageVersion;
         private readonly TextBox pathBox = new TextBox();
         private readonly Button browseButton = new Button();
-        private readonly CheckBox repairBox = new CheckBox();
-        private readonly Label operationLabel = new Label();
-        private readonly Label explanationLabel = new Label();
+        private readonly Label detectionLabel = new Label();
         private readonly Button continueButton = new Button();
 
         public string SelectedRoot { get; private set; }
@@ -46,25 +112,17 @@ internal static class PopoSetup
             pathBox.Text = !String.IsNullOrWhiteSpace(existingRoot)
                 ? existingRoot
                 : GetSuggestedInstallRoot();
-            bool hasExisting = !String.IsNullOrWhiteSpace(existingRoot);
-            repairBox.Visible = hasExisting;
-            repairBox.Checked = hasExisting && String.Equals(
-                installedVersion,
-                packageVersion,
-                StringComparison.OrdinalIgnoreCase
-            );
-            repairBox.CheckedChanged += delegate { RefreshOperation(); };
             pathBox.TextChanged += delegate { RefreshOperation(); };
             RefreshOperation();
         }
 
         private void BuildLayout()
         {
-            Text = "POPO 稳定下载助手";
+            Text = ProductShortName + " " + packageVersion;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(620, 390);
-            MinimumSize = new Size(620, 390);
-            MaximumSize = new Size(620, 390);
+            ClientSize = new Size(620, 310);
+            MinimumSize = new Size(620, 310);
+            MaximumSize = new Size(620, 310);
             BackColor = Color.FromArgb(244, 247, 251);
             Font = new Font("Segoe UI", 10F);
             MaximizeBox = false;
@@ -74,10 +132,8 @@ internal static class PopoSetup
                 Dock = DockStyle.Fill,
                 Padding = new Padding(30, 26, 30, 24),
                 ColumnCount = 1,
-                RowCount = 8
+                RowCount = 6
             };
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -87,25 +143,17 @@ internal static class PopoSetup
 
             Label title = new Label {
                 AutoSize = true,
-                Text = "POPO 稳定下载助手",
+                Text = ProductShortName,
                 Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(25, 45, 72),
-                Margin = new Padding(0, 0, 0, 4)
+                Margin = new Padding(0, 0, 0, 12)
             };
-            Label subtitle = new Label {
-                AutoSize = true,
-                Text = "首次安装、覆盖更新和正式版修复都在这里完成。",
-                ForeColor = Color.FromArgb(82, 99, 122),
-                Margin = new Padding(0, 0, 0, 18)
-            };
-            operationLabel.AutoSize = true;
-            operationLabel.Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold);
-            operationLabel.ForeColor = Color.FromArgb(15, 96, 181);
-            operationLabel.Margin = new Padding(0, 0, 0, 5);
-            explanationLabel.AutoSize = true;
-            explanationLabel.MaximumSize = new Size(550, 0);
-            explanationLabel.ForeColor = Color.FromArgb(70, 86, 108);
-            explanationLabel.Margin = new Padding(0, 0, 0, 18);
+            detectionLabel.AutoSize = true;
+            detectionLabel.BackColor = Color.FromArgb(228, 239, 253);
+            detectionLabel.ForeColor = Color.FromArgb(24, 83, 148);
+            detectionLabel.Padding = new Padding(9, 6, 9, 6);
+            detectionLabel.Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold);
+            detectionLabel.Margin = new Padding(0, 0, 0, 18);
 
             Label pathTitle = new Label {
                 AutoSize = true,
@@ -131,11 +179,6 @@ internal static class PopoSetup
             pathRow.Controls.Add(pathBox, 0, 0);
             pathRow.Controls.Add(browseButton, 1, 0);
 
-            repairBox.AutoSize = true;
-            repairBox.Text = "重新校验并修复全部正式版组件";
-            repairBox.ForeColor = Color.FromArgb(66, 82, 103);
-            repairBox.Margin = new Padding(0, 8, 0, 0);
-
             FlowLayoutPanel actions = new FlowLayoutPanel {
                 Dock = DockStyle.Fill,
                 AutoSize = true,
@@ -144,7 +187,7 @@ internal static class PopoSetup
                 Margin = new Padding(0)
             };
             continueButton.AutoSize = true;
-            continueButton.MinimumSize = new Size(150, 42);
+            continueButton.MinimumSize = new Size(120, 42);
             continueButton.BackColor = Color.FromArgb(18, 104, 232);
             continueButton.ForeColor = Color.White;
             continueButton.FlatStyle = FlatStyle.Flat;
@@ -162,13 +205,10 @@ internal static class PopoSetup
             actions.Controls.Add(cancelButton);
 
             root.Controls.Add(title, 0, 0);
-            root.Controls.Add(subtitle, 0, 1);
-            root.Controls.Add(operationLabel, 0, 2);
-            root.Controls.Add(explanationLabel, 0, 3);
-            root.Controls.Add(pathTitle, 0, 4);
-            root.Controls.Add(pathRow, 0, 5);
-            root.Controls.Add(repairBox, 0, 6);
-            root.Controls.Add(actions, 0, 7);
+            root.Controls.Add(detectionLabel, 0, 1);
+            root.Controls.Add(pathTitle, 0, 2);
+            root.Controls.Add(pathRow, 0, 3);
+            root.Controls.Add(actions, 0, 5);
             Controls.Add(root);
             AcceptButton = continueButton;
             CancelButton = cancelButton;
@@ -190,9 +230,9 @@ internal static class PopoSetup
                 string selected = Path.GetFullPath(dialog.SelectedPath);
                 pathBox.Text = String.Equals(
                     Path.GetFileName(selected),
-                    "POPOStableDownloader",
+                    ProductDirectoryName,
                     StringComparison.OrdinalIgnoreCase
-                ) ? selected : Path.Combine(selected, "POPOStableDownloader");
+                ) ? selected : Path.Combine(selected, ProductDirectoryName);
             }
         }
 
@@ -200,19 +240,50 @@ internal static class PopoSetup
         {
             bool hasExisting = !String.IsNullOrWhiteSpace(existingRoot);
             bool migrating = hasExisting && !SamePath(existingRoot, pathBox.Text.Trim());
-            bool repair = repairBox.Checked || (hasExisting && String.Equals(
+            bool sameVersion = hasExisting && String.Equals(
                 installedVersion,
                 packageVersion,
                 StringComparison.OrdinalIgnoreCase
-            ));
-            string operation = !hasExisting ? "首次安装" : migrating ? "迁移安装位置" : repair ? "修复正式版" : "覆盖更新";
-            operationLabel.Text = operation + " · " + packageVersion;
-            explanationLabel.Text = !hasExisting
-                ? "请选择程序位置。安装包已包含扩展、下载服务和本机助手，不需要另外安装运行环境。"
-                : migrating
-                    ? "程序会迁移到新位置，并保留下载记录、设置及 Chrome 当前加载的扩展路径。"
-                    : "已识别现有正式版位置。更新和修复会沿用该位置，并保留下载记录与设置。";
+            );
+            int versionComparison = CompareVersionNames(packageVersion, installedVersion);
+            bool upgrading = hasExisting && !sameVersion && versionComparison > 0;
+            string operation;
+            if (!hasExisting)
+            {
+                detectionLabel.Text = "安装版本  " + packageVersion;
+                operation = "安装";
+            }
+            else if (migrating)
+            {
+                detectionLabel.Text = sameVersion
+                    ? "版本  " + packageVersion
+                    : installedVersion + "  →  " + packageVersion;
+                operation = upgrading
+                    ? "迁移并升级"
+                    : "迁移";
+            }
+            else if (sameVersion)
+            {
+                detectionLabel.Text = "版本  " + packageVersion;
+                operation = "修复";
+            }
+            else
+            {
+                detectionLabel.Text = installedVersion + "  →  " + packageVersion;
+                operation = upgrading
+                    ? "覆盖升级"
+                    : "覆盖安装";
+            }
             continueButton.Text = operation;
+        }
+
+        private static int CompareVersionNames(string left, string right)
+        {
+            Version leftVersion;
+            Version rightVersion;
+            return Version.TryParse(left, out leftVersion) && Version.TryParse(right, out rightVersion)
+                ? leftVersion.CompareTo(rightVersion)
+                : 0;
         }
 
         private void ConfirmInstall(object sender, EventArgs eventArgs)
@@ -222,9 +293,9 @@ internal static class PopoSetup
                 string selected = Path.GetFullPath(pathBox.Text.Trim());
                 ValidateInstallDestination(selected, existingRoot);
                 SelectedRoot = selected;
-                ForceRepair = repairBox.Checked || (!String.IsNullOrWhiteSpace(existingRoot) && (
+                ForceRepair = !String.IsNullOrWhiteSpace(existingRoot) && (
                     !SamePath(existingRoot, selected) ||
-                    String.Equals(installedVersion, packageVersion, StringComparison.OrdinalIgnoreCase)));
+                    String.Equals(installedVersion, packageVersion, StringComparison.OrdinalIgnoreCase));
                 DialogResult = DialogResult.OK;
                 Close();
             }
@@ -241,11 +312,61 @@ internal static class PopoSetup
         }
     }
 
+    private static string GetTestRegistryRoot()
+    {
+#if POPO_SETUP_TEST
+        if (String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+            "1",
+            StringComparison.Ordinal
+        ))
+        {
+            string root = (Environment.GetEnvironmentVariable("POPO_SETUP_TEST_REGISTRY_ROOT") ?? "")
+                .Trim().Trim('\\');
+            if (!Regex.IsMatch(
+                root,
+                @"^Software\\POPOSetupTests\\[A-Za-z0-9_-]+(?:\\[A-Za-z0-9_-]+)*$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
+            ))
+            {
+                throw new InvalidOperationException("The setup test registry root is missing or unsafe.");
+            }
+            return root;
+        }
+#endif
+        return "";
+    }
+
+    private static string GetProductRegistryPath()
+    {
+        string testRoot = GetTestRegistryRoot();
+        return String.IsNullOrWhiteSpace(testRoot)
+            ? ProductRegistryPath
+            : testRoot + @"\Product";
+    }
+
+    private static string GetAgentRunRegistryPath()
+    {
+        string testRoot = GetTestRegistryRoot();
+        return String.IsNullOrWhiteSpace(testRoot)
+            ? AgentRunRegistryPath
+            : testRoot + @"\Run";
+    }
+
+    private static string GetNativeHostRegistryPath()
+    {
+        string testRoot = GetTestRegistryRoot();
+        return String.IsNullOrWhiteSpace(testRoot)
+            ? @"Software\Google\Chrome\NativeMessagingHosts\" + HostName
+            : testRoot + @"\NativeMessagingHosts\" + HostName;
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        MaintenanceSession maintenance = null;
         try
         {
 #if POPO_SETUP_TEST
@@ -256,6 +377,25 @@ internal static class PopoSetup
             ) && HasArgument(args, "--test-verify-agent-startup"))
             {
                 string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                return AgentStartupDefinitionMatches(testRoot) ? 0 : 2;
+            }
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && HasArgument(args, "--test-verify-agent-run-startup"))
+            {
+                string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                return AgentRunStartupDefinitionMatches(testRoot) && !AgentTaskExists(testRoot) ? 0 : 2;
+            }
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && HasArgument(args, "--test-register-agent-startup-only"))
+            {
+                string testRoot = Path.GetFullPath(GetArgumentValue(args, "--install-root"));
+                RegisterAgentStartup(testRoot);
                 return AgentStartupDefinitionMatches(testRoot) ? 0 : 2;
             }
             if (String.Equals(
@@ -353,7 +493,12 @@ internal static class PopoSetup
                     : GetSuggestedInstallRoot();
             }
             productRoot = Path.GetFullPath(productRoot);
+            AppendSetupLog("开始安装事务。");
             bool migrating = !String.IsNullOrWhiteSpace(existingRoot) && !SamePath(existingRoot, productRoot);
+            if (!skipRegister && LooksLikeInstallRoot(existingRoot))
+            {
+                maintenance = BeginMaintenance(existingRoot);
+            }
             string extensionRoot = Path.Combine(productRoot, "Extension");
             string chromeExtensionRoot = ReadCompatibilityExtensionRoot(existingRoot);
             if (migrating && String.IsNullOrWhiteSpace(chromeExtensionRoot))
@@ -374,13 +519,10 @@ internal static class PopoSetup
             bool migrationAgentWasRunning = migrating && IsProcessRunningAt(
                 Path.Combine(existingRoot, "Agent", "PopoAgent.exe")
             );
-            bool migrationStartupExisted = migrating && !skipRegister && AgentStartupExists(existingRoot);
             bool migrationTargetStartupExisted = migrating && !skipRegister && AgentStartupExists(productRoot);
             if (migrating && IsProcessRunningAt(Path.Combine(existingRoot, "NativeHost", "Gopeed", "gopeed.exe")))
             {
-                throw new InvalidOperationException(
-                    "下载服务正在运行。请先从系统托盘退出 Gopeed，再迁移安装位置；下载记录不会丢失。"
-                );
+                WaitForGopeedExit(existingRoot, quiet);
             }
             if (migrationAgentWasRunning) StopAgent(existingRoot);
             try
@@ -399,7 +541,8 @@ internal static class PopoSetup
                     forceRepair,
                     migrating ? "migration" : forceRepair ? "repair" : "verified-candidate",
                     chromeExtensionRoot,
-                    simulateUpdateFailure
+                    simulateUpdateFailure,
+                    quiet
                 );
                 if (migrating) SeedMigrationData(existingRoot, productRoot);
                 if (!SamePath(extensionRoot, chromeExtensionRoot))
@@ -417,7 +560,7 @@ internal static class PopoSetup
                         extensionId,
                         true
                     );
-                    if (migrationStartupExisted) DeleteAgentStartup(existingRoot);
+                    DeleteAgentStartup(existingRoot);
                 }
                 if (migrating) FinalizeMigration(existingRoot, productRoot, chromeExtensionRoot);
             }
@@ -445,6 +588,12 @@ internal static class PopoSetup
                 throw;
             }
             if (!skipRegister) SaveInstallRoot(productRoot);
+            if (maintenance != null)
+            {
+                maintenance.Complete();
+                maintenance.Dispose();
+                maintenance = null;
+            }
 
             bool alreadyLoaded = IsKnownByChrome(extensionId);
             if (!quiet)
@@ -453,23 +602,24 @@ internal static class PopoSetup
             }
 
             string message = alreadyLoaded
-                ? (forceRepair ? "正式版修复完成。" : "绿色版覆盖更新完成。") +
-                    "\r\n\r\nExtension 文件夹即将打开；如 Chrome 尚未刷新，请在扩展管理页手动重新加载一次。\r\n\r\n程序位置：\r\n" + productRoot
-                : "绿色版已经准备完成。\r\n\r\nExtension 文件夹即将打开。首次使用时请在 Chrome 扩展管理页开启“开发者模式”，点击“加载已解压的扩展程序”，然后选择此文件夹。\r\n\r\n程序位置：\r\n" + productRoot;
+                ? "安装完成。\r\n\r\n请在扩展管理页重新加载。"
+                : "安装完成。\r\n\r\n请加载即将打开的 Extension 文件夹。";
             if (!quiet)
             {
                 MessageBox.Show(
                     message,
-                    "POPO 稳定下载助手 " + versionName,
+                    ProductShortName + " " + versionName,
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
                 );
                 OpenFolder(chromeExtensionRoot);
             }
+            AppendSetupLog("安装事务完成。");
             return 0;
         }
         catch (Exception error)
         {
+            AppendSetupLog("安装失败，已请求回滚。", error);
 #if POPO_SETUP_TEST
             if (String.Equals(
                 Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
@@ -495,7 +645,7 @@ internal static class PopoSetup
             if (!HasArgument(args, "--quiet"))
             {
                 MessageBox.Show(
-                    "安装没有完成：\r\n\r\n" + error.Message,
+                    DescribeInstallFailure(error),
                     "POPO 绿色版安装助手",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
@@ -503,6 +653,117 @@ internal static class PopoSetup
             }
             return 1;
         }
+        finally
+        {
+            if (maintenance != null) maintenance.Dispose();
+        }
+    }
+
+    private static void AppendSetupLog(string summary, Exception error = null)
+    {
+        try
+        {
+            string localApplicationData = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData
+            );
+#if POPO_SETUP_TEST
+            string testLogRoot = Environment.GetEnvironmentVariable("POPO_SETUP_TEST_LOG_ROOT");
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ) && !String.IsNullOrWhiteSpace(testLogRoot))
+            {
+                localApplicationData = Path.GetFullPath(testLogRoot);
+            }
+#endif
+            string logDirectory = Path.Combine(localApplicationData, ProductDirectoryName, "Logs");
+            Directory.CreateDirectory(logDirectory);
+            StringBuilder entry = new StringBuilder();
+            entry.Append(DateTimeOffset.Now.ToString("o"));
+            entry.Append(" ");
+            entry.Append(SanitizeSetupLogText(summary));
+            entry.AppendLine();
+            if (error != null)
+            {
+                foreach (string detail in GetExceptionChain(error))
+                {
+                    entry.Append("  ");
+                    entry.Append(SanitizeSetupLogText(detail));
+                    entry.AppendLine();
+                }
+            }
+            File.AppendAllText(
+                Path.Combine(logDirectory, SetupLogFileName),
+                entry.ToString(),
+                new UTF8Encoding(false)
+            );
+        }
+        catch {}
+    }
+
+    private static IEnumerable<string> GetExceptionChain(Exception error)
+    {
+        if (error == null) yield break;
+        yield return error.GetType().Name + ": " + error.Message;
+        AggregateException aggregate = error as AggregateException;
+        if (aggregate != null)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions)
+            {
+                foreach (string detail in GetExceptionChain(inner)) yield return detail;
+            }
+        }
+        else if (error.InnerException != null)
+        {
+            foreach (string detail in GetExceptionChain(error.InnerException)) yield return detail;
+        }
+    }
+
+    private static string SanitizeSetupLogText(string value)
+    {
+        string sanitized = value ?? "";
+        sanitized = Regex.Replace(
+            sanitized,
+            @"(?i)(token|password|secret|authorization)\s*[:=]\s*([^\s,;]+)",
+            "$1=[已隐藏]"
+        );
+        return Regex.Replace(sanitized, @"(?i)bearer\s+[^\s,;]+", "Bearer [已隐藏]");
+    }
+
+    private static string DescribeInstallFailure(Exception error)
+    {
+        string details = String.Join("\n", GetExceptionChain(error).ToArray());
+        string reason;
+        if (details.IndexOf("下载服务正在运行", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            details.IndexOf("下载服务仍在运行", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            reason = "安装器已暂停 Gopeed 自动启动，但下载服务尚未正常退出。请从系统托盘退出后重试；下载记录不会丢失。";
+        }
+        else if (details.IndexOf("startup task or current-user Run fallback", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            details.IndexOf("Run startup", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            reason = "无法创建更新代理启动项：计划任务不可用，当前用户启动项也无法写入。";
+        }
+        else if (details.IndexOf("access denied", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            details.IndexOf("拒绝访问", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            reason = "系统拒绝了安装所需的当前用户配置写入。";
+        }
+        else if (details.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            reason = "创建更新代理启动项超时。";
+        }
+        else if (details.IndexOf("task definition", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            reason = "更新代理启动项校验未通过。";
+        }
+        else
+        {
+            reason = "安装事务未完成。";
+        }
+        return "安装未完成，已自动回滚到原版本。\r\n\r\n" + reason +
+            "\r\n\r\n详细原因已写入：%LOCALAPPDATA%\\" + ProductDirectoryName + "\\Logs\\" + SetupLogFileName;
     }
 
     private static bool HasArgument(string[] args, string expected)
@@ -572,7 +833,7 @@ internal static class PopoSetup
     {
         try
         {
-            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(ProductRegistryPath))
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(GetProductRegistryPath()))
             {
                 string saved = key == null ? "" : Convert.ToString(key.GetValue(InstallRootValueName));
                 if (LooksLikeInstallRoot(saved)) return Path.GetFullPath(saved);
@@ -581,7 +842,7 @@ internal static class PopoSetup
         catch {}
         string legacy = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "POPOStableDownloader"
+            ProductDirectoryName
         );
         string migratedTo = ReadMigrationTarget(legacy);
         if (LooksLikeInstallRoot(migratedTo)) return Path.GetFullPath(migratedTo);
@@ -679,11 +940,11 @@ internal static class PopoSetup
         }
         if (selected != null)
         {
-            return Path.Combine(selected.RootDirectory.FullName, "POPOStableDownloader");
+            return Path.Combine(selected.RootDirectory.FullName, ProductDirectoryName);
         }
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "POPOStableDownloader"
+            ProductDirectoryName
         );
     }
 
@@ -722,7 +983,7 @@ internal static class PopoSetup
 
     private static void SaveInstallRoot(string productRoot)
     {
-        using (RegistryKey key = Registry.CurrentUser.CreateSubKey(ProductRegistryPath))
+        using (RegistryKey key = Registry.CurrentUser.CreateSubKey(GetProductRegistryPath()))
         {
             if (key == null) throw new InvalidOperationException("无法保存安装位置。");
             key.SetValue(InstallRootValueName, Path.GetFullPath(productRoot), RegistryValueKind.String);
@@ -781,41 +1042,91 @@ internal static class PopoSetup
         string executable = Path.Combine(productRoot, "Agent", "PopoAgent.exe");
         string taskName = GetAgentTaskName(productRoot);
         RequireFile(executable);
-        ProcessStartInfo taskInfo = new ProcessStartInfo {
-            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
-            Arguments = "/Create /F /SC ONLOGON /RL LIMITED /TN \"" + taskName +
-                "\" /TR \"\\\"" + executable + "\\\" --product-root \\\"" + productRoot + "\\\"\"",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
-        };
-        using (Process task = Process.Start(taskInfo))
+        Exception taskFailure = null;
+        try
         {
-            if (task == null) throw new InvalidOperationException("Cannot register the POPO update agent startup task.");
-            string taskOutput = task.StandardOutput.ReadToEnd();
-            string taskError = task.StandardError.ReadToEnd();
-            if (!task.WaitForExit(15000))
+            ProcessStartInfo taskInfo = new ProcessStartInfo {
+                FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+                Arguments = "/Create /F /SC ONLOGON /RL LIMITED /TN \"" + taskName +
+                    "\" /TR \"\\\"" + executable + "\\\" --product-root \\\"" + productRoot + "\\\"\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+#if POPO_SETUP_TEST
+            if (String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_SCHTASKS_DENIED"),
+                "1",
+                StringComparison.Ordinal
+            ) && String.Equals(
+                Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+                "1",
+                StringComparison.Ordinal
+            ))
             {
-                try { task.Kill(); } catch {}
-                throw new TimeoutException("Registering the POPO update agent startup task timed out.");
+                throw new UnauthorizedAccessException("Simulated schtasks access denied.");
             }
-            if (task.ExitCode != 0)
+#endif
+            using (Process task = Process.Start(taskInfo))
             {
-                string detail = String.IsNullOrWhiteSpace(taskError) ? taskOutput : taskError;
-                throw new InvalidOperationException(
-                    "Cannot register the POPO update agent startup task: " + detail.Trim()
-                );
+                if (task == null) throw new InvalidOperationException("Cannot register the POPO update agent startup task.");
+                string taskOutput = task.StandardOutput.ReadToEnd();
+                string taskError = task.StandardError.ReadToEnd();
+                if (!task.WaitForExit(15000))
+                {
+                    try { task.Kill(); } catch {}
+                    throw new TimeoutException("Registering the POPO update agent startup task timed out.");
+                }
+                if (task.ExitCode != 0)
+                {
+                    string detail = String.IsNullOrWhiteSpace(taskError) ? taskOutput : taskError;
+                    throw new InvalidOperationException(
+                        "Cannot register the POPO update agent startup task: " + detail.Trim()
+                    );
+                }
+            }
+            if (!AgentTaskDefinitionMatches(productRoot))
+            {
+                throw new InvalidOperationException("The POPO update agent startup task definition did not match the fixed Agent command.");
+            }
+            DeleteAgentRunStartup(productRoot);
+            if (AgentRunStartupExists(productRoot))
+            {
+                throw new InvalidOperationException("The previous current-user Run startup entry could not be removed.");
+            }
+            return;
+        }
+        catch (Exception error)
+        {
+            taskFailure = error;
+        }
+
+        try
+        {
+            DeleteAgentTaskStartup(productRoot);
+            RegisterAgentRunStartup(productRoot);
+            if (!AgentRunStartupDefinitionMatches(productRoot) || AgentTaskExists(productRoot))
+            {
+                throw new InvalidOperationException("The POPO update agent Run startup definition did not match the fixed Agent command.");
             }
         }
-        if (!AgentStartupDefinitionMatches(productRoot))
+        catch (Exception runError)
         {
-            throw new InvalidOperationException("The POPO update agent startup task definition did not match the fixed Agent command.");
+            throw new InvalidOperationException(
+                "Cannot register the POPO update agent startup task or current-user Run fallback.",
+                new AggregateException(taskFailure, runError)
+            );
         }
     }
 
     private static bool AgentStartupDefinitionMatches(string productRoot)
+    {
+        return AgentTaskDefinitionMatches(productRoot) || AgentRunStartupDefinitionMatches(productRoot);
+    }
+
+    private static bool AgentTaskDefinitionMatches(string productRoot)
     {
         ProcessStartInfo queryInfo = new ProcessStartInfo {
             FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
@@ -912,6 +1223,11 @@ internal static class PopoSetup
 
     private static bool AgentStartupExists(string productRoot)
     {
+        return AgentTaskExists(productRoot) || AgentRunStartupExists(productRoot);
+    }
+
+    private static bool AgentTaskExists(string productRoot)
+    {
         ProcessStartInfo queryInfo = new ProcessStartInfo {
             FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
             Arguments = "/Query /TN \"" + GetAgentTaskName(productRoot) + "\"",
@@ -933,21 +1249,86 @@ internal static class PopoSetup
 
     private static void DeleteAgentStartup(string productRoot)
     {
-        if (!AgentStartupExists(productRoot)) return;
-        ProcessStartInfo deleteInfo = new ProcessStartInfo {
-            FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
-            Arguments = "/Delete /F /TN \"" + GetAgentTaskName(productRoot) + "\"",
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-        using (Process deletion = Process.Start(deleteInfo))
+        DeleteAgentTaskStartup(productRoot);
+        DeleteAgentRunStartup(productRoot);
+    }
+
+    private static void DeleteAgentTaskStartup(string productRoot)
+    {
+        if (AgentTaskExists(productRoot))
         {
-            if (deletion == null || !deletion.WaitForExit(10000) || deletion.ExitCode != 0)
+            ProcessStartInfo deleteInfo = new ProcessStartInfo {
+                FileName = Path.Combine(Environment.SystemDirectory, "schtasks.exe"),
+                Arguments = "/Delete /F /TN \"" + GetAgentTaskName(productRoot) + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            using (Process deletion = Process.Start(deleteInfo))
             {
-                throw new InvalidOperationException("Cannot remove the POPO update agent startup task.");
+                if (deletion == null || !deletion.WaitForExit(10000) || deletion.ExitCode != 0)
+                {
+                    throw new InvalidOperationException("Cannot remove the POPO update agent startup task.");
+                }
             }
         }
+    }
+
+    private static void RegisterAgentRunStartup(string productRoot)
+    {
+#if POPO_SETUP_TEST
+        if (String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_FAIL_AGENT_RUN_STARTUP"),
+            "1",
+            StringComparison.Ordinal
+        ) && String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+            "1",
+            StringComparison.Ordinal
+        ))
+        {
+            throw new UnauthorizedAccessException("Simulated current-user Run startup registration failure.");
+        }
+#endif
+        string executable = Path.Combine(Path.GetFullPath(productRoot), "Agent", "PopoAgent.exe");
+        string command = QuoteArgument(executable) + " --product-root " + QuoteArgument(Path.GetFullPath(productRoot));
+        using (RegistryKey key = Registry.CurrentUser.CreateSubKey(GetAgentRunRegistryPath()))
+        {
+            if (key == null) throw new InvalidOperationException("Cannot open the current-user Run registry key.");
+            key.SetValue(GetAgentRunValueName(productRoot), command, RegistryValueKind.String);
+        }
+    }
+
+    private static bool AgentRunStartupExists(string productRoot)
+    {
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(GetAgentRunRegistryPath(), false))
+        {
+            return key != null && key.GetValue(GetAgentRunValueName(productRoot)) is string;
+        }
+    }
+
+    private static bool AgentRunStartupDefinitionMatches(string productRoot)
+    {
+        string executable = Path.Combine(Path.GetFullPath(productRoot), "Agent", "PopoAgent.exe");
+        string expected = QuoteArgument(executable) + " --product-root " + QuoteArgument(Path.GetFullPath(productRoot));
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(GetAgentRunRegistryPath(), false))
+        {
+            string actual = key == null ? null : key.GetValue(GetAgentRunValueName(productRoot)) as string;
+            return String.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void DeleteAgentRunStartup(string productRoot)
+    {
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(GetAgentRunRegistryPath(), true))
+        {
+            if (key != null) key.DeleteValue(GetAgentRunValueName(productRoot), false);
+        }
+    }
+
+    private static string GetAgentRunValueName(string productRoot)
+    {
+        return GetAgentTaskName(productRoot).Replace(" ", "_");
     }
 
     private static string GetAgentTaskName(string productRoot)
@@ -964,6 +1345,17 @@ internal static class PopoSetup
 
     private static void StartAgent(string productRoot)
     {
+#if POPO_SETUP_TEST
+        if (String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_SKIP_AGENT_START"),
+            "1",
+            StringComparison.Ordinal
+        ) && String.Equals(
+            Environment.GetEnvironmentVariable("POPO_SETUP_TEST_MODE"),
+            "1",
+            StringComparison.Ordinal
+        )) return;
+#endif
         string executable = Path.Combine(productRoot, "Agent", "PopoAgent.exe");
         if (!File.Exists(executable)) return;
         if (IsProcessRunningAt(executable))
@@ -1068,7 +1460,8 @@ internal static class PopoSetup
         bool forceRepair,
         string updateMode,
         string chromeExtensionRoot,
-        bool simulateUpdateFailure
+        bool simulateUpdateFailure,
+        bool quiet
     )
     {
         ValidateProductRoot(productRoot);
@@ -1166,9 +1559,7 @@ internal static class PopoSetup
             agentChanged = forceRepair || !PackagedDirectoryMatches(sourceAgent, agentRoot, "auth.token", "endpoint.json");
             if (nativeChanged && IsProcessRunningAt(Path.Combine(gopeedRoot, "gopeed.exe")))
             {
-                throw new InvalidOperationException(
-                    "下载服务正在运行。请先从系统托盘退出 Gopeed，再重新执行正式版修复或覆盖更新；下载记录不会丢失。"
-                );
+                WaitForGopeedExit(productRoot, quiet);
             }
 
             if (agentChanged && agentWasRunning)
@@ -1633,7 +2024,7 @@ internal static class PopoSetup
         string manifestPath = Path.Combine(nativeRoot, HostName + ".json");
         Dictionary<string, object> manifest = new Dictionary<string, object> {
             { "name", HostName },
-            { "description", "POPO Stable Downloader Windows helper" },
+            { "description", ProductDisplayName + " Windows helper" },
             { "path", installedNativeHost },
             { "type", "stdio" },
             { "allowed_origins", new[] { "chrome-extension://" + extensionId + "/" } }
@@ -1644,12 +2035,125 @@ internal static class PopoSetup
             new UTF8Encoding(false)
         );
         if (!register) return;
-        using (RegistryKey key = Registry.CurrentUser.CreateSubKey(
-            @"Software\Google\Chrome\NativeMessagingHosts\" + HostName
-        ))
+        using (RegistryKey key = Registry.CurrentUser.CreateSubKey(GetNativeHostRegistryPath()))
         {
             if (key == null) throw new InvalidOperationException("Cannot register the Chrome helper.");
             key.SetValue("", manifestPath, RegistryValueKind.String);
+        }
+    }
+
+    private static MaintenanceSession BeginMaintenance(string productRoot)
+    {
+        string fullRoot = Path.GetFullPath(productRoot).TrimEnd(Path.DirectorySeparatorChar);
+        string updatesRoot = Path.Combine(fullRoot, "Updates");
+        Directory.CreateDirectory(updatesRoot);
+        string markerPath = Path.Combine(updatesRoot, MaintenanceFileName);
+        string temporaryPath = markerPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        Dictionary<string, object> marker = new Dictionary<string, object> {
+            { "schemaVersion", 1 },
+            { "processId", Process.GetCurrentProcess().Id },
+            { "startedAt", DateTimeOffset.Now.ToString("o") },
+            { "expiresAt", DateTimeOffset.Now.AddHours(2).ToString("o") }
+        };
+        File.WriteAllText(temporaryPath, Json.Serialize(marker), new UTF8Encoding(false));
+        if (File.Exists(markerPath)) File.Replace(temporaryPath, markerPath, null);
+        else File.Move(temporaryPath, markerPath);
+
+        object previousValue = null;
+        RegistryValueKind previousKind = RegistryValueKind.String;
+        bool removed = false;
+        try
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(GetNativeHostRegistryPath(), true))
+            {
+                if (key != null)
+                {
+                    object currentValue = key.GetValue("", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                    string registeredManifest = currentValue == null ? "" : Convert.ToString(currentValue);
+                    if (IsPathInside(fullRoot, registeredManifest))
+                    {
+                        previousValue = currentValue;
+                        previousKind = key.GetValueKind("");
+                        key.DeleteValue("", false);
+                        removed = true;
+                    }
+                }
+            }
+            AppendSetupLog(
+                removed
+                    ? "已进入维护模式，并暂停扩展自动启动下载服务。"
+                    : "已进入维护模式。"
+            );
+            if (removed)
+            {
+                string nativeHost = Path.Combine(fullRoot, "NativeHost", "PopoFolderPickerHost.exe");
+                for (int attempt = 0; attempt < 100 && IsProcessRunningAt(nativeHost); attempt++)
+                {
+                    Thread.Sleep(250);
+                }
+            }
+            return new MaintenanceSession(markerPath, previousValue, previousKind, removed);
+        }
+        catch
+        {
+            try { if (File.Exists(markerPath)) File.Delete(markerPath); } catch {}
+            throw;
+        }
+    }
+
+    private static bool IsPathInside(string root, string candidate)
+    {
+        if (String.IsNullOrWhiteSpace(root) || String.IsNullOrWhiteSpace(candidate)) return false;
+        try
+        {
+            string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+            string fullCandidate = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar);
+            return fullCandidate.StartsWith(
+                fullRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase
+            );
+        }
+        catch { return false; }
+    }
+
+    private static void WaitForGopeedExit(string productRoot, bool quiet)
+    {
+        string executable = Path.Combine(productRoot, "NativeHost", "Gopeed", "gopeed.exe");
+        if (!IsProcessRunningAt(executable)) return;
+        AppendSetupLog("维护模式正在等待 Gopeed 正常退出。");
+        if (!quiet)
+        {
+            while (IsProcessRunningAt(executable))
+            {
+                DialogResult result = MessageBox.Show(
+                    "安装器已暂停扩展自动启动 Gopeed。\r\n\r\n" +
+                    "请从系统托盘正常退出 Gopeed，然后点击“重试”。退出后不会再被自动拉起，安装会继续进行。\r\n\r\n" +
+                    "下载记录和设置都会保留。",
+                    ProductDisplayName + " · 等待退出 Gopeed",
+                    MessageBoxButtons.RetryCancel,
+                    MessageBoxIcon.Information
+                );
+                if (result == DialogResult.Cancel)
+                {
+                    throw new OperationCanceledException("用户取消了等待 Gopeed 退出的安装操作。");
+                }
+                for (int attempt = 0; attempt < 40 && IsProcessRunningAt(executable); attempt++)
+                {
+                    Thread.Sleep(250);
+                }
+            }
+            return;
+        }
+
+        for (int attempt = 0; attempt < 240 && IsProcessRunningAt(executable); attempt++)
+        {
+            Thread.Sleep(250);
+        }
+        if (IsProcessRunningAt(executable))
+        {
+            throw new InvalidOperationException(
+                "下载服务仍在运行。维护模式已阻止自动重启，但静默更新无法代替用户强制结束 Gopeed。"
+            );
         }
     }
 

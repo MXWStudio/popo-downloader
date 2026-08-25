@@ -1,5 +1,7 @@
 # 正式版自动发布
 
+> 本文只适用于 Stable 正式发布。日常开发和现场验收请使用 `npm run build:dev-package`；Dev 包不会生成或更改腾讯云 `stable/latest.json`。
+
 `.github/workflows/publish-stable.yml` 负责正式版本发布。它仅接受 `vX.Y.Z` 格式的稳定版标签，也可以通过 GitHub Actions 的 `workflow_dispatch` 对已有标签执行恢复发布。
 
 ## 首次启用
@@ -10,6 +12,10 @@
 - `TENCENT_COS_SECRET_ID`：只用于正式发布的腾讯云 CAM 身份。
 - `TENCENT_COS_SECRET_KEY`：上述 CAM 身份的密钥。
 - `TENCENT_COS_SESSION_TOKEN`：可选；使用临时凭据时填写。
+
+在 GitHub 仓库的 Actions variables 中配置：
+
+- `POPO_DIAGNOSTIC_DSN`：正式扩展用于自动回传脱敏诊断的官方 Sentry DSN。正式构建和成品验证会拒绝缺少或非官方地址。
 
 腾讯云身份应只授予 `popo-updates-1461466196` 桶中 `stable/*` 对象所需的 `cos:PutObject`、`cos:GetObject` 和 `cos:PutObjectACL`，不要使用主账号永久密钥。带版本号的 `stable/POPO-Stable-Downloader-*.zip` 上传会携带 `x-cos-forbid-overwrite: true`，可只针对这类版本包在 CAM 策略中要求该条件，阻止同名正式包被覆盖；`stable/latest.json` 必须保留覆盖权限，才能切换稳定通道。
 

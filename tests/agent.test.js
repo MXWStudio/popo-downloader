@@ -13,6 +13,27 @@ const repoRoot = path.join(__dirname, "..");
 const compiler = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
 const allowedOrigin = "chrome-extension://coocdgkmbpkacapjlmnmemebmmdahjaa";
 
+function setupTestEnvironment(sandbox) {
+  const suffix = crypto.createHash("sha256")
+    .update(path.resolve(sandbox).toUpperCase(), "utf8")
+    .digest("hex").slice(0, 24);
+  return {
+    ...process.env,
+    POPO_SETUP_TEST_MODE: "1",
+    POPO_SETUP_TEST_REGISTRY_ROOT: `Software\\POPOSetupTests\\Agent_${suffix}`
+  };
+}
+
+function cleanupSetupTestRegistry(environment) {
+  const registryRoot = environment.POPO_SETUP_TEST_REGISTRY_ROOT;
+  if (!registryRoot) return;
+  spawnSync("reg.exe", ["delete", `HKCU\\${registryRoot}`, "/f"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 15_000
+  });
+}
+
 function compileAgent(output) {
   const result = spawnSync(compiler, [
     "/nologo",
@@ -83,6 +104,32 @@ test("native host verifies that a completed task file still exists with the expe
     ]);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("native host refuses to auto-start Gopeed while setup maintenance is active", () => {
+  const productRoot = fs.mkdtempSync(path.join(os.tmpdir(), "popo-native-maintenance-"));
+  try {
+    const nativeRoot = path.join(productRoot, "NativeHost");
+    const updatesRoot = path.join(productRoot, "Updates");
+    fs.mkdirSync(nativeRoot, { recursive: true });
+    fs.mkdirSync(updatesRoot, { recursive: true });
+    fs.writeFileSync(path.join(productRoot, "install-state.json"), "{}", "utf8");
+    fs.writeFileSync(path.join(updatesRoot, "maintenance.json"), JSON.stringify({
+      schemaVersion: 1,
+      processId: process.pid,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    }), "utf8");
+    const executable = path.join(nativeRoot, "PopoFolderPickerHost.exe");
+    compileNativeHost(executable);
+    const response = invokeNativeHost(executable, { action: "ensure_gopeed" });
+    assert.equal(response.ok, false);
+    assert.equal(response.maintenance, true);
+    assert.equal(response.retryable, true);
+    assert.match(response.error, /安装或修复/);
+  } finally {
+    fs.rmSync(productRoot, { recursive: true, force: true });
   }
 });
 
@@ -688,6 +735,7 @@ test("installer accepts only the fixed least-privilege logon task definition", {
   fs.writeFileSync(extraTriggerXmlPath, taskXml({ extraTrigger: "<TimeTrigger />" }), "utf8");
   fs.writeFileSync(wrongUserXmlPath, taskXml({ userId: "S-1-5-18" }), "utf8");
   compileSetup(setupExecutable);
+  const testEnv = setupTestEnvironment(sandbox);
   const validate = (xmlPath) => spawnSync(setupExecutable, [
     "--test-validate-agent-startup-xml", xmlPath,
     "--install-root", sandbox
@@ -696,7 +744,7 @@ test("installer accepts only the fixed least-privilege logon task definition", {
     encoding: "utf8",
     windowsHide: true,
     timeout: 15_000,
-    env: { ...process.env, POPO_SETUP_TEST_MODE: "1" }
+    env: testEnv
   });
   try {
     const valid = validate(validXmlPath);
@@ -711,10 +759,11 @@ test("installer accepts only the fixed least-privilege logon task definition", {
       encoding: "utf8",
       windowsHide: true,
       timeout: 15_000,
-      env: { ...process.env, POPO_SETUP_TEST_MODE: "1" }
+      env: testEnv
     });
     assert.equal(missingTask.status, 2, missingTask.stdout + missingTask.stderr);
   } finally {
+    cleanupSetupTestRegistry(testEnv);
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
@@ -740,7 +789,7 @@ test("installer registers, reads back, starts and removes the per-install logon 
   writeAgentReleaseManifest(agentRoot);
   compileAgent(agentExecutable);
   compileSetup(setupExecutable);
-  const testEnv = { ...process.env, POPO_SETUP_TEST_MODE: "1" };
+  const testEnv = setupTestEnvironment(sandbox);
   try {
     const install = spawnSync(setupExecutable, [
       "--quiet", "--test-agent-startup", "--install-root", sandbox
@@ -780,6 +829,7 @@ test("installer registers, reads back, starts and removes the per-install logon 
       windowsHide: true,
       timeout: 15_000
     });
+    cleanupSetupTestRegistry(testEnv);
     assert.notEqual(query.status, 0);
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

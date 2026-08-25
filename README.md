@@ -22,7 +22,9 @@ POPO 原来的“三个点 → 下载”保持不变，仍然可以用于服务�
 4. 安装完成后只会打开准备好的 `Extension` 文件夹，不会自动打开 Chrome 扩展页。
 5. 首次使用时由用户自行打开 Chrome 扩展管理页，点击“加载已解压的扩展程序”，选择该文件夹；添加后立即可用。
 
-绿色安装助手使用固定扩展 ID `coocdgkmbpkacapjlmnmemebmmdahjaa`，不申请管理员权限、不修改 Chrome 企业策略。再次运行安装助手时会自动识别原位置，可直接覆盖更新或修复正式版；也可以选择新位置完成跨盘迁移，下载记录和设置会保留，Chrome 当前加载的扩展路径继续可用。后续自动更新会沿用已保存的安装位置。
+绿色安装助手使用固定扩展 ID `coocdgkmbpkacapjlmnmemebmmdahjaa`，不申请管理员权限、不修改 Chrome 企业策略。首页只显示本次版本或“旧版 → 新版”，主按钮会根据本机状态自动显示安装、覆盖升级、修复或迁移。下载记录和设置会保留，Chrome 当前加载的扩展路径继续可用；后续自动更新会沿用已保存的安装位置。
+
+覆盖更新、修复或迁移需要替换 Gopeed 组件时，安装助手会先暂停扩展自动启动 Gopeed。若 Gopeed 正在运行，请按提示从系统托盘正常退出后点击“重试”；此时 Gopeed 不会再被立即拉起，安装完成后自动恢复连接，下载记录和设置不会丢失。
 
 扩展不会改动 Gopeed 的全局保存目录。点击扩展弹窗中的“选择文件夹”可以调用 Windows 系统文件夹选择窗口；路径不能手工输入。每个文件保存到：
 
@@ -34,15 +36,26 @@ POPO 原来的“三个点 → 下载”保持不变，仍然可以用于服务�
 powershell -ExecutionPolicy Bypass -File .\native-host\install.ps1 -BundledGopeedRoot .\Gopeed
 ```
 
+## Dev 绿色版开发
+
+日常开发和 POPO 真实页面验收使用独立 Dev 绿色版，不再把仓库源码目录直接加载成“POPO 稳定下载助手”：
+
+```powershell
+npm run build:dev-package
+```
+
+Dev 包使用独立的扩展 ID、Native Messaging Host、Agent 任务名、注册表位置和 `POPODevDownloader` 安装目录，不会覆盖正式绿色版。Dev 扩展不访问腾讯云 stable 更新通道，也不生成 `latest.json`。安装和加载方法见 [`DEV-TESTING.md`](DEV-TESTING.md)。
+
 ## 正式版打包
 
 ```powershell
+$env:POPO_DIAGNOSTIC_DSN = '<GitHub 仓库变量中的官方 Sentry DSN>'
 npm run build:release-package
 ```
 
 GitHub Release 与腾讯云稳定通道的自动发布、密钥配置和失败恢复见 [`docs/RELEASING.md`](docs/RELEASING.md)。
 
-输出位于 `dist`，包含正式 ZIP、SHA-256 校验文件和上传到腾讯云 COS 的 `latest.json`。构建时使用 Windows DPAPI 保护的仓库外发布私钥为更新清单签名。
+输出位于 `dist`，包含正式 ZIP、SHA-256 校验文件和上传到腾讯云 COS 的 `latest.json`。构建时使用 Windows DPAPI 保护的仓库外发布私钥为更新清单签名，并要求内置有效的诊断接收地址；缺少配置时不会产生可误发的正式包。
 
 已安装正式版的电脑会在 Chrome 启动后和每 6 小时检查稳定通道。没有活动下载任务时，本机助手下载并验证完整候选包，调用现有事务安装器切换版本，成功后自动重新加载扩展；失败则保留旧版本。
 
@@ -77,7 +90,7 @@ npm ci
 npm run build:runtime
 ```
 
-修改代码后打开 `chrome://extensions/`，找到“POPO 稳定下载助手”，点击重新加载。
+修改代码后重新构建 Dev 包，再打开 `chrome://extensions/`，找到“POPO Dev 下载助手”并点击重新加载。Chrome 不会在源码改动后自动重新加载已解压扩展。
 
 ## 验证命令
 

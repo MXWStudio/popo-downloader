@@ -21,6 +21,10 @@ test("本机助手以 Native Messaging 提供受限的系统操作", () => {
   assert.match(source, /String\.Equals\(action, "check_update"/);
   assert.match(source, /String\.Equals\(action, "apply_update"/);
   assert.match(source, /String\.Equals\(action, "update_status"/);
+  assert.match(source, /GetInstalledVersion\(productRoot\)/);
+  assert.match(source, /CompareVersions\(manifest\.version, installedVersion\)/);
+  assert.match(source, /runtimeMatchesInstalled/);
+  assert.match(source, /--current-version " \+ QuoteArgument\(installedVersion\)/);
   assert.match(source, /UpdateSigningPublicKeyBase64/);
   assert.match(source, /VerifyData/);
   assert.match(source, /ClassifyUpdateCheckError/);

@@ -734,6 +734,61 @@ test("directory navigation keeps controls below native cover and mounts them onc
   });
   expect(transitionCoverHidesButton).toBe(true);
   await page.evaluate(() => document.querySelector(".popo-native-transition-cover").remove());
+  const pointerIntentHidesControls = await page.evaluate(async () => {
+    const name = document.querySelector(
+      '[data-test-id="virtuoso-scroller"] .topName'
+    );
+    name.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      pointerId: 1,
+      pointerType: "mouse"
+    }));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const button = document.querySelector("button.popo-stable-download-button");
+    return {
+      intent: document.documentElement.getAttribute("data-popo-directory-pointer-intent"),
+      visibility: getComputedStyle(button).visibility,
+      pointerEvents: getComputedStyle(button).pointerEvents
+    };
+  });
+  expect(pointerIntentHidesControls).toEqual({
+    intent: "true",
+    visibility: "hidden",
+    pointerEvents: "none"
+  });
+  await page.waitForTimeout(750);
+  await expect(page.locator("html")).not.toHaveAttribute("data-popo-directory-pointer-intent", "true");
+  await expect(page.locator("button.popo-stable-download-button")).toBeVisible();
+
+  const firstNativeTeardownFrame = await page.evaluate(async () => {
+    const list = document.querySelector('[data-test-id="virtuoso-item-list"]');
+    list.replaceChildren();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    return {
+      buttonCount: document.querySelectorAll("button.popo-stable-download-button").length,
+      transition: document.documentElement.getAttribute("data-popo-directory-transition"),
+      overlay: Boolean(document.querySelector("#popo-directory-transition-overlay"))
+    };
+  });
+  expect(firstNativeTeardownFrame).toEqual({
+    buttonCount: 0,
+    transition: "true",
+    overlay: true
+  });
+  await page.evaluate(() => {
+    document.querySelector('[data-test-id="virtuoso-scroller"]').outerHTML = `
+      <div data-test-id="virtuoso-scroller">
+        <div data-test-id="virtuoso-item-list">
+          <div data-item-index="0" data-known-size="48" style="display:flex;width:900px;height:48px;align-items:center">
+            <div class="pageName" style="flex:1"><span class="drive-icon-folder"></span><span class="topName">旧目录文件夹</span></div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+  await expect(page.locator("button.popo-stable-download-button")).toHaveCount(1);
+  await expect(page.locator("#popo-directory-transition-overlay")).toHaveCount(0);
   await page.evaluate(() => {
     const tooltip = document.createElement("div");
     tooltip.className = "popo-native-tooltip";

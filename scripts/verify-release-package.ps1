@@ -66,6 +66,8 @@ $expectedRoot = "POPO-Stable-Downloader-$($manifest.version)-win-x64/"
 $requiredEntries = @(
   ($expectedRoot + 'POPO-Setup.exe'),
   ($expectedRoot + 'extension/manifest.json'),
+  ($expectedRoot + 'extension/runtime/popo-runtime.js'),
+  ($expectedRoot + 'extension/runtime/popo-runtime.cjs'),
   ($expectedRoot + 'native-host/bin/PopoFolderPickerHost.exe'),
   ($expectedRoot + 'native-host/bin/.popo-native-version'),
   ($expectedRoot + 'agent/bin/PopoAgent.exe'),
@@ -95,6 +97,19 @@ try {
   }
   if ([string]$extensionManifest.version -ne [string]$manifest.chromeVersion) {
     throw 'Packaged Chrome version does not match latest.json.'
+  }
+  $runtimeEntry = $archive.Entries | Where-Object {
+    $_.FullName.Replace('\', '/') -eq ($expectedRoot + 'extension/runtime/popo-runtime.js')
+  } | Select-Object -First 1
+  $runtimeReader = New-Object System.IO.StreamReader($runtimeEntry.Open())
+  try {
+    $runtimeSource = $runtimeReader.ReadToEnd()
+  }
+  finally {
+    $runtimeReader.Dispose()
+  }
+  if ($runtimeSource -notmatch 'https://[A-Za-z0-9_-]{8,128}@[A-Za-z0-9.-]+\.ingest(?:\.us)?\.sentry\.io/\d{1,32}') {
+    throw 'Packaged stable runtime does not contain a valid official diagnostic receiver.'
   }
   $releaseManifestEntry = $archive.Entries | Where-Object {
     $_.FullName.Replace('\', '/') -eq ($expectedRoot + 'release-manifest.json')
@@ -135,4 +150,5 @@ finally {
   Sha256 = $actualHash
   SignatureValid = $signatureValid
   RequiredEntries = $requiredEntries.Count
+  DiagnosticReceiverConfigured = $true
 } | ConvertTo-Json -Compress

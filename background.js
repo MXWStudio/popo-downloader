@@ -46,7 +46,11 @@ const PUMP_ALARM = "popo-stable-downloader-pump";
 const WATCHDOG_ALARM = "popo-stable-downloader-watchdog";
 const UPDATE_ALARM = "popo-stable-downloader-update";
 const DIAGNOSTIC_FLUSH_ALARM = "popo-stable-downloader-diagnostics";
-const FOLDER_PICKER_HOST = "com.popo.stable_downloader.folder_picker";
+const STABLE_FOLDER_PICKER_HOST = "com.popo.stable_downloader.folder_picker";
+const DEV_FOLDER_PICKER_HOST = "com.popo.dev_downloader.folder_picker";
+const FOLDER_PICKER_HOST = isDevelopmentBuild()
+  ? DEV_FOLDER_PICKER_HOST
+  : STABLE_FOLDER_PICKER_HOST;
 const AGENT_PROTOCOL_VERSION = 2;
 const AGENT_MINIMUM_PROTOCOL_VERSION = 1;
 const MAX_RETAINED_AGENT_SHADOW_COMPARISONS = 64;
@@ -88,12 +92,14 @@ const workerFrameWaiters = new Map();
 const popupUiPorts = new Set();
 const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
 const UPDATE_CHECK_PERIOD_MINUTES = 6 * 60;
+const FAILED_UPDATE_RETRY_THROTTLE_MS = 30 * 1000;
 const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
 const runtimeDiagnostics = globalThis.PopoRuntime?.diagnostics || null;
 const runtimeNetworkMonitor = globalThis.PopoRuntime?.networkMonitor || null;
 const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
 const runtimeWorkflow = globalThis.PopoRuntime?.workflow || null;
 let automaticUpdateLocked = false;
+let lastFailedUpdateRetryAt = 0;
 let diagnosticFlushLocked = false;
 const DIAGNOSTIC_EVENT_CODES = new Set([
   "BACKGROUND_UNCAUGHT_ERROR",
@@ -1417,7 +1423,9 @@ async function checkGopeedConnection(settings, stateToUpdate = null) {
         action: "ensure_gopeed"
       });
       if (!nativeResult?.ok || !nativeResult.endpoint) {
-        throw new Error(nativeResult?.error || "本机助手没有返回 Gopeed 地址");
+        const nativeFailure = new Error(nativeResult?.error || "本机助手没有返回 Gopeed 地址");
+        nativeFailure.popoMaintenance = Boolean(nativeResult?.maintenance);
+        throw nativeFailure;
       }
       effectiveSettings = mergeSettings({
         ...effectiveSettings,
@@ -1428,7 +1436,9 @@ async function checkGopeedConnection(settings, stateToUpdate = null) {
       config = await getGopeedConfig(effectiveSettings, { timeoutMs: 5000 });
     } catch (nativeError) {
       const nativeDetail = String(nativeError?.message || nativeError).replace(/^Error:\s*/, "");
-      const detail = `${firstError}；内置 Gopeed 启动失败：${nativeDetail}`;
+      const detail = nativeError?.popoMaintenance
+        ? nativeDetail
+        : `${firstError}；内置 Gopeed 启动失败：${nativeDetail}`;
       if (stateToUpdate) {
         stateToUpdate.settings = effectiveSettings;
         stateToUpdate.gopeedConnected = false;
@@ -5218,6 +5228,15 @@ async function runAutomaticUpdateCheck() {
     await saveAgentShadowComparison(shadow, check);
     if (!check?.ok) throw new Error(check?.error || "无法读取签名更新清单");
     if (!check.available) {
+      if (check.runtimeMatchesInstalled === false) {
+        await saveAutomaticUpdateStatus({
+          state: "path_mismatch",
+          currentVersion,
+          targetVersion: check.installedVersion || check.version,
+          message: "当前 Chrome 运行版本与绿色安装版本不一致，请切回绿色版 Extension 目录。"
+        });
+        return;
+      }
       await saveAutomaticUpdateStatus({
         state: "up_to_date",
         currentVersion,
@@ -5265,6 +5284,25 @@ async function runAutomaticUpdateCheck() {
   } finally {
     automaticUpdateLocked = false;
   }
+}
+
+async function retryFailedAutomaticUpdateOnStatusRead(status) {
+  if (isDevelopmentBuild() || status?.state !== "failed" || automaticUpdateLocked) {
+    return status;
+  }
+  const now = Date.now();
+  if (now - lastFailedUpdateRetryAt < FAILED_UPDATE_RETRY_THROTTLE_MS) {
+    return status;
+  }
+  lastFailedUpdateRetryAt = now;
+  const checking = await saveAutomaticUpdateStatus({
+    state: "checking",
+    currentVersion: chrome.runtime.getManifest().version,
+    targetVersion: status?.targetVersion,
+    message: "正在重新检查正式版更新。"
+  });
+  void runAutomaticUpdateCheck();
+  return checking;
 }
 
 function scheduleAutomaticUpdates(delayInMinutes) {
@@ -5386,15 +5424,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case "GET_UPDATE_STATUS": {
         const data = await chrome.storage.local.get("popoUpdateStatus");
+        const updateStatus = data.popoUpdateStatus || {
+          state: "idle",
+          currentVersion: chrome.runtime.getManifest().version,
+          targetVersion: "",
+          message: "",
+          updatedAt: ""
+        };
         return {
           ok: true,
-          updateStatus: data.popoUpdateStatus || {
-            state: "idle",
-            currentVersion: chrome.runtime.getManifest().version,
-            targetVersion: "",
-            message: "",
-            updatedAt: ""
-          }
+          updateStatus: await retryFailedAutomaticUpdateOnStatusRead(updateStatus)
         };
       }
       case "GET_UPDATE_DIAGNOSTICS":

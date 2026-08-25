@@ -69,6 +69,11 @@ test("release package includes the bridge agent and one compatible component man
   assert.match(packageVerifier, /agent\/bin\/release-manifest\.json/);
   assert.match(packageVerifier, /Packaged component version is inconsistent/);
   assert.match(packageVerifier, /Packaged update protocol is not compatible/);
+  assert.match(packageVerifier, /extension\/runtime\/popo-runtime\.js/);
+  assert.match(packageVerifier, /Packaged stable runtime does not contain a valid official diagnostic receiver/);
+  assert.match(buildScript, /POPO_DIAGNOSTIC_DSN is required when building a stable package/);
+  assert.match(buildScript, /diagnosticConfiguration\(\)/);
+  assert.match(buildScript, /valid official diagnostic receiver/);
   assert.doesNotMatch(buildScript, /\/define:POPO_(?:AGENT|SETUP)_TEST/);
 });
 
@@ -79,6 +84,22 @@ test("release package signing supports GitHub Actions without removing local DPA
   assert.match(buildScript, /ReleaseNotesPath/);
   assert.match(buildScript, /Remove-Item Env:POPO_RELEASE_SIGNING_KEY_BASE64/);
   assert.match(buildScript, /SkipRuntimeBuild/);
+});
+
+test("development green package is isolated from the stable release channel", () => {
+  assert.equal(
+    packageJson.scripts["build:dev-package"],
+    "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev"
+  );
+  assert.equal(
+    packageJson.scripts["build:release-package"],
+    "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Stable"
+  );
+  assert.match(buildScript, /\$channelManifestPath = if \(\$isDev\) \{ '' \}/);
+  assert.match(buildScript, /if \(-not \$isDev\) \{[\s\S]*\$channelManifest = \[ordered\]@\{/);
+  assert.match(buildScript, /DEV-TESTING\.md/);
+  assert.match(buildScript, /devManifest\.key = \$devExtensionKey/);
+  assert.match(buildScript, /devManifest\.version_name = \$versionName/);
 });
 
 test("COS publisher reads credentials from the environment and never accepts them as arguments", () => {
