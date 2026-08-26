@@ -1,5 +1,11 @@
 # 更新记录
 
+## v0.7.7（2026-08-26）
+
+- 延续面向普通用户的 Single EXE 安装入口、Windows PE Version metadata、Bootstrapper TEMP 安全清理和与正式 ZIP 完全一致的内嵌 payload。
+- Stable 自动更新仍使用签名 ZIP，`latest.json` 不指向 EXE，并保持从 0.7.5 到 0.7.7 的更新兼容合同。
+- 修复 Windows CI 中维护模式事务测试的同步竞态：测试现在通过显式 helper readiness 和独立 observer，等待 maintenance marker 激活后 Native Host registration 真正进入暂停状态再固化证据；不改变 Setup、Native Host 或 Gopeed 的生产行为。
+
 ## v0.7.6（2026-08-26）
 
 - 新增面向普通用户的 Single EXE 安装入口；EXE 内嵌并使用与正式 ZIP 完全相同的 release payload，继续保留 ZIP 自动更新兼容性，`latest.json` 仍只指向 ZIP。

@@ -146,39 +146,54 @@ function runSetup(setupExecutable, installRoot, options = {}) {
   });
 }
 
-function compileMaintenanceSentinel(executable) {
-  const source = executable + ".cs";
-  fs.writeFileSync(source, String.raw`
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.Threading;
-using Microsoft.Win32;
-
-internal static class GopeedSentinel
-{
-    private static int Main(string[] args)
-    {
-        string marker = Path.Combine(args[0], "Updates", "maintenance.json");
-        string evidence = args[1];
-        string registryPath = args[2];
-        for (int attempt = 0; attempt < 200 && !File.Exists(marker); attempt++)
-        {
-            Thread.Sleep(100);
-        }
-        if (!File.Exists(marker)) return 2;
-        string registration = "missing";
-        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(registryPath, false))
-        {
-            object value = key == null ? null : key.GetValue("");
-            registration = value == null ? "paused" : "registered";
-        }
-        File.WriteAllText(evidence, "marker=active;nativeHost=" + registration);
-        Thread.Sleep(Timeout.Infinite);
-        return 0;
-    }
+function childHasExited(child) {
+  return !child || child.exitCode !== null || child.signalCode !== null;
 }
-`, "utf8");
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForCondition(condition, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 8_000;
+  const intervalMs = options.intervalMs ?? 25;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (condition()) return;
+    await delay(intervalMs);
+  }
+  const details = typeof options.describeFailure === "function"
+    ? options.describeFailure()
+    : options.describeFailure;
+  assert.fail(details || `condition was not met within ${timeoutMs} ms`);
+}
+
+async function waitForHelperReady(child, readyPath, label, describeFailure) {
+  await waitForCondition(() => {
+    if (fs.existsSync(readyPath) && !childHasExited(child)) return true;
+    if (childHasExited(child)) {
+      assert.fail(`${label} exited before ready\n${describeFailure()}`);
+    }
+    return false;
+  }, {
+    timeoutMs: 8_000,
+    describeFailure: () => `${label} did not become ready\n${describeFailure()}`
+  });
+}
+
+async function stopChildProcess(child, label) {
+  if (childHasExited(child)) return;
+  child.kill();
+  await waitForCondition(() => childHasExited(child), {
+    timeoutMs: 5_000,
+    describeFailure: () => `${label} did not exit during test cleanup; pid=${child.pid}; ` +
+      `exitCode=${child.exitCode}; signalCode=${child.signalCode}`
+  });
+}
+
+function compileTestHelper(executable, sourceText) {
+  const source = executable + ".cs";
+  fs.writeFileSync(source, sourceText, "utf8");
   const result = spawnSync(compiler, [
     "/nologo",
     "/target:winexe",
@@ -192,6 +207,137 @@ internal static class GopeedSentinel
   });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   fs.rmSync(source, { force: true });
+}
+
+function compileMaintenanceObserver(executable) {
+  compileTestHelper(executable, String.raw`
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using Microsoft.Win32;
+
+internal static class MaintenanceObserver
+{
+    private static void WriteAtomically(string path, string content)
+    {
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temporary, content);
+        File.Move(temporary, path);
+    }
+
+    private static void WriteStatus(
+        string path,
+        bool markerObserved,
+        bool markerCurrentlyExists,
+        string lastNativeHostState,
+        string firstMarkerObservedAt,
+        string pausedObservedAt)
+    {
+        File.WriteAllText(path,
+            "markerObserved=" + markerObserved.ToString().ToLowerInvariant() +
+            ";markerCurrentlyExists=" + markerCurrentlyExists.ToString().ToLowerInvariant() +
+            ";lastNativeHostState=" + lastNativeHostState +
+            ";firstMarkerObservedAt=" + firstMarkerObservedAt +
+            ";pausedObservedAt=" + pausedObservedAt);
+    }
+
+    private static string GetNativeHostState(string registryPath)
+    {
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(registryPath, false))
+        {
+            object value = key == null ? null : key.GetValue("");
+            return value == null ? "paused" : "registered";
+        }
+    }
+
+    private static int Main(string[] args)
+    {
+        string marker = Path.Combine(args[0], "Updates", "maintenance.json");
+        string evidence = args[1];
+        string registryPath = args[2];
+        string ready = args[3];
+        string status = args[4];
+        bool markerObserved = false;
+        string lastNativeHostState = "not-checked";
+        string firstMarkerObservedAt = "";
+        string pausedObservedAt = "";
+        WriteStatus(status, false, false, lastNativeHostState, "", "");
+        WriteAtomically(ready, Process.GetCurrentProcess().Id.ToString());
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow <= deadline)
+        {
+            bool markerCurrentlyExists = File.Exists(marker);
+            if (!markerObserved)
+            {
+                if (!markerCurrentlyExists)
+                {
+                    WriteStatus(status, false, false, lastNativeHostState, "", "");
+                    Thread.Sleep(25);
+                    continue;
+                }
+                markerObserved = true;
+                firstMarkerObservedAt = DateTime.UtcNow.ToString("O");
+            }
+
+            if (!markerCurrentlyExists)
+            {
+                WriteStatus(status, true, false, lastNativeHostState,
+                    firstMarkerObservedAt, pausedObservedAt);
+                return 3;
+            }
+
+            lastNativeHostState = GetNativeHostState(registryPath);
+            WriteStatus(status, true, true, lastNativeHostState,
+                firstMarkerObservedAt, pausedObservedAt);
+            if (lastNativeHostState == "paused")
+            {
+                if (!File.Exists(marker))
+                {
+                    WriteStatus(status, true, false, lastNativeHostState,
+                        firstMarkerObservedAt, pausedObservedAt);
+                    return 3;
+                }
+                pausedObservedAt = DateTime.UtcNow.ToString("O");
+                WriteStatus(status, true, true, lastNativeHostState,
+                    firstMarkerObservedAt, pausedObservedAt);
+                WriteAtomically(evidence, "marker=active;nativeHost=paused");
+                return 0;
+            }
+            Thread.Sleep(25);
+        }
+        WriteStatus(status, markerObserved, File.Exists(marker), lastNativeHostState,
+            firstMarkerObservedAt, pausedObservedAt);
+        return 2;
+    }
+}
+`);
+}
+
+function compileGopeedSentinel(executable) {
+  compileTestHelper(executable, String.raw`
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+
+internal static class GopeedSentinel
+{
+    private static void WriteAtomically(string path, string content)
+    {
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temporary, content);
+        File.Move(temporary, path);
+    }
+
+    private static int Main(string[] args)
+    {
+        WriteAtomically(args[0], Process.GetCurrentProcess().Id.ToString());
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+}
+`);
 }
 
 after(() => {
@@ -351,7 +497,7 @@ test("development green install cannot overwrite a stable green install", {
 
 test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复本机助手", {
   timeout: 60_000
-}, (t) => {
+}, async (t) => {
   if (!fs.existsSync(compiler)) {
     t.skip("Windows .NET Framework compiler is unavailable");
     return;
@@ -359,8 +505,41 @@ test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复�
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-maintenance-repair-"));
   const packageRoot = path.join(sandbox, "package");
   const installRoot = path.join(sandbox, "installed");
+  const observerExecutable = path.join(sandbox, "maintenance-observer.exe");
+  const observerReady = path.join(sandbox, "maintenance-observer.ready");
+  const observerStatus = path.join(sandbox, "maintenance-observer.status");
+  const gopeedReady = path.join(sandbox, "gopeed-sentinel.ready");
   const evidence = path.join(sandbox, "maintenance-evidence.txt");
+  const marker = path.join(installRoot, "Updates", "maintenance.json");
+  let observerProcess;
   let gopeedProcess;
+  let repair;
+  let nativeRegistryPath = "";
+  const describeFailure = () => {
+    let observerState = "missing";
+    try {
+      if (fs.existsSync(observerStatus)) observerState = fs.readFileSync(observerStatus, "utf8");
+    } catch (error) {
+      observerState = `unreadable: ${error.message}`;
+    }
+    const registry = nativeRegistryPath
+      ? snapshotRegistryKey(`HKCU\\${nativeRegistryPath}`)
+      : { status: "not-ready", stdout: "", stderr: "" };
+    return [
+      `observer pid=${observerProcess?.pid ?? "none"}; exitCode=${observerProcess?.exitCode ?? "null"}; ` +
+        `signalCode=${observerProcess?.signalCode ?? "null"}`,
+      `gopeed pid=${gopeedProcess?.pid ?? "none"}; exitCode=${gopeedProcess?.exitCode ?? "null"}; ` +
+        `signalCode=${gopeedProcess?.signalCode ?? "null"}`,
+      `observer ready exists=${fs.existsSync(observerReady)}`,
+      `observer status=${observerState}`,
+      `gopeed ready exists=${fs.existsSync(gopeedReady)}`,
+      `maintenance marker exists=${fs.existsSync(marker)}`,
+      `native host registry status=${registry.status}; stdout=${registry.stdout}; stderr=${registry.stderr}`,
+      `setup status=${repair?.status ?? "not-started"}`,
+      `setup stdout=${repair?.stdout ?? ""}`,
+      `setup stderr=${repair?.stderr ?? ""}`
+    ].join("\n");
+  };
   try {
     buildFixture(packageRoot, "0.7.5", "maintenance-repair");
     const setupExecutable = compileSetup(packageRoot);
@@ -373,7 +552,7 @@ test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复�
     const registrySuffix = crypto.createHash("sha256")
       .update(path.resolve(path.dirname(installRoot)).toUpperCase(), "utf8")
       .digest("hex").slice(0, 24);
-    const nativeRegistryPath = `Software\\POPOSetupTests\\SetupTransaction_${registrySuffix}` +
+    nativeRegistryPath = `Software\\POPOSetupTests\\SetupTransaction_${registrySuffix}` +
       "\\NativeMessagingHosts\\com.popo.stable_downloader.folder_picker";
     const gopeedExecutable = path.join(
       installRoot,
@@ -381,23 +560,57 @@ test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复�
       "Gopeed",
       "gopeed.exe"
     );
-    compileMaintenanceSentinel(gopeedExecutable);
-    gopeedProcess = spawn(gopeedExecutable, [installRoot, evidence, nativeRegistryPath], {
+    compileMaintenanceObserver(observerExecutable);
+    compileGopeedSentinel(gopeedExecutable);
+    observerProcess = spawn(
+      observerExecutable,
+      [installRoot, evidence, nativeRegistryPath, observerReady, observerStatus],
+      { windowsHide: true, stdio: "ignore" }
+    );
+    gopeedProcess = spawn(gopeedExecutable, [gopeedReady], {
       windowsHide: true,
       stdio: "ignore"
     });
+    await waitForHelperReady(
+      observerProcess,
+      observerReady,
+      "maintenance observer",
+      describeFailure
+    );
+    await waitForHelperReady(gopeedProcess, gopeedReady, "Gopeed sentinel", describeFailure);
+    assert.ok(!childHasExited(observerProcess), describeFailure());
+    assert.ok(!childHasExited(gopeedProcess), describeFailure());
 
-    const repair = runSetup(setupExecutable, installRoot, {
+    repair = runSetup(setupExecutable, installRoot, {
       register: true,
       repair: true,
       skipAgentStart: true
     });
     assert.equal(repair.status, 0, repair.stdout + repair.stderr);
+    await waitForCondition(() => {
+      if (fs.existsSync(evidence)) return true;
+      if (childHasExited(observerProcess)) {
+        assert.fail("maintenance observer exited before producing evidence\n" + describeFailure());
+      }
+      return false;
+    }, {
+      timeoutMs: 11_000,
+      describeFailure: () => "maintenance evidence was not produced\n" + describeFailure()
+    });
+    await waitForCondition(() => childHasExited(observerProcess), {
+      timeoutMs: 8_000,
+      describeFailure: () => "maintenance observer did not exit\n" + describeFailure()
+    });
+    await waitForCondition(() => childHasExited(gopeedProcess), {
+      timeoutMs: 8_000,
+      describeFailure: () => "Setup did not automatically stop the Gopeed sentinel\n" +
+        describeFailure()
+    });
     assert.equal(
       fs.readFileSync(evidence, "utf8"),
       "marker=active;nativeHost=paused"
     );
-    assert.ok(!fs.existsSync(path.join(installRoot, "Updates", "maintenance.json")));
+    assert.ok(!fs.existsSync(marker));
     const registered = snapshotRegistryKey(`HKCU\\${nativeRegistryPath}`);
     assert.equal(registered.status, 0, registered.stdout + registered.stderr);
     assert.match(registered.stdout, /com\.popo\.stable_downloader\.folder_picker\.json/i);
@@ -414,7 +627,8 @@ test("修复时暂停扩展自动拉起 Gopeed，自动退出后继续并恢复�
     assert.equal(restored.status, 0, restored.stdout + restored.stderr);
     assert.match(restored.stdout, /com\.popo\.stable_downloader\.folder_picker\.json/i);
   } finally {
-    if (gopeedProcess && gopeedProcess.exitCode === null) gopeedProcess.kill();
+    await stopChildProcess(observerProcess, "maintenance observer");
+    await stopChildProcess(gopeedProcess, "Gopeed sentinel");
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
