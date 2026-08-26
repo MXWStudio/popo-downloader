@@ -26,7 +26,9 @@
 3. 先把版本提交推送到 `main`，再创建指向该提交的附注标签 `vX.Y.Z` 并推送。
 4. 标签推送会自动触发发布流程。
 
-流程会依次完成版本闸门、完整测试、签名打包、GitHub Release 草稿、腾讯云不可变版本包上传和公网回读。只有版本包哈希与大小验证通过后，才会公开 GitHub Release，并最后切换 `stable/latest.json`。
+流程会依次完成版本闸门、完整测试、签名 ZIP 打包、从同一 ZIP 构建单 EXE、ZIP/EXE 一致性校验、GitHub Release 草稿、腾讯云不可变 ZIP 上传和公网回读。只有 ZIP、EXE 与内嵌 payload 全部验证通过后，才会公开 GitHub Release，并最后切换 `stable/latest.json`。
+
+GitHub Release 包含单 EXE、EXE SHA-256、ZIP、ZIP SHA-256 和 `latest.json`。腾讯云 stable 自动更新目录继续只发布版本 ZIP 与最后切换的 `latest.json`；清单的 `artifact` 和 `url` 必须始终指向 ZIP，旧客户端不会经过 Bootstrapper。
 
 所有正式发布共用一个并发锁；线上版本高于目标版本时会拒绝发布，避免两个标签同时运行或手动恢复旧标签导致稳定通道倒退。
 

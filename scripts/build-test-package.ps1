@@ -44,6 +44,8 @@ $stagingRoot = Join-Path $distRoot $packageName
 $zipPath = Join-Path $distRoot "$packageName.zip"
 $checksumPath = "$zipPath.sha256.txt"
 $channelManifestPath = if ($isDev) { '' } else { Join-Path $distRoot 'latest.json' }
+$bootstrapperPath = if ($isDev) { '' } else { Join-Path $distRoot "$packageName.exe" }
+$bootstrapperChecksumPath = if ($isDev) { '' } else { "$bootstrapperPath.sha256.txt" }
 $updateBaseUrl = 'https://popo-updates-1461466196.cos.ap-guangzhou.myqcloud.com/stable'
 $signingKeyPath = Join-Path $env:LOCALAPPDATA 'POPORelease\release-signing-key.dpapi'
 $gopeedVendorRoot = Join-Path $repoRoot 'vendor\gopeed\v1.9.3'
@@ -135,7 +137,14 @@ foreach ($requiredPath in @(
 
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 $resolvedDist = (Resolve-Path -LiteralPath $distRoot).Path.TrimEnd('\')
-foreach ($target in @($stagingRoot, $zipPath, $checksumPath, $channelManifestPath) | Where-Object { $_ }) {
+foreach ($target in @(
+  $stagingRoot,
+  $zipPath,
+  $checksumPath,
+  $channelManifestPath,
+  $bootstrapperPath,
+  $bootstrapperChecksumPath
+) | Where-Object { $_ }) {
   $fullTarget = [System.IO.Path]::GetFullPath($target)
   if (-not $fullTarget.StartsWith($resolvedDist + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to replace a path outside dist: $fullTarget"
@@ -325,6 +334,22 @@ if (-not $isDev) {
     $channelJson,
     (New-Object System.Text.UTF8Encoding($false))
   )
+
+  $bootstrapperBuildScript = Join-Path $PSScriptRoot 'build-bootstrapper.ps1'
+  if (-not (Test-Path -LiteralPath $bootstrapperBuildScript)) {
+    throw "Bootstrapper build script was not found: $bootstrapperBuildScript"
+  }
+  $bootstrapperSource = Join-Path $repoRoot 'bootstrapper\PopoBootstrapper.cs'
+  $bootstrapperOutput = & $bootstrapperBuildScript `
+    -RepoRoot $repoRoot `
+    -SourcePath $bootstrapperSource `
+    -ZipPath $zipPath `
+    -Version $versionName `
+    -OutputPath $bootstrapperPath
+  $bootstrapperResult = $bootstrapperOutput | Select-Object -Last 1 | ConvertFrom-Json
+  if ([string]$bootstrapperResult.EmbeddedPayloadSha256 -ne $hash) {
+    throw 'Bootstrapper embedded payload hash does not match the official ZIP.'
+  }
 }
 
 Remove-Item -LiteralPath $stagingRoot -Recurse -Force
@@ -338,4 +363,8 @@ Remove-Item -LiteralPath $compileRoot -Recurse -Force
   Sha256 = $hash
   Size = $size
   ChannelManifest = $channelManifestPath
+  Bootstrapper = $bootstrapperPath
+  BootstrapperSha256 = if ($bootstrapperPath) {
+    (Get-FileHash -LiteralPath $bootstrapperPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  } else { '' }
 } | ConvertTo-Json -Compress

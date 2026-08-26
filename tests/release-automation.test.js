@@ -12,6 +12,8 @@ const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "publis
 const buildScript = fs.readFileSync(path.join(root, "scripts", "build-test-package.ps1"), "utf8");
 const cosPublisher = fs.readFileSync(path.join(root, "scripts", "publish-cos-object.py"), "utf8");
 const packageVerifier = fs.readFileSync(path.join(root, "scripts", "verify-release-package.ps1"), "utf8");
+const bootstrapperBuild = fs.readFileSync(path.join(root, "scripts", "build-bootstrapper.ps1"), "utf8");
+const bootstrapperSource = fs.readFileSync(path.join(root, "bootstrapper", "PopoBootstrapper.cs"), "utf8");
 const startupAcceptance = fs.readFileSync(path.join(root, "scripts", "test-agent-startup.ps1"), "utf8");
 const rebootAcceptance = fs.readFileSync(path.join(root, "scripts", "agent-reboot-acceptance.mjs"), "utf8");
 const securityAcceptance = fs.readFileSync(path.join(root, "scripts", "test-agent-security.ps1"), "utf8");
@@ -75,6 +77,29 @@ test("release package includes the bridge agent and one compatible component man
   assert.match(buildScript, /diagnosticConfiguration\(\)/);
   assert.match(buildScript, /valid official diagnostic receiver/);
   assert.doesNotMatch(buildScript, /\/define:POPO_(?:AGENT|SETUP)_TEST/);
+});
+
+test("stable release builds one thin EXE from the exact official ZIP while latest.json stays on ZIP", () => {
+  assert.match(buildScript, /build-bootstrapper\.ps1/);
+  assert.match(buildScript, /-ZipPath \$zipPath/);
+  assert.match(buildScript, /EmbeddedPayloadSha256/);
+  assert.match(bootstrapperBuild, /\$payloadHash = Get-Sha256Hex \$zipPath/);
+  assert.match(bootstrapperBuild, /\/resource:\$zipPath,\$resourceName,private/);
+  assert.match(bootstrapperBuild, /AssemblyFileVersion/);
+  assert.match(bootstrapperBuild, /AssemblyInformationalVersion/);
+  assert.match(bootstrapperBuild, /PopoBootstrapper\.AssemblyInfo\.cs/);
+  assert.match(bootstrapperBuild, /\$generatedSource,\s*\$assemblyInfoPath/);
+  assert.match(bootstrapperSource, /GetManifestResourceStream/);
+  assert.match(bootstrapperSource, /ZipFile\.OpenRead/);
+  assert.match(bootstrapperSource, /ZIP entry escapes the temporary payload root/);
+  assert.match(bootstrapperSource, /setup\.WaitForExit\(\)/);
+  assert.match(bootstrapperSource, /return setup\.ExitCode/);
+  assert.doesNotMatch(bootstrapperSource, /schtasks|NativeMessagingHosts|CurrentVersion\\\\Run/);
+  assert.match(packageVerifier, /latest\.json must continue to reference the official ZIP/);
+  assert.match(packageVerifier, /Bootstrapper embedded payload does not match the official ZIP/);
+  assert.match(packageVerifier, /Bootstrapper Windows version metadata does not match the stable release version/);
+  assert.match(workflow, /\$expectedBootstrapper/);
+  assert.match(workflow, /\$expectedBootstrapper\.sha256\.txt/);
 });
 
 test("release package signing supports GitHub Actions without removing local DPAPI support", () => {

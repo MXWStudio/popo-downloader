@@ -1,6 +1,6 @@
 {
   "name": "popo-stable-downloader",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "description": "POPO 稳定下载助手 Chrome 扩展",
   "scripts": {
@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "npm run build:runtime && npm run typecheck && node --check runtime/popo-runtime.js && node --check runtime/popup.js && node --check runtime/page-ui.js && node --check background.js && node --check content.js && node --check page-api.js && node --check core.js && node --check gopeed.js && node --check queue.js",
     "test": "npm run build:runtime && node --test tests/*.test.js",
+    "test:bootstrapper": "node --test tests/bootstrapper.test.js",
     "test:e2e": "npm run build:runtime && playwright test",
     "check:full": "npm run check && npm test && npm run test:e2e",
     "test:agent-startup:preflight": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agent-startup.ps1",

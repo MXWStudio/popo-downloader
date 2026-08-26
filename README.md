@@ -55,7 +55,7 @@ npm run build:release-package
 
 GitHub Release 与腾讯云稳定通道的自动发布、密钥配置和失败恢复见 [`docs/RELEASING.md`](docs/RELEASING.md)。
 
-输出位于 `dist`，包含正式 ZIP、SHA-256 校验文件和上传到腾讯云 COS 的 `latest.json`。构建时使用 Windows DPAPI 保护的仓库外发布私钥为更新清单签名，并要求内置有效的诊断接收地址；缺少配置时不会产生可误发的正式包。
+输出位于 `dist`，包含面向普通用户的单 EXE、EXE SHA-256、作为唯一正式 payload 和自动更新载体的 ZIP、ZIP SHA-256，以及上传到腾讯云 COS 的 `latest.json`。单 EXE 只负责校验并解压同一次构建产生的 ZIP，再启动现有 `POPO-Setup.exe`；`latest.json` 始终指向 ZIP。构建时使用 Windows DPAPI 保护的仓库外发布私钥为更新清单签名，并要求内置有效的诊断接收地址；缺少配置时不会产生可误发的正式包。
 
 已安装正式版的电脑会在 Chrome 启动后和每 6 小时检查稳定通道。没有活动下载任务时，本机助手下载并验证完整候选包，调用现有事务安装器切换版本，成功后自动重新加载扩展；失败则保留旧版本。
 

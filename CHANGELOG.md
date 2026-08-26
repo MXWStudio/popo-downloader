@@ -1,5 +1,14 @@
 # 更新记录
 
+## v0.7.6（2026-08-26）
+
+- 新增面向普通用户的 Single EXE 安装入口；EXE 内嵌并使用与正式 ZIP 完全相同的 release payload，继续保留 ZIP 自动更新兼容性，`latest.json` 仍只指向 ZIP。
+- Bootstrapper 在解包前校验内嵌 payload 的 SHA-256，并只负责释放 payload、调用现有 `POPO-Setup.exe` 和透传退出码，不重写安装事务、更新协议或回滚机制。
+- 安装完成、用户取消或 payload 校验失败后会安全清理本轮 `POPO-Installer-{GUID}`；修复 Windows 瞬时 sharing violation 导致空 TEMP 根残留的问题，采用有限退避重试并记录最终异常。
+- 正式构建和 Release Verify 新增 EXE、EXE SHA-256、ZIP/内嵌 payload 一致性及安全 cleanup Gate；GitHub Release assets 增加 EXE 与独立 SHA-256，稳定自动更新载体仍为 ZIP。
+- Single EXE 写入并严格验证 Windows PE 版本元数据：`FileVersion` 使用产品版本对应的四段版本（如 `0.7.6.0`），`ProductVersion` 与正式产品版本一致（如 `0.7.6`）；Release Verify 会阻止版本信息缺失、为 `0.0.0.0` 或与正式版本不一致的 EXE 进入发布。
+- 保持普通用户无管理员权限安装，并兼容 0.7.5 的正式 Extension 路径、Gopeed 数据、设置和下载记录；Single EXE 不参与自动升级。
+
 ## v0.7.5（2026-08-25）
 
 - 修复绿色版覆盖更新和迁移时，普通用户无法创建登录启动任务会导致整笔安装回滚的问题：优先使用计划任务；遇到拒绝访问、超时或启动定义校验失败时，自动回退为当前用户 `Run` 启动项。
