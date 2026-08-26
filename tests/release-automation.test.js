@@ -62,6 +62,23 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.doesNotMatch(workflow, /-Method Head/);
 });
 
+test("live stable verification resolves the matching EXE beside the online ZIP", () => {
+  const marker = "- name: Verify the live stable channel";
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1);
+  const liveVerifier = workflow.slice(start);
+
+  assert.match(liveVerifier, /\$verifiedOnline\s*=\s*Get-Content[^\n]+\$onlineManifest[^\n]+ConvertFrom-Json/);
+  assert.match(
+    liveVerifier,
+    /\[System\.IO\.Path\]::ChangeExtension\(\[string\]\$verifiedOnline\.artifact, '\.exe'\)/
+  );
+  assert.match(liveVerifier, /Join-Path 'release-source\/dist' \$bootstrapperName/);
+  assert.match(liveVerifier, /-PackagePath \$packagePath/);
+  assert.match(liveVerifier, /-BootstrapperPath \$bootstrapperPath/);
+  assert.doesNotMatch(liveVerifier, /POPO-Stable-Downloader-0\.7\.7-win-x64\.exe/);
+});
+
 test("release package includes the bridge agent and one compatible component manifest", () => {
   assert.match(buildScript, /PopoAgent\.exe/);
   assert.match(buildScript, /release-manifest\.json/);

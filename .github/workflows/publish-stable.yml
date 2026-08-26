@@ -319,4 +319,8 @@ jobs:
             Start-Sleep -Seconds 3
           }
           if (-not $matched) { throw 'The live stable channel did not switch to the expected release.' }
-          powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/verify-release-package.ps1 -RepoRoot release-source -ManifestPath $onlineManifest -PackagePath "release-source/dist/${{ steps.release.outputs.artifact }}"
+          $verifiedOnline = Get-Content -Raw -LiteralPath $onlineManifest | ConvertFrom-Json
+          $packagePath = Join-Path 'release-source/dist' ([string]$verifiedOnline.artifact)
+          $bootstrapperName = [System.IO.Path]::ChangeExtension([string]$verifiedOnline.artifact, '.exe')
+          $bootstrapperPath = Join-Path 'release-source/dist' $bootstrapperName
+          powershell -NoProfile -ExecutionPolicy Bypass -File automation/scripts/verify-release-package.ps1 -RepoRoot release-source -ManifestPath $onlineManifest -PackagePath $packagePath -BootstrapperPath $bootstrapperPath
