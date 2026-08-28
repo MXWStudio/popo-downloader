@@ -19,6 +19,9 @@ $repoRoot = if ($RepoRoot) {
 } else {
   (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 }
+$devExtensionModulePath = Join-Path $PSScriptRoot 'PopoDevExtension.psm1'
+Import-Module $devExtensionModulePath -Force
+$devExtensionConfig = Get-PopoDevExtensionConfig
 $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json')) | ConvertFrom-Json
 $isDev = $Channel -eq 'Dev'
 $stableVersionName = [string]$manifest.version_name
@@ -27,8 +30,7 @@ if (-not $isDev -and $stableVersionName -match '(?i)(?:^|[-.])dev(?:[-.]|$)') {
   throw 'Refusing to create a signed stable package from a development-marked project. Set manifest.json version_name to a formal release version first.'
 }
 $versionName = if ($isDev) { "$([string]$manifest.version)-dev" } else { $stableVersionName }
-$devExtensionKey = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAktkTv13QYDbQoZCW7Dnk84LsxiHEj0H2a0y7Ir8AY12pAb1hG6vfB7aQ0nyudGhxAmudVdPluPJy3zx48SHAHwu2YJDfVUIdN+LhUU6FkeN9XlHp9dtzYxyO7/oG5NS2XGBu7rPxoJS0Owme5rpj6Oks3oiFI95TaTn2DOVB7FryTbdPTvBX9czDvOxvPG45hABm0Djz/DDX5luSmCXDPCnNkERgkU4f/WTAJFble76uph6RXlyFD5PzdPETpYvngjALceH2t+FcWjf2+CZjwudPkUQRrM/Z1DF77md2ovZV8B9zQnlympk8JQCb44tY1jtvypTE9W1IHaCXjZIizwIDAQAB'
-$devExtensionId = 'folfhehnopknchpoaajfpboibbhnlanf'
+$devExtensionId = $devExtensionConfig.ExtensionId
 
 $distRoot = if ($OutputDirectory) {
   [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -165,38 +167,7 @@ New-Item -ItemType Directory -Path (Join-Path $agentRoot 'bin') -Force | Out-Nul
 New-Item -ItemType Directory -Path $gopeedRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $gopeedLicenseRoot -Force | Out-Null
 
-$extensionFiles = @(
-  'manifest.json',
-  'background.js',
-  'content.js',
-  'core.js',
-  'queue.js',
-  'gopeed.js',
-  'page-api.js',
-  'popup.css',
-  'popup.html'
-)
-foreach ($file in $extensionFiles) {
-  Copy-Item -LiteralPath (Join-Path $repoRoot $file) -Destination (Join-Path $extensionRoot $file)
-}
-if ($isDev) {
-  $stagedManifestPath = Join-Path $extensionRoot 'manifest.json'
-  $devManifest = [System.IO.File]::ReadAllText($stagedManifestPath) | ConvertFrom-Json
-  $devDisplayName = '"POPO Dev \u4e0b\u8f7d\u52a9\u624b"' | ConvertFrom-Json
-  $devDescription = '"\u4e0e\u6b63\u5f0f\u7248\u9694\u79bb\u7684 POPO \u5f00\u53d1\u4e0e\u9a8c\u6536\u52a9\u624b\u3002"' | ConvertFrom-Json
-  $devManifest.name = $devDisplayName
-  $devManifest.version_name = $versionName
-  $devManifest.key = $devExtensionKey
-  $devManifest.description = $devDescription
-  $devManifest.action.default_title = $devDisplayName
-  [System.IO.File]::WriteAllText(
-    $stagedManifestPath,
-    ($devManifest | ConvertTo-Json -Depth 20),
-    (New-Object System.Text.UTF8Encoding($false))
-  )
-}
-Copy-Item -LiteralPath (Join-Path $repoRoot 'assets') -Destination $extensionRoot -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'runtime') -Destination $extensionRoot -Recurse -Force
+Copy-PopoExtensionSource -RepoRoot $repoRoot -DestinationRoot $extensionRoot -Channel $Channel | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $repoRoot 'native-host\FolderPickerHost.cs') -Destination $nativeHostRoot
 if (-not $isDev) {

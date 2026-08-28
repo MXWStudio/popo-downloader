@@ -1,5 +1,11 @@
 # 更新记录
 
+## v0.7.8（2026-08-28）
+
+- 修复 POPO 页面标题缺少文件后缀时，ZIP 下载结果被保存为普通无后缀文件的问题；现在会从服务器下载地址与 Content-Disposition 恢复真实后缀。
+- 已有 `.zip` 或 `.ZIP` 的名称不会重复追加为 `.zip.zip`，重试和重新下载继续使用同一个正确文件名，非 ZIP 与真正无后缀文件不受影响。
+- 固化仓库源码到隔离 Dev Extension 的安全同步流程；Dev 名称、扩展身份和目录与 Stable 保持分离，正式发布包仍只来自仓库的 Stable 构建链路。
+
 ## v0.7.7（2026-08-26）
 
 - 延续面向普通用户的 Single EXE 安装入口、Windows PE Version metadata、Bootstrapper TEMP 安全清理和与正式 ZIP 完全一致的内嵌 payload。

@@ -14,6 +14,7 @@ const {
   makeCsv,
   matchesFilters,
   previewTitleMatchesFile,
+  resolveDownloadFilename,
   sanitizePathSegment,
   selectObservedDownloadUrl,
   selectVirtualListMatch,
@@ -266,6 +267,116 @@ test("关闭目录结构后只保留根目录和文件名", () => {
     preserveStructure: false
   });
   assert.equal(filename, "POPO/video.mp4");
+});
+
+test("页面标题没有后缀时从服务器文件名恢复真实格式", () => {
+  const cases = [
+    ["8.14 志怪月总览", "8.14 志怪月总览.zip"],
+    ["志怪月总览", "志怪月总览.zip"],
+    ["设计源文件", "设计源文件.psd"],
+    ["项目说明", "项目说明.pdf"],
+    ["数据表", "数据表.xlsx"],
+    ["演示文稿", "演示文稿.pptx"],
+    ["视频素材", "视频素材.MP4"],
+    ["未知格式", "未知格式.asset123"]
+  ];
+  for (const [displayName, remoteName] of cases) {
+    const encodedDisposition = encodeURIComponent(`attachment;fileName*=UTF-8''${encodeURIComponent(remoteName)}`);
+    const url = `https://files.example.test/object?response-content-disposition=${encodedDisposition}`;
+    assert.equal(resolveDownloadFilename(displayName, url), `${displayName}${remoteName.slice(displayName.length)}`);
+  }
+});
+
+test("扩展名恢复支持普通和 RFC 5987 Content-Disposition 以及 URL 路径回退", () => {
+  assert.equal(resolveDownloadFilename(
+    "中文资料",
+    "https://files.example.test/object?response-content-disposition=attachment%3Bfilename%2A%3DUTF-8%27%27%25E4%25B8%25AD%25E6%2596%2587%25E8%25B5%2584%25E6%2596%2599.docx"
+  ), "中文资料.docx");
+  assert.equal(resolveDownloadFilename(
+    "录音",
+    "https://files.example.test/object?content-disposition=attachment%3Bfilename%3D%2522recording.flac%2522"
+  ), "录音.flac");
+  assert.equal(resolveDownloadFilename(
+    "图片",
+    "https://files.example.test/archive/photo.webp?signature=valid"
+  ), "图片.webp");
+});
+
+test("扩展名恢复保留复合压缩后缀和带版本号的页面标题", () => {
+  assert.equal(resolveDownloadFilename(
+    "源码归档",
+    "https://files.example.test/source.tar.gz"
+  ), "源码归档.tar.gz");
+  assert.equal(resolveDownloadFilename(
+    "发布包.v2",
+    "https://files.example.test/object?filename=%E5%8F%91%E5%B8%83%E5%8C%85.v2.zip"
+  ), "发布包.v2.zip");
+  assert.equal(resolveDownloadFilename(
+    "源码归档.tar",
+    "https://files.example.test/source.tar.gz"
+  ), "源码归档.tar.gz");
+});
+
+test("扩展名恢复不覆盖已有格式也不猜测真正无后缀文件", () => {
+  assert.equal(resolveDownloadFilename(
+    "报告.pdf",
+    "https://files.example.test/archive/report.pdf"
+  ), "报告.pdf");
+  assert.equal(resolveDownloadFilename(
+    "用户命名.txt",
+    "https://files.example.test/archive/server-name.zip"
+  ), "用户命名.txt");
+  assert.equal(resolveDownloadFilename(
+    "真正无后缀",
+    "https://files.example.test/archive/raw-object"
+  ), "真正无后缀");
+  assert.equal(resolveDownloadFilename("无效地址", "not-a-url"), "无效地址");
+});
+
+test("ZIP 后缀恢复对大小写、重试和重新下载保持幂等", () => {
+  const lowerUrl = "https://files.example.test/archive/material.zip?signature=valid";
+  const upperUrl = "https://files.example.test/archive/material.ZIP?signature=valid";
+  assert.equal(resolveDownloadFilename("material.zip", lowerUrl), "material.zip");
+  assert.equal(resolveDownloadFilename("material.ZIP", lowerUrl), "material.ZIP");
+  assert.equal(resolveDownloadFilename("material", upperUrl), "material.ZIP");
+
+  const firstAttempt = resolveDownloadFilename("material", lowerUrl);
+  const retryAttempt = resolveDownloadFilename(firstAttempt, lowerUrl);
+  const redownloadAttempt = resolveDownloadFilename(retryAttempt, lowerUrl);
+  assert.equal(firstAttempt, "material.zip");
+  assert.equal(retryAttempt, "material.zip");
+  assert.equal(redownloadAttempt, "material.zip");
+});
+
+test("Gopeed 最终任务路径使用补全后的 ZIP 名称", () => {
+  const downloadName = resolveDownloadFilename(
+    "志怪月总览",
+    "https://files.example.test/object?filename=%E5%BF%97%E6%80%AA%E6%9C%88%E6%80%BB%E8%A7%88.zip"
+  );
+  assert.equal(buildDownloadFilename({
+    directoryPath: ["志怪月物料汇总"],
+    name: "志怪月总览",
+    downloadName
+  }, {
+    downloadRoot: "POPO稳定下载",
+    preserveStructure: true
+  }), "POPO稳定下载/志怪月物料汇总/志怪月总览.zip");
+});
+
+test("下载路径使用已解析名称且服务器路径不能改变目标目录", () => {
+  const filename = buildDownloadFilename({
+    directoryPath: ["资料"],
+    name: "展示名称",
+    downloadName: "展示名称.exe"
+  }, {
+    downloadRoot: "POPO",
+    preserveStructure: true
+  });
+  assert.equal(filename, "POPO/资料/展示名称.exe");
+  assert.equal(resolveDownloadFilename(
+    "展示名称",
+    "https://files.example.test/object?filename=..%2F..%2Fevil.exe"
+  ), "展示名称.exe");
 });
 
 test("从嵌套接口响应中提取优先下载地址", () => {

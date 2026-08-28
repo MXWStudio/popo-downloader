@@ -10,6 +10,8 @@ const { spawnSync } = require("node:child_process");
 const root = path.join(__dirname, "..");
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "publish-stable.yml"), "utf8");
 const buildScript = fs.readFileSync(path.join(root, "scripts", "build-test-package.ps1"), "utf8");
+const devExtensionModule = fs.readFileSync(path.join(root, "scripts", "PopoDevExtension.psm1"), "utf8");
+const devExtensionSync = fs.readFileSync(path.join(root, "scripts", "sync-dev-extension.ps1"), "utf8");
 const cosPublisher = fs.readFileSync(path.join(root, "scripts", "publish-cos-object.py"), "utf8");
 const packageVerifier = fs.readFileSync(path.join(root, "scripts", "verify-release-package.ps1"), "utf8");
 const bootstrapperBuild = fs.readFileSync(path.join(root, "scripts", "build-bootstrapper.ps1"), "utf8");
@@ -140,8 +142,15 @@ test("development green package is isolated from the stable release channel", ()
   assert.match(buildScript, /\$channelManifestPath = if \(\$isDev\) \{ '' \}/);
   assert.match(buildScript, /if \(-not \$isDev\) \{[\s\S]*\$channelManifest = \[ordered\]@\{/);
   assert.match(buildScript, /DEV-TESTING\.md/);
-  assert.match(buildScript, /devManifest\.key = \$devExtensionKey/);
-  assert.match(buildScript, /devManifest\.version_name = \$versionName/);
+  assert.match(buildScript, /Import-Module \$devExtensionModulePath -Force/);
+  assert.match(buildScript, /Copy-PopoExtensionSource[^\n]+-Channel \$Channel/);
+  assert.match(devExtensionModule, /\$manifest\.key = \$config\.ExtensionKey/);
+  assert.match(devExtensionModule, /\$manifest\.version_name = "\$\(\[string\]\$manifest\.version\)-dev"/);
+  assert.match(devExtensionSync, /D:\\POPODevDownloader\\Extension/);
+  assert.equal(
+    packageJson.scripts["dev:extension:sync"],
+    "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-dev-extension.ps1"
+  );
 });
 
 test("COS publisher reads credentials from the environment and never accepts them as arguments", () => {

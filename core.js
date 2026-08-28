@@ -24,6 +24,115 @@
     return match ? match[1].toLowerCase() : "";
   }
 
+  const COMPOUND_DOWNLOAD_SUFFIXES = Object.freeze([
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tar.zst",
+    ".tar.lz",
+    ".tar.lz4",
+    ".tar.br"
+  ]);
+
+  function decodeDownloadFilename(value) {
+    let decoded = String(value || "").trim();
+    if (decoded.startsWith('"') && decoded.endsWith('"')) {
+      decoded = decoded.slice(1, -1);
+    }
+    const encoded = decoded.match(/^[^']*'[^']*'(.*)$/s);
+    if (encoded) decoded = encoded[1];
+    for (let pass = 0; pass < 2; pass += 1) {
+      try {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) break;
+        decoded = next;
+      } catch {
+        break;
+      }
+    }
+    decoded = decoded.replace(/\\"/g, '"').trim();
+    if (decoded.startsWith('"') && decoded.endsWith('"')) {
+      decoded = decoded.slice(1, -1);
+    }
+    return decoded.trim();
+  }
+
+  function contentDispositionFilename(value) {
+    const disposition = String(value || "");
+    const encoded = disposition.match(/(?:^|;)\s*filename\*\s*=\s*("[^"]*"|[^;]*)/i);
+    if (encoded?.[1]) return decodeDownloadFilename(encoded[1]);
+    const plain = disposition.match(/(?:^|;)\s*filename\s*=\s*("[^"]*"|[^;]*)/i);
+    return plain?.[1] ? decodeDownloadFilename(plain[1]) : "";
+  }
+
+  function downloadBasename(value) {
+    const text = String(value || "").trim();
+    if (!text || /[\u0000-\u001f]/.test(text)) return "";
+    return text.replace(/\\/g, "/").split("/").pop()?.trim() || "";
+  }
+
+  function remoteDownloadFilename(sourceUrl) {
+    try {
+      const url = new URL(String(sourceUrl || ""));
+      const candidates = [];
+      for (const [key, value] of url.searchParams.entries()) {
+        const lowerKey = key.toLowerCase();
+        if (["response-content-disposition", "content-disposition"].includes(lowerKey)) {
+          candidates.push(contentDispositionFilename(value));
+        }
+      }
+      for (const [key, value] of url.searchParams.entries()) {
+        if (["filename", "file_name", "download_filename"].includes(key.toLowerCase())) {
+          candidates.push(decodeDownloadFilename(value));
+        }
+      }
+      candidates.push(decodeDownloadFilename(url.pathname.split("/").pop() || ""));
+      return candidates
+        .map(downloadBasename)
+        .find((candidate) => extensionOf(candidate)) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function remoteDownloadSuffix(remoteName, displayName) {
+    const remote = downloadBasename(remoteName);
+    if (!remote) return "";
+    const finalMatch = remote.match(/(\.[^.\\/\s<>:"|?*\u0000-\u001f]{1,32})$/);
+    if (!finalMatch) return "";
+    const finalSuffix = finalMatch[1];
+    const lowerRemote = remote.toLowerCase();
+    const compound = COMPOUND_DOWNLOAD_SUFFIXES.find((suffix) => lowerRemote.endsWith(suffix));
+    const display = String(displayName || "").trim();
+    if (display && lowerRemote.startsWith(`${display.toLowerCase()}.`)) {
+      const remainder = remote.slice(display.length);
+      if (/^\.[^.\\/\s<>:"|?*\u0000-\u001f]{1,32}$/.test(remainder)) return remainder;
+      if (compound && remainder.toLowerCase() === compound) {
+        return remote.slice(-compound.length);
+      }
+    }
+    return compound ? remote.slice(-compound.length) : finalSuffix;
+  }
+
+  function resolveDownloadFilename(displayName, sourceUrl) {
+    const display = String(displayName || "").trim();
+    if (!display) return display;
+    const remote = remoteDownloadFilename(sourceUrl);
+    if (!remote) return display;
+    const suffix = remoteDownloadSuffix(remote, display);
+    if (!suffix || display.toLowerCase().endsWith(suffix.toLowerCase())) return display;
+
+    const displayExtension = extensionOf(display);
+    const displaySuffix = displayExtension ? `.${displayExtension}` : "";
+    if (displaySuffix && suffix.toLowerCase().startsWith(`${displaySuffix}.`) &&
+        display.toLowerCase().endsWith(displaySuffix)) {
+      return `${display}${suffix.slice(displaySuffix.length)}`;
+    }
+    const remoteExtendsDisplay = remote.toLowerCase().startsWith(`${display.toLowerCase()}.`);
+    if (displayExtension && !remoteExtendsDisplay) return display;
+    return `${display}${suffix}`;
+  }
+
   function normalizePreviewTitle(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
@@ -126,7 +235,7 @@
         segments.push(sanitizePathSegment(segment));
       }
     }
-    segments.push(sanitizePathSegment(item.name));
+    segments.push(sanitizePathSegment(item.downloadName || item.name));
     return segments.join("/");
   }
 
@@ -521,6 +630,7 @@
     normalizeFormats,
     normalizePreviewTitle,
     previewTitleMatchesFile,
+    resolveDownloadFilename,
     sanitizePathSegment,
     selectObservedDownloadUrl,
     selectVirtualListMatch,

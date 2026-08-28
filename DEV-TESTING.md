@@ -15,6 +15,14 @@
 npm run build:dev-package
 ```
 
+普通 Extension JavaScript、CSS 或 HTML 修改不需要重新构建安装器。运行固定同步命令：
+
+```powershell
+npm run dev:extension:sync
+```
+
+该命令只会同步到 `D:\POPODevDownloader\Extension`，并保留 Dev 名称与固定身份。完成后在 `chrome://extensions/` 中重新加载“POPO Dev 下载助手”，再刷新 POPO 页面。
+
 正式包必须使用：
 
 ```powershell
