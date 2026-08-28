@@ -84,7 +84,11 @@ function invokeNativeHost(executable, message) {
   return JSON.parse(result.stdout.subarray(4).toString("utf8"));
 }
 
-test("native host verifies that a completed task file still exists with the expected size", () => {
+test("native host verifies that a completed task file still exists with the expected size", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Native Host executable verification is Windows-only");
+    return;
+  }
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "popo-native-file-check-"));
   try {
     const executable = path.join(temporaryRoot, "PopoFolderPickerHost.exe");
@@ -107,7 +111,11 @@ test("native host verifies that a completed task file still exists with the expe
   }
 });
 
-test("native host refuses to auto-start Gopeed while setup maintenance is active", () => {
+test("native host refuses to auto-start Gopeed while setup maintenance is active", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("Native Host maintenance handling is Windows-only");
+    return;
+  }
   const productRoot = fs.mkdtempSync(path.join(os.tmpdir(), "popo-native-maintenance-"));
   try {
     const nativeRoot = path.join(productRoot, "NativeHost");
