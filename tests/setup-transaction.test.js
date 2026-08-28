@@ -440,6 +440,51 @@ test("浏览安装位置不会在同名产品目录后重复追加一层", {
   }
 });
 
+test("legacy .NET path boundary fails safely before candidate activation", {
+  timeout: 60_000
+}, (t) => {
+  if (!fs.existsSync(compiler)) {
+    t.skip("Windows .NET Framework compiler is unavailable");
+    return;
+  }
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-path-boundary-"));
+  const packageRoot = path.join(sandbox, "package");
+  const prefix = path.join(sandbox, "B");
+  if (prefix.length >= 126) {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+    t.skip("temporary root is already too long for the fixed 126-character boundary");
+    return;
+  }
+  const installRoot = prefix + "b".repeat(126 - prefix.length);
+  try {
+    buildFixture(packageRoot, "0.7.8", "path-boundary");
+    const deepGopeedDirectory = path.join(
+      packageRoot,
+      "Gopeed",
+      "data",
+      "flutter_assets",
+      "assets",
+      "extension"
+    );
+    fs.mkdirSync(deepGopeedDirectory, { recursive: true });
+    fs.writeFileSync(path.join(deepGopeedDirectory, "default_icon.png"), "fixture", "utf8");
+    const setup = compileSetup(packageRoot);
+    const result = runSetup(setup, installRoot);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    const errorPath = path.join(installRoot, "setup-test-error.txt");
+    assert.equal(fs.existsSync(errorPath), true);
+    const error = fs.readFileSync(errorPath, "utf8");
+    assert.match(error, /System\.IO\.PathTooLongException/);
+    assert.match(error, /PopoSetup\.CopyDirectory/);
+    assert.equal(fs.existsSync(path.join(installRoot, "install-state.json")), false);
+    assert.equal(fs.existsSync(path.join(installRoot, "Extension")), false);
+    assert.equal(fs.existsSync(path.join(installRoot, "NativeHost")), false);
+    assert.equal(fs.existsSync(path.join(installRoot, "Agent")), false);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("development green install cannot overwrite a stable green install", {
   timeout: 60_000
 }, (t) => {
