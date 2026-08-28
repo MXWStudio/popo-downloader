@@ -13,6 +13,10 @@ const buildSource = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "build-test-package.ps1"),
   "utf8"
 );
+const devExtensionModule = fs.readFileSync(
+  path.join(__dirname, "..", "scripts", "PopoDevExtension.psm1"),
+  "utf8"
+);
 const releaseVerifier = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "verify-release-package.ps1"),
   "utf8"
@@ -64,7 +68,8 @@ test("开发绿色版与正式版使用独立安装身份", () => {
   assert.match(buildSource, /\/define:POPO_DEV_BUILD/);
   assert.match(buildSource, /POPO-Dev-Setup\.exe/);
   assert.match(buildSource, /POPO-Dev-Downloader-/);
-  assert.match(buildSource, /folfhehnopknchpoaajfpboibbhnlanf/);
+  assert.match(buildSource, /Import-Module \$devExtensionModulePath -Force/);
+  assert.match(devExtensionModule, /folfhehnopknchpoaajfpboibbhnlanf/);
   assert.match(buildSource, /if \(-not \$isDev\) \{[\s\S]*signature = \$signature/);
 });
 
@@ -130,8 +135,8 @@ test("绿色安装助手自动准备完整运行目录并引导加载扩展", ()
   assert.match(buildSource, /signature = \$signature/);
   assert.match(buildSource, /popo-package-compile-/);
   assert.match(buildSource, /GetTempPath/);
-  assert.match(buildSource, /'queue\.js'/);
-  assert.match(buildSource, /Join-Path \$repoRoot 'assets'/);
+  assert.match(devExtensionModule, /'queue\.js'/);
+  assert.match(devExtensionModule, /SourceDirectories = @\('assets', 'runtime'\)/);
   assert.doesNotMatch(buildSource, /Copy-Item[^\n]+START-HERE\.cmd/);
   assert.match(releaseVerifier, /VerifyData/);
   assert.match(releaseVerifier, /Get-FileHash/);

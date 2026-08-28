@@ -90,7 +90,7 @@ npm ci
 npm run build:runtime
 ```
 
-修改代码后重新构建 Dev 包，再打开 `chrome://extensions/`，找到“POPO Dev 下载助手”并点击重新加载。Chrome 不会在源码改动后自动重新加载已解压扩展。
+普通 Extension JavaScript、CSS 或 HTML 修改后运行 `npm run dev:extension:sync`，再打开 `chrome://extensions/`，找到“POPO Dev 下载助手”并点击重新加载，然后刷新 POPO 页面。该命令固定同步到 `D:\POPODevDownloader\Extension`，不会修改 Stable 安装目录。只有 Native Host、Agent、安装器或注册配置发生变化时才重新构建 Dev 包。
 
 ## 验证命令
 

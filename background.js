@@ -10,6 +10,7 @@ const {
   isSystemMetadataFile,
   looksLikeFileTitle,
   previewTitleMatchesFile,
+  resolveDownloadFilename,
   validateRuntimeMessage,
   verifyDirectoryItemCount
 } = PopoCore;
@@ -3034,6 +3035,10 @@ async function waitForPreview(state, item) {
 }
 
 async function beginDownload(state, item, url) {
+  const resolvedDownloadName = resolveDownloadFilename(item.name, url);
+  if (resolvedDownloadName !== item.name || !item.downloadName) {
+    item.downloadName = resolvedDownloadName;
+  }
   const definition = gopeedTaskDefinition(state, item, url);
   item.stage = item.retryTaskId ? "更新下载地址" : "建立 Gopeed 任务";
   await saveState(state);
