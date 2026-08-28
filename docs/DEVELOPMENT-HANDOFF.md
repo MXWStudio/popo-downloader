@@ -39,6 +39,26 @@ Windows 收口验证结果（2026-08-28）：`npm run check:full` 通过。其�
 
 普通 Extension JavaScript、CSS 或 HTML 修改不需要重建安装器。修改后先在仓库运行相关测试，再由 Windows 执行 `npm run dev:extension:sync`，确认 Dev manifest 和扩展身份，然后在 Chrome 重新加载“POPO Dev 下载助手”并刷新 POPO 页面。
 
+## Mac 到 Windows 的日常验证
+
+普通分支和 Pull Request 由 `.github/workflows/windows-validation.yml` 在隔离的 `windows-latest` runner 上执行完整测试、构建 Dev 包并上传短期测试产物。该流程不读取发布密钥、不生成 Stable 包，也不更新腾讯云通道。
+
+Mac 可以把当前 Git 基线、未提交的 tracked 修改和未忽略的 untracked 文件发送到隔离 Windows Git 工作树，无需先提交或推送：
+
+```bash
+npm run verify:windows:remote
+```
+
+默认通过 SSH 主机 `edy-main`，只在 `/d/POPODevValidation` 下创建临时验证工作树。已存在于 `origin` 的基线由 Windows 直接读取，只通过 SSH 流式发送当前补丁和未跟踪文件；未推送的本地提交会自动改用 Git bundle，不依赖 SCP。Windows 验证依次执行 `npm ci`、安装/确认 Playwright Chromium、`npm run check:full:windows`，其中 Node 测试串行执行以避免多个 Agent/安装器进程测试争用；成功后调用现有 `npm run dev:extension:sync`，其目标仍固定为 `D:\POPODevDownloader\Extension`。成功的临时工作树会删除；失败现场保留在远端输出所示目录用于诊断。
+
+只验证 Windows 自动测试、不写入 Dev Extension 目录时使用：
+
+```bash
+npm run verify:windows:remote -- --no-sync
+```
+
+如 SSH 别名或隔离盘符不同，可设置 `POPO_WINDOWS_HOST` 和 `POPO_WINDOWS_REMOTE_ROOT`；远端根目录必须位于某个盘符下且名称严格为 `POPODevValidation`。脚本不会访问 Stable 目录。同步成功后，仍需用户在 Chrome 重新加载“POPO Dev 下载助手”并刷新 POPO 页面；真实下载、文件夹选择器、安装/更新/回滚继续作为 Windows 现场验收项。
+
 ## 当前边界与停止条件
 
 - 当前没有已知的跨平台源码迁移阻断。
