@@ -60,7 +60,11 @@ function invokeFixtureSync(fixture) {
   return runPowerShell(["-Command", command]);
 }
 
-test("Dev Extension source synchronizes successfully and preserves the fixed Dev identity", () => {
+test("Dev Extension source synchronizes successfully and preserves the fixed Dev identity", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell Dev Extension synchronization is Windows-only");
+    return;
+  }
   const fixture = createFixture();
   try {
     const result = invokeFixtureSync(fixture);
@@ -79,7 +83,11 @@ test("Dev Extension source synchronizes successfully and preserves the fixed Dev
   }
 });
 
-test("a file removed from Extension source cannot remain in Dev output", () => {
+test("a file removed from Extension source cannot remain in Dev output", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell Dev Extension synchronization is Windows-only");
+    return;
+  }
   const fixture = createFixture();
   try {
     assert.equal(invokeFixtureSync(fixture).status, 0);
@@ -95,13 +103,21 @@ test("a file removed from Extension source cannot remain in Dev output", () => {
   }
 });
 
-test("production sync wrapper rejects the Stable extension directory", () => {
+test("production sync wrapper rejects the Stable extension directory", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell Dev Extension target validation is Windows-only");
+    return;
+  }
   const result = runPowerShell(["-File", syncScript, "-TargetDirectory", stableTarget]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Refusing to synchronize the Stable extension directory/);
 });
 
-test("production sync wrapper rejects an unrecognized target and the repository root", () => {
+test("production sync wrapper rejects an unrecognized target and the repository root", (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell Dev Extension target validation is Windows-only");
+    return;
+  }
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "popo-dev-extension-invalid-"));
   try {
     const wrong = runPowerShell(["-File", syncScript, "-TargetDirectory", sandbox]);
