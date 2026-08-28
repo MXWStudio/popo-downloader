@@ -13,6 +13,7 @@ test("routine Windows workflow verifies and packages only the Dev channel", () =
   assert.match(workflow, /runs-on: windows-latest/);
   assert.match(workflow, /npm run check:full:windows/);
   assert.match(workflow, /npm run build:dev-package/);
+  assert.match(workflow, /Build isolated Dev package[\s\S]*shell: powershell/);
   assert.match(workflow, /POPO-Dev-Downloader-/);
   assert.doesNotMatch(workflow, /build:release-package|stable\/latest\.json|contents: write/);
 });

@@ -48,7 +48,10 @@ jobs:
         run: npm run check:full:windows
 
       - name: Build isolated Dev package
-        shell: pwsh
+        # The npm script launches Windows PowerShell. Starting this step in
+        # Windows PowerShell preserves its native PSModulePath so Get-FileHash
+        # and the other inbox modules remain available.
+        shell: powershell
         run: npm run build:dev-package
 
       - name: Verify Dev artifacts exist
