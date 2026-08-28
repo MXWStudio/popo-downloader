@@ -94,12 +94,30 @@ const popupUiPorts = new Set();
 const SERVICE_WORKER_STARTED_AT = new Date().toISOString();
 const UPDATE_CHECK_PERIOD_MINUTES = 6 * 60;
 const FAILED_UPDATE_RETRY_THROTTLE_MS = 30 * 1000;
+const UPDATE_RELOAD_STATE_KEY = "popoUpdateReloadState";
+const UPDATE_HANDOFF_LOG_KEY = "popoUpdateHandoffLog";
+const MAX_RETAINED_UPDATE_HANDOFF_EVENTS = 32;
+const UPDATE_HANDOFF_EVENTS = new Set([
+  "UPDATE_INSTALL_SUCCEEDED",
+  "UPDATE_RELOAD_REQUIRED",
+  "UPDATE_RELOAD_REQUESTED",
+  "UPDATE_RUNTIME_CONFIRMED",
+  "UPDATE_RUNTIME_MISMATCH",
+  "UPDATE_RELOAD_GUARD_EXHAUSTED"
+]);
+const UPDATE_INSTALL_ACTIVE_STATES = new Set([
+  "starting",
+  "checking",
+  "downloading",
+  "installing"
+]);
 const runtimeContracts = globalThis.PopoRuntime?.contracts || null;
 const runtimeDiagnostics = globalThis.PopoRuntime?.diagnostics || null;
 const runtimeNetworkMonitor = globalThis.PopoRuntime?.networkMonitor || null;
 const runtimeTaskStore = globalThis.PopoRuntime?.taskStore || null;
 const runtimeWorkflow = globalThis.PopoRuntime?.workflow || null;
 let automaticUpdateLocked = false;
+let updateHandoffRecoveryLocked = false;
 let lastFailedUpdateRetryAt = 0;
 let diagnosticFlushLocked = false;
 const DIAGNOSTIC_EVENT_CODES = new Set([
@@ -4856,6 +4874,273 @@ async function saveAutomaticUpdateStatus(status) {
   return normalized;
 }
 
+function normalizeUpdateVersion(value) {
+  const normalized = String(value || "");
+  return /^\d{1,10}(?:\.\d{1,10}){1,3}$/.test(normalized) ? normalized : "";
+}
+
+function compareUpdateVersions(left, right) {
+  const normalizedLeft = normalizeUpdateVersion(left);
+  const normalizedRight = normalizeUpdateVersion(right);
+  if (!normalizedLeft || !normalizedRight) return null;
+  const leftParts = normalizedLeft.split(".").map(Number);
+  const rightParts = normalizedRight.split(".").map(Number);
+  const partCount = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < partCount; index += 1) {
+    const leftPart = leftParts[index] || 0;
+    const rightPart = rightParts[index] || 0;
+    if (leftPart !== rightPart) return leftPart > rightPart ? 1 : -1;
+  }
+  return 0;
+}
+
+function normalizeUpdateReloadState(value) {
+  const targetVersion = normalizeUpdateVersion(value?.targetVersion);
+  const reloadAttemptCount = Number(value?.reloadAttemptCount);
+  return {
+    targetVersion,
+    reloadRequired: Boolean(targetVersion && value?.reloadRequired),
+    reloadAttemptCount: targetVersion && Number.isInteger(reloadAttemptCount) && reloadAttemptCount >= 0
+      ? Math.min(reloadAttemptCount, 1)
+      : 0,
+    lastReloadRequestedAt: targetVersion
+      ? normalizeUpdateDiagnosticTimestamp(value?.lastReloadRequestedAt)
+      : ""
+  };
+}
+
+async function readUpdateReloadState() {
+  const data = await chrome.storage.local.get(UPDATE_RELOAD_STATE_KEY);
+  return normalizeUpdateReloadState(data[UPDATE_RELOAD_STATE_KEY]);
+}
+
+async function saveUpdateReloadState(value) {
+  const normalized = normalizeUpdateReloadState(value);
+  await chrome.storage.local.set({ [UPDATE_RELOAD_STATE_KEY]: normalized });
+  return normalized;
+}
+
+function updateReloadHandoffPending(value) {
+  const normalized = normalizeUpdateReloadState(value);
+  return Boolean(normalized.targetVersion) &&
+    (normalized.reloadRequired || normalized.reloadAttemptCount === 0);
+}
+
+function normalizeUpdateHandoffEvent(value) {
+  const event = String(value?.event || "");
+  const at = normalizeUpdateDiagnosticTimestamp(value?.at);
+  if (!UPDATE_HANDOFF_EVENTS.has(event) || !at) return null;
+  return {
+    event,
+    currentVersion: normalizeUpdateVersion(value?.currentVersion),
+    targetVersion: normalizeUpdateVersion(value?.targetVersion),
+    transactionId: normalizeUpdateHandoffTransactionId(value?.transactionId),
+    at
+  };
+}
+
+function normalizeUpdateHandoffTransactionId(value) {
+  const normalized = String(value || "");
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(normalized) ? normalized : "";
+}
+
+async function appendUpdateHandoffEvent(event, details = {}) {
+  if (!UPDATE_HANDOFF_EVENTS.has(event)) return;
+  const data = await chrome.storage.local.get(UPDATE_HANDOFF_LOG_KEY);
+  const history = (Array.isArray(data[UPDATE_HANDOFF_LOG_KEY])
+    ? data[UPDATE_HANDOFF_LOG_KEY]
+    : [])
+    .map(normalizeUpdateHandoffEvent)
+    .filter(Boolean)
+    .slice(-(MAX_RETAINED_UPDATE_HANDOFF_EVENTS - 1));
+  const next = normalizeUpdateHandoffEvent({
+    event,
+    currentVersion: details.currentVersion,
+    targetVersion: details.targetVersion,
+    transactionId: details.transactionId,
+    at: new Date().toISOString()
+  });
+  if (!next) return;
+  const previous = history[history.length - 1];
+  if (previous?.event === next.event &&
+      previous.currentVersion === next.currentVersion &&
+      previous.targetVersion === next.targetVersion &&
+      previous.transactionId === next.transactionId) {
+    return;
+  }
+  history.push(next);
+  await chrome.storage.local.set({ [UPDATE_HANDOFF_LOG_KEY]: history });
+}
+
+async function beginUpdateReloadHandoff(targetVersion) {
+  const normalizedTarget = normalizeUpdateVersion(targetVersion);
+  if (!normalizedTarget) return saveUpdateReloadState({});
+  return saveUpdateReloadState({
+    targetVersion: normalizedTarget,
+    reloadRequired: false,
+    reloadAttemptCount: 0,
+    lastReloadRequestedAt: ""
+  });
+}
+
+async function markUpdateReloadRequired(targetVersion, details = {}) {
+  const normalizedTarget = normalizeUpdateVersion(targetVersion);
+  if (!normalizedTarget) return null;
+  const existing = await readUpdateReloadState();
+  const next = await saveUpdateReloadState({
+    targetVersion: normalizedTarget,
+    reloadRequired: true,
+    reloadAttemptCount: existing.targetVersion === normalizedTarget
+      ? existing.reloadAttemptCount
+      : 0,
+    lastReloadRequestedAt: existing.targetVersion === normalizedTarget
+      ? existing.lastReloadRequestedAt
+      : ""
+  });
+  await appendUpdateHandoffEvent("UPDATE_RELOAD_REQUIRED", {
+    currentVersion: chrome.runtime.getManifest().version,
+    targetVersion: normalizedTarget,
+    transactionId: details.transactionId
+  });
+  return next;
+}
+
+async function confirmInstalledRuntime(currentVersion, installedVersion) {
+  const normalizedCurrent = normalizeUpdateVersion(currentVersion);
+  const normalizedInstalled = normalizeUpdateVersion(installedVersion);
+  if (!normalizedCurrent || compareUpdateVersions(normalizedCurrent, normalizedInstalled) !== 0) {
+    return false;
+  }
+  const existing = await readUpdateReloadState();
+  if (compareUpdateVersions(existing.targetVersion, normalizedInstalled) === 0 &&
+      existing.reloadRequired) {
+    await saveUpdateReloadState({ ...existing, reloadRequired: false });
+    await appendUpdateHandoffEvent("UPDATE_RUNTIME_CONFIRMED", {
+      currentVersion: normalizedCurrent,
+      targetVersion: normalizedInstalled
+    });
+  }
+  return true;
+}
+
+async function requestControlledRuntimeReload(targetVersion, details = {}) {
+  const normalizedTarget = normalizeUpdateVersion(targetVersion);
+  if (!normalizedTarget) return false;
+  const existing = await readUpdateReloadState();
+  if (existing.targetVersion !== normalizedTarget || existing.reloadAttemptCount >= 1) {
+    await appendUpdateHandoffEvent("UPDATE_RELOAD_GUARD_EXHAUSTED", {
+      currentVersion: chrome.runtime.getManifest().version,
+      targetVersion: normalizedTarget,
+      transactionId: details.transactionId
+    });
+    return false;
+  }
+  const requestedAt = new Date().toISOString();
+  await saveUpdateReloadState({
+    ...existing,
+    reloadRequired: true,
+    reloadAttemptCount: 1,
+    lastReloadRequestedAt: requestedAt
+  });
+  await appendUpdateHandoffEvent("UPDATE_RELOAD_REQUESTED", {
+    currentVersion: chrome.runtime.getManifest().version,
+    targetVersion: normalizedTarget,
+    transactionId: details.transactionId
+  });
+  chrome.runtime.reload();
+  return true;
+}
+
+async function handleInstalledRuntimeMismatch(check, currentVersion) {
+  const installedVersion = normalizeUpdateVersion(check?.installedVersion || check?.version);
+  const comparison = compareUpdateVersions(installedVersion, currentVersion);
+  await appendUpdateHandoffEvent("UPDATE_RUNTIME_MISMATCH", {
+    currentVersion,
+    targetVersion: installedVersion,
+    transactionId: check?.transactionId
+  });
+  if (comparison === 1) {
+    await markUpdateReloadRequired(installedVersion, check);
+    if (await requestControlledRuntimeReload(installedVersion, check)) return "reload_requested";
+  }
+  await saveAutomaticUpdateStatus({
+    state: "path_mismatch",
+    currentVersion,
+    targetVersion: installedVersion,
+    message: comparison === 1
+      ? "当前 Chrome 仍未切换到已安装的新版本；自动重载已尝试一次，请核对 Chrome 加载的 Extension 目录。"
+      : "当前 Chrome 运行版本与绿色安装版本不一致，请核对 Chrome 加载的 Extension 目录；不会自动降级或重复重载。"
+  });
+  return "path_mismatch";
+}
+
+async function recoverAutomaticUpdateHandoff() {
+  if (isDevelopmentBuild() || automaticUpdateLocked || updateHandoffRecoveryLocked) return;
+  updateHandoffRecoveryLocked = true;
+  try {
+    const manifest = typeof chrome.runtime.getManifest === "function"
+      ? chrome.runtime.getManifest()
+      : {};
+    const currentVersion = normalizeUpdateVersion(manifest.version);
+    if (!currentVersion) return;
+    const handoff = await readUpdateReloadState();
+    if (!handoff.targetVersion) return;
+    if (await confirmInstalledRuntime(currentVersion, handoff.targetVersion)) return;
+    if (compareUpdateVersions(handoff.targetVersion, currentVersion) !== 1) {
+      await saveAutomaticUpdateStatus({
+        state: "path_mismatch",
+        currentVersion,
+        targetVersion: handoff.targetVersion,
+        message: "当前 Chrome 运行版本高于已安装版本；不会自动降级或重载，请核对 Chrome 加载的 Extension 目录。"
+      });
+      return;
+    }
+    if (handoff.reloadRequired) {
+      if (await requestControlledRuntimeReload(handoff.targetVersion)) return;
+      await saveAutomaticUpdateStatus({
+        state: "path_mismatch",
+        currentVersion,
+        targetVersion: handoff.targetVersion,
+        message: "当前 Chrome 仍未切换到已安装的新版本；自动重载已尝试一次，请核对 Chrome 加载的 Extension 目录。"
+      });
+      return;
+    }
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      let updateStatus;
+      try {
+        updateStatus = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
+          action: "update_status"
+        });
+      } catch {
+        return;
+      }
+      if (!updateStatus?.ok) return;
+      await saveAutomaticUpdateStatus(updateStatus);
+      if (updateStatus.state === "succeeded") {
+        const targetVersion = normalizeUpdateVersion(
+          updateStatus.targetVersion || handoff.targetVersion
+        );
+        if (targetVersion !== handoff.targetVersion) return;
+        await appendUpdateHandoffEvent("UPDATE_INSTALL_SUCCEEDED", {
+          currentVersion,
+          targetVersion,
+          transactionId: updateStatus.transactionId
+        });
+        await markUpdateReloadRequired(targetVersion, updateStatus);
+        await requestControlledRuntimeReload(targetVersion, updateStatus);
+        return;
+      }
+      if (updateStatus.state === "failed" ||
+          !UPDATE_INSTALL_ACTIVE_STATES.has(updateStatus.state)) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } finally {
+    updateHandoffRecoveryLocked = false;
+  }
+}
+
 async function readAgentShadowStatus() {
   try {
     const connection = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
@@ -5054,8 +5339,7 @@ function normalizeAgentShadowComparisonHistoryEntry(value) {
 }
 
 function normalizeUpdateDiagnosticVersion(value) {
-  const normalized = String(value || "");
-  return /^\d{1,10}(?:\.\d{1,10}){1,3}$/.test(normalized) ? normalized : "";
+  return normalizeUpdateVersion(value);
 }
 
 function normalizeUpdateDiagnosticErrorCode(value) {
@@ -5125,6 +5409,7 @@ function normalizeLegacyUpdateStatusForDiagnostics(value) {
     "downloading",
     "installing",
     "succeeded",
+    "path_mismatch",
     "failed"
   ]);
   const state = String(value?.state || "");
@@ -5141,7 +5426,9 @@ async function buildUpdateDiagnostics() {
     "popoUpdateStatus",
     "popoAgentShadowStatus",
     "popoAgentShadowComparison",
-    "popoAgentShadowComparisonHistory"
+    "popoAgentShadowComparisonHistory",
+    UPDATE_RELOAD_STATE_KEY,
+    UPDATE_HANDOFF_LOG_KEY
   ]);
   const history = (Array.isArray(data.popoAgentShadowComparisonHistory)
     ? data.popoAgentShadowComparisonHistory
@@ -5152,6 +5439,12 @@ async function buildUpdateDiagnostics() {
   const latestComparison = normalizeAgentShadowComparisonHistoryEntry(
     data.popoAgentShadowComparison
   ) || history[history.length - 1] || null;
+  const updateHandoffEvents = (Array.isArray(data[UPDATE_HANDOFF_LOG_KEY])
+    ? data[UPDATE_HANDOFF_LOG_KEY]
+    : [])
+    .map(normalizeUpdateHandoffEvent)
+    .filter(Boolean)
+    .slice(-MAX_RETAINED_UPDATE_HANDOFF_EVENTS);
   const manifest = chrome.runtime.getManifest();
   const failureOutcomes = new Set([
     "shadow_failed",
@@ -5165,6 +5458,10 @@ async function buildUpdateDiagnostics() {
     productVersion: normalizeUpdateDiagnosticVersion(manifest.version_name || manifest.version),
     generatedAt: new Date().toISOString(),
     legacyUpdate: normalizeLegacyUpdateStatusForDiagnostics(data.popoUpdateStatus),
+    updateHandoff: {
+      ...normalizeUpdateReloadState(data[UPDATE_RELOAD_STATE_KEY]),
+      events: updateHandoffEvents
+    },
     agent: normalizeAgentShadowStatusForDiagnostics(data.popoAgentShadowStatus),
     latestComparison,
     history,
@@ -5203,6 +5500,12 @@ async function runAutomaticUpdateCheck() {
     return;
   }
   if (automaticUpdateLocked) return;
+  const handoff = await readUpdateReloadState();
+  if (updateReloadHandoffPending(handoff)) {
+    void recoverAutomaticUpdateHandoff();
+    return;
+  }
+  if (automaticUpdateLocked) return;
   automaticUpdateLocked = true;
   const currentVersion = chrome.runtime.getManifest().version;
   try {
@@ -5234,14 +5537,10 @@ async function runAutomaticUpdateCheck() {
     if (!check?.ok) throw new Error(check?.error || "无法读取签名更新清单");
     if (!check.available) {
       if (check.runtimeMatchesInstalled === false) {
-        await saveAutomaticUpdateStatus({
-          state: "path_mismatch",
-          currentVersion,
-          targetVersion: check.installedVersion || check.version,
-          message: "当前 Chrome 运行版本与绿色安装版本不一致，请切回绿色版 Extension 目录。"
-        });
+        await handleInstalledRuntimeMismatch(check, currentVersion);
         return;
       }
+      await confirmInstalledRuntime(currentVersion, check.installedVersion || currentVersion);
       await saveAutomaticUpdateStatus({
         state: "up_to_date",
         currentVersion,
@@ -5257,6 +5556,7 @@ async function runAutomaticUpdateCheck() {
       targetVersion: check.version,
       message: "发现新正式版，正在启动安全更新。"
     });
+    await beginUpdateReloadHandoff(check.version);
     const started = await chrome.runtime.sendNativeMessage(FOLDER_PICKER_HOST, {
       action: "apply_update",
       currentVersion
@@ -5272,7 +5572,14 @@ async function runAutomaticUpdateCheck() {
       if (!updateStatus?.ok) continue;
       await saveAutomaticUpdateStatus(updateStatus);
       if (updateStatus.state === "succeeded") {
-        chrome.runtime.reload();
+        const targetVersion = updateStatus.targetVersion || check.version;
+        await appendUpdateHandoffEvent("UPDATE_INSTALL_SUCCEEDED", {
+          currentVersion,
+          targetVersion,
+          transactionId: updateStatus.transactionId
+        });
+        await markUpdateReloadRequired(targetVersion, updateStatus);
+        await requestControlledRuntimeReload(targetVersion, updateStatus);
         return;
       }
       if (updateStatus.state === "failed") {
@@ -5333,6 +5640,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
   chrome.alarms.create(DIAGNOSTIC_FLUSH_ALARM, { periodInMinutes: 1 });
   scheduleAutomaticUpdates(5);
+  void recoverAutomaticUpdateHandoff();
   schedulePump(1000);
 });
 
@@ -5340,6 +5648,7 @@ chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
   chrome.alarms.create(DIAGNOSTIC_FLUSH_ALARM, { periodInMinutes: 1 });
   scheduleAutomaticUpdates(2);
+  void recoverAutomaticUpdateHandoff();
   schedulePump(1000);
 });
 
@@ -5349,6 +5658,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === UPDATE_ALARM) void runAutomaticUpdateCheck();
   if (alarm.name === DIAGNOSTIC_FLUSH_ALARM) void flushDiagnostics();
 });
+
+void recoverAutomaticUpdateHandoff();
 
 async function runWatchdog() {
   const { state } = await getStored();
@@ -5428,6 +5739,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, state: publicState(state), settings };
       }
       case "GET_UPDATE_STATUS": {
+        void recoverAutomaticUpdateHandoff();
         const data = await chrome.storage.local.get("popoUpdateStatus");
         const updateStatus = data.popoUpdateStatus || {
           state: "idle",
