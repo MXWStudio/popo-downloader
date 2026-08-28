@@ -27,6 +27,8 @@
     "build:dev-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev",
     "build:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Stable",
     "verify:release-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-release-package.ps1",
+    "test:release-candidate:preflight": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-candidate-install.ps1",
+    "test:release-candidate:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-candidate-install.ps1 -RunAcceptance",
     "release:check-version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/assert-release-version.ps1",
     "release:notes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/get-release-notes.ps1"
   },
