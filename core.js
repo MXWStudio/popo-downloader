@@ -239,20 +239,30 @@
     return segments.join("/");
   }
 
-  function normalizeAllowedDownloadUrl(value) {
+  const ALLOWED_DOWNLOAD_HOST_SUFFIXES = Object.freeze([
+    ".s3v2.nie.netease.com"
+  ]);
+
+  function validateDownloadUrl(value) {
     const text = String(value || "").trim();
-    if (!/^https:\/\//i.test(text)) return "";
+    if (!text || /[\u0000-\u001f\u007f]/.test(text) || !/^https:\/\//i.test(text)) return "";
     try {
       const url = new URL(text);
       const hostname = url.hostname.toLowerCase();
-      if (url.protocol !== "https:" || !hostname.endsWith(".s3v2.nie.netease.com") ||
+      const hostAllowed = ALLOWED_DOWNLOAD_HOST_SUFFIXES.some((suffix) => hostname.endsWith(suffix));
+      if (url.protocol !== "https:" || !hostAllowed ||
           url.username || url.password ||
           (url.port && url.port !== "443")) return "";
-      url.hash = "";
-      return url.toString();
+      // Parse only for validation. Return the exact signed URL text so query
+      // ordering, escaping and unknown signature parameters remain untouched.
+      return text;
     } catch {
       return "";
     }
+  }
+
+  function normalizeAllowedDownloadUrl(value) {
+    return validateDownloadUrl(value);
   }
 
   function findFirstHttpUrl(value, depth) {
@@ -285,39 +295,70 @@
 
   function selectObservedDownloadUrl(observedUrls, options = {}) {
     const pageId = String(options.pageId || "").trim().toLowerCase();
-    const preferredFilename = normalizePreviewTitle(options.filename || "");
+    const preferredFilename = normalizePreviewTitle(options.filename || "").toLowerCase();
     const candidates = [];
     for (const [index, raw] of (Array.isArray(observedUrls) ? observedUrls : []).entries()) {
-      const normalized = normalizeAllowedDownloadUrl(raw);
-      if (!normalized) continue;
+      const validated = validateDownloadUrl(raw);
+      if (!validated) continue;
       let url;
       try {
-        url = new URL(normalized);
+        url = new URL(validated);
       } catch {
         continue;
       }
-      if (!/^https?:$/.test(url.protocol) || url.hostname === "docs.popo.netease.com") continue;
-      const lower = normalized.toLowerCase();
-      let score = 0;
-      if (/response-content-disposition=/i.test(normalized)) score += 100;
-      if (/x-amz-signature=/i.test(normalized)) score += 80;
-      if (/\.s3v2\.nie\.netease\.com$/i.test(url.hostname)) score += 60;
-      if (/\.(?:mp4|mov|mkv|avi|webm|mp3|wav|flac|zip|rar|7z|psd|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif)(?:$|\?)/i.test(normalized)) {
-        score += 40;
+      const lower = validated.toLowerCase();
+      let decodedPath = url.pathname;
+      for (let pass = 0; pass < 2; pass += 1) {
+        try { decodedPath = decodeURIComponent(decodedPath); } catch { break; }
       }
-      if (pageId && lower.includes(pageId)) score += 20;
-      if (preferredFilename) {
-        let decoded = normalized;
-        for (let pass = 0; pass < 2; pass += 1) {
-          try { decoded = decodeURIComponent(decoded); } catch { break; }
+      const pathFilename = normalizePreviewTitle(
+        downloadBasename(decodedPath)
+      ).toLowerCase();
+      let dispositionFilename = "";
+      const explicitFilenames = [];
+      const queryPageIds = [];
+      for (const [key, value] of url.searchParams.entries()) {
+        const lowerKey = key.toLowerCase();
+        if (["pageid", "page_id", "page-id"].includes(lowerKey)) {
+          queryPageIds.push(String(value || "").toLowerCase());
         }
-        decoded = normalizePreviewTitle(decoded);
-        if (decoded.includes(preferredFilename)) score += 30;
+        if (["response-content-disposition", "content-disposition"].includes(lowerKey)) {
+          dispositionFilename ||= normalizePreviewTitle(
+            downloadBasename(contentDispositionFilename(value))
+          ).toLowerCase();
+        }
+        if (["filename", "file_name", "download_filename"].includes(lowerKey)) {
+          explicitFilenames.push(normalizePreviewTitle(
+            downloadBasename(decodeDownloadFilename(value))
+          ).toLowerCase());
+        }
       }
-      if (score >= 60) candidates.push({ index, normalized, score });
+      const pageIdMatch = Boolean(pageId && (
+        decodedPath.toLowerCase().includes(pageId) ||
+        queryPageIds.includes(pageId)
+      ));
+      const filenameMatch = Boolean(preferredFilename && (
+        pathFilename === preferredFilename ||
+        explicitFilenames.includes(preferredFilename)
+      ));
+      const dispositionFilenameMatch = Boolean(
+        preferredFilename && dispositionFilename === preferredFilename
+      );
+      if (!pageIdMatch && !filenameMatch && !dispositionFilenameMatch) continue;
+
+      let score = 0;
+      if (dispositionFilenameMatch) score += 300;
+      if (filenameMatch) score += 200;
+      if (pageIdMatch) score += 150;
+      if (/x-amz-signature=/i.test(validated)) score += 20;
+      if (/response-content-disposition=/i.test(validated)) score += 10;
+      if (/\.(?:mp4|mov|mkv|avi|webm|mp3|wav|flac|zip|rar|7z|psd|pdf|docx?|xlsx?|pptx?|png|jpe?g|gif)(?:$|\?)/i.test(lower)) {
+        score += 5;
+      }
+      candidates.push({ index, validated, score });
     }
     candidates.sort((left, right) => right.score - left.score || right.index - left.index);
-    return candidates[0]?.normalized || "";
+    return candidates[0]?.validated || "";
   }
 
   function extractTeamSpaceId(body) {
@@ -640,6 +681,7 @@
     selectObservedDownloadUrl,
     selectVirtualListMatch,
     splitTokens,
+    validateDownloadUrl,
     validateRuntimeMessage,
     verifyDirectoryItemCount
   };

@@ -35,7 +35,7 @@
     window.name.startsWith(PAGE_SCAN_FRAME_NAME_PREFIX);
   const {
     inferVirtualListItemCount,
-    normalizeAllowedDownloadUrl,
+    validateDownloadUrl,
     selectObservedDownloadUrl,
     selectVirtualListMatch
   } = globalThis.PopoCore;
@@ -53,7 +53,7 @@
   const REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT = "popo-stable-download:request-observed-urls";
 
   function rememberObservedDownloadUrl(value) {
-    const candidate = normalizeAllowedDownloadUrl(value);
+    const candidate = validateDownloadUrl(value);
     if (!candidate) return;
     const existingIndex = observedDownloadUrls.indexOf(candidate);
     if (existingIndex >= 0) observedDownloadUrls.splice(existingIndex, 1);

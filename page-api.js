@@ -49,8 +49,9 @@
     if (parsed.protocol !== "https:" ||
         !parsed.hostname.toLowerCase().endsWith(".s3v2.nie.netease.com") ||
         parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) return;
-    parsed.hash = "";
-    const allowedUrl = parsed.toString();
+    // Parse only for validation. Keep the observed signed URL byte-for-byte
+    // equivalent after trimming; rebuilding it can invalidate its signature.
+    const allowedUrl = candidate;
     const existingIndex = observedUrls.indexOf(allowedUrl);
     if (existingIndex >= 0) observedUrls.splice(existingIndex, 1);
     observedUrls.push(allowedUrl);

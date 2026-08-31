@@ -11,6 +11,7 @@ const {
   looksLikeFileTitle,
   previewTitleMatchesFile,
   resolveDownloadFilename,
+  validateDownloadUrl,
   validateRuntimeMessage,
   verifyDirectoryItemCount
 } = PopoCore;
@@ -3086,11 +3087,17 @@ async function waitForPreview(state, item) {
 }
 
 async function beginDownload(state, item, url) {
-  const resolvedDownloadName = resolveDownloadFilename(item.name, url);
+  const validatedUrl = validateDownloadUrl(url);
+  if (!validatedUrl) {
+    throw Object.assign(new Error("下载地址未通过最终安全校验"), {
+      failureStage: FAILURE.DOWNLOAD_NOT_ESTABLISHED
+    });
+  }
+  const resolvedDownloadName = resolveDownloadFilename(item.name, validatedUrl);
   if (resolvedDownloadName !== item.name || !item.downloadName) {
     item.downloadName = resolvedDownloadName;
   }
-  const definition = gopeedTaskDefinition(state, item, url);
+  const definition = gopeedTaskDefinition(state, item, validatedUrl);
   item.stage = item.retryTaskId ? "更新下载地址" : "建立 Gopeed 任务";
   await saveState(state);
   const previousTaskId = item.retryTaskId;
@@ -3234,7 +3241,8 @@ async function requestDirectDownloadUrl(state, pageId) {
       pageId,
       filename: state.items.find((item) => item.id === state.preparingItemId)?.name || ""
     }, 5000, "读取页面已取得的文件地址");
-    if (observed?.url) {
+    const observedUrl = validateDownloadUrl(observed?.url);
+    if (observedUrl) {
       pushRuntimeEvent(
         state,
         "DOWNLOAD_URL_RECOVERED_FROM_PAGE",
@@ -3243,7 +3251,7 @@ async function requestDirectDownloadUrl(state, pageId) {
         pageApiErrorDetail(lastResponse),
         { jobId: activeJob(state)?.id || "", pageId }
       );
-      return observed.url;
+      return observedUrl;
     }
     if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 400));
   }

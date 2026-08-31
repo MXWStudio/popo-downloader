@@ -18,6 +18,7 @@ const {
   sanitizePathSegment,
   selectObservedDownloadUrl,
   selectVirtualListMatch,
+  validateDownloadUrl,
   validateRuntimeMessage,
   verifyDirectoryItemCount
 } = require("../core.js");
@@ -379,19 +380,35 @@ test("下载路径使用已解析名称且服务器路径不能改变目标目�
   ), "展示名称.exe");
 });
 
-test("从嵌套接口响应中提取优先下载地址", () => {
+test("最终下载地址只接受已确认的 HTTPS POPO 存储 Host 并保持签名原样", () => {
+  const signedUrl = "https://files.s3v2.nie.netease.com/file.mp4?X-Amz-Signature=A%2fb&unknown=1%2B2";
+  assert.equal(validateDownloadUrl(signedUrl), signedUrl);
   assert.equal(findFirstHttpUrl({
     data: {
-      metadata: { url: "https://files.s3v2.nie.netease.com/file.mp4" }
+      metadata: { url: signedUrl }
     }
-  }), "https://files.s3v2.nie.netease.com/file.mp4");
+  }), signedUrl);
   assert.equal(findFirstHttpUrl({ data: { value: "not-a-url" } }), "");
   assert.equal(findFirstHttpUrl({ data: { url: "https://evil.example/file.mp4" } }), "");
   assert.equal(findFirstHttpUrl({ data: { url: "http://files.s3v2.nie.netease.com/file.mp4" } }), "");
+  for (const rejected of [
+    "https://localhost/file.mp4",
+    "https://127.0.0.1/file.mp4",
+    "https://127.20.30.40/file.mp4",
+    "https://[::1]/file.mp4",
+    "https://10.1.2.3/file.mp4",
+    "https://172.16.1.2/file.mp4",
+    "https://172.31.255.254/file.mp4",
+    "https://192.168.10.20/file.mp4",
+    "file:///tmp/file.mp4",
+    "ftp://files.s3v2.nie.netease.com/file.mp4"
+  ]) {
+    assert.equal(validateDownloadUrl(rejected), "", rejected);
+  }
 });
 
-test("下载接口拒绝时从页面已加载资源中选择最新且最可信的文件地址", () => {
-  const stale = "https://old.s3v2.nie.netease.com/archive/old.mp4?X-Amz-Signature=old";
+test("observed fallback 只选择与当前文件强关联的最新地址", () => {
+  const stale = "https://old.s3v2.nie.netease.com/archive/target.mp4?X-Amz-Signature=old";
   const expected = "https://new.s3v2.nie.netease.com/archive/target.mp4?response-content-disposition=attachment%3BfileName%2A%3DUTF-8%27%27target.mp4&X-Amz-Signature=current";
   assert.equal(selectObservedDownloadUrl([
     "https://docs.popo.netease.com/api/bs-team-space/web/v1/page/download?pageId=page-1",
@@ -408,11 +425,17 @@ test("下载接口拒绝时从页面已加载资源中选择最新且最可信�
     filename: "target.mp4"
   }), "");
   assert.equal(selectObservedDownloadUrl([
-    "https://cdn.example.com/assets/logo.png"
+    "https://cdn.example.com/assets/logo.png",
+    "https://files.s3v2.nie.netease.com/archive/unrelated.bin?X-Amz-Signature=weak"
   ], {
     pageId: "page-1",
     filename: "target.mp4"
   }), "");
+  const pageMatched = "https://files.s3v2.nie.netease.com/archive/page-1/object?X-Amz-Signature=current";
+  assert.equal(selectObservedDownloadUrl([pageMatched], {
+    pageId: "page-1",
+    filename: "target.mp4"
+  }), pageMatched);
 });
 
 test("团队空间短码接口响应可提取真实 ID", () => {
