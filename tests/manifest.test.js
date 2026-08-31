@@ -346,3 +346,14 @@ test("弹窗为每个任务显示文件进度条", () => {
   assert.doesNotMatch(popupHtml, /版本 0\.7\.0-beta\.6/);
   assert.match(popupCss, /\.popup-job-progress/);
 });
+
+test("下载地址与页面命令都执行来源白名单检查", () => {
+  const core = fs.readFileSync(path.join(__dirname, "..", "core.js"), "utf8");
+  const pageApi = fs.readFileSync(path.join(__dirname, "..", "page-api.js"), "utf8");
+  const background = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
+  assert.match(core, /\.s3v2\.nie\.netease\.com/);
+  assert.match(core, /url\.protocol !== "https:"/);
+  assert.match(pageApi, /endsWith\("\.s3v2\.nie\.netease\.com"\)/);
+  assert.match(background, /assertTrustedRuntimeSource\(command, sender\)/);
+  assert.match(background, /后台拒绝跨 POPO 团队空间的页面命令/);
+});

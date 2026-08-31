@@ -145,6 +145,39 @@ function enforceRuntimeCommandContract(command) {
   }
 }
 
+const POPO_PAGE_COMMANDS = new Set([
+  "START_FOLDER_SCAN",
+  "START_PAGE_DOWNLOAD",
+  "SOURCE_PAGE_READY",
+  "REGISTER_WORKER_FRAME"
+]);
+
+function assertTrustedRuntimeSource(command, sender) {
+  if (!POPO_PAGE_COMMANDS.has(command.type)) return;
+  const source = String(sender?.url || sender?.tab?.url || "");
+  let sourceUrl;
+  try {
+    sourceUrl = new URL(source);
+  } catch {
+    throw new Error("后台拒绝无法确认来源的 POPO 页面命令");
+  }
+  const validSource = sourceUrl.protocol === "https:" &&
+    sourceUrl.hostname.toLowerCase() === "docs.popo.netease.com" &&
+    (!sourceUrl.port || sourceUrl.port === "443") &&
+    /^\/team\/pc\/[^/]+\/pageDetail\/[a-z0-9]+/i.test(sourceUrl.pathname) &&
+    sender?.tab?.id != null;
+  if (!validSource) throw new Error("后台拒绝非 POPO 页面来源的命令");
+
+  const commandUrl = command.url || command.parentUrl;
+  if (!commandUrl) return;
+  const expected = new URL(commandUrl);
+  const sourceTeam = sourceUrl.pathname.match(/^\/team\/pc\/([^/]+)/i)?.[1] || "";
+  const expectedTeam = expected.pathname.match(/^\/team\/pc\/([^/]+)/i)?.[1] || "";
+  if (!sourceTeam || sourceTeam !== expectedTeam) {
+    throw new Error("后台拒绝跨 POPO 团队空间的页面命令");
+  }
+}
+
 function sanitizeStoredJobs(jobs) {
   if (typeof runtimeContracts?.sanitizeStoredJobs !== "function") {
     return { jobs: Array.isArray(jobs) ? jobs : [], rejected: 0 };
@@ -5728,6 +5761,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     const command = enforceRuntimeCommandContract(validateRuntimeMessage(message));
+    assertTrustedRuntimeSource(command, sender);
     switch (command.type) {
       case "GET_STATE":
       {

@@ -165,7 +165,11 @@ function createHarness(initial = {}, options = {}) {
 
   require(backgroundPath);
   const listener = global.chrome.runtime.onMessage.listeners[0];
-  const send = (message, sender = { tab: { id: 7 }, frameId: 0 }) => new Promise((resolve) => {
+  const send = (message, sender = {
+    tab: { id: 7, url: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1" },
+    url: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+    frameId: 0
+  }) => new Promise((resolve) => {
     assert.equal(listener(message, sender, resolve), true);
   });
   const cleanup = () => {
@@ -1736,7 +1740,7 @@ test("单独文件夹首次定位失败会自动重试且不会立即判定查�
           setTimeout(() => {
             void sendRuntimeMessage(
               { type: "REGISTER_WORKER_FRAME", url: message.url },
-              { tab: { id: 7 }, frameId: 42 }
+              { tab: { id: 7, url: message.url }, url: message.url, frameId: 42 }
             );
           }, 0);
           return { ok: true };
@@ -3287,7 +3291,11 @@ test("原 POPO 标签页关闭后可在其他团队空间的 POPO 标签页恢�
   try {
     const response = await harness.send(
       { type: "SOURCE_PAGE_READY", url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1" },
-      { tab: { id: 9 }, frameId: 0 }
+      {
+        tab: { id: 9, url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1" },
+        url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1",
+        frameId: 0
+      }
     );
     assert.equal(response.ok, true);
     assert.equal(response.needsWorker, true);

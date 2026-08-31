@@ -382,10 +382,12 @@ test("下载路径使用已解析名称且服务器路径不能改变目标目�
 test("从嵌套接口响应中提取优先下载地址", () => {
   assert.equal(findFirstHttpUrl({
     data: {
-      metadata: { url: "https://example.com/file.mp4" }
+      metadata: { url: "https://files.s3v2.nie.netease.com/file.mp4" }
     }
-  }), "https://example.com/file.mp4");
+  }), "https://files.s3v2.nie.netease.com/file.mp4");
   assert.equal(findFirstHttpUrl({ data: { value: "not-a-url" } }), "");
+  assert.equal(findFirstHttpUrl({ data: { url: "https://evil.example/file.mp4" } }), "");
+  assert.equal(findFirstHttpUrl({ data: { url: "http://files.s3v2.nie.netease.com/file.mp4" } }), "");
 });
 
 test("下载接口拒绝时从页面已加载资源中选择最新且最可信的文件地址", () => {
