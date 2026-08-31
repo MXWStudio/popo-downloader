@@ -181,11 +181,21 @@ export function recoverableCount(job: QueueJob): number {
 }
 
 export function failedRetryCount(job: QueueJob): number {
-  return job.failureRetryKeys?.length || Number(job.counts?.failed) || 0;
+  const fileFailures = job.failureRetryKeys?.length || Number(job.counts?.failed) || 0;
+  const directoryIssues = Math.max(
+    Number(job.counts?.scanFailures) || 0,
+    Number(job.counts?.unverifiedDirectories) || 0
+  );
+  return fileFailures + directoryIssues;
 }
 
 export function jobDetail(job: QueueJob): string {
   const counts = job.counts || {};
+  const directoryIssues = Math.max(
+    Number(counts.scanFailures) || 0,
+    Number(counts.unverifiedDirectories) || 0
+  );
+  const directoryIssueSuffix = directoryIssues ? ` · 遗漏 ${directoryIssues} 个目录` : "";
   if (job.status === "queued") {
     const position = Number(job.queuePosition) || 0;
     return position > 0 ? `排队第 ${position}` : "排队中";
@@ -193,9 +203,10 @@ export function jobDetail(job: QueueJob): string {
   if (["waiting_worker", "scanning"].includes(job.status)) {
     const discovered = Number(counts.discoveredFiles) || 0;
     const handedOff = Number(counts.handedOff) || 0;
-    return handedOff
+    const detail = handedOff
       ? `边查找边下载 · 已找到 ${discovered} 个 · 已交付 ${handedOff} 个`
       : `已找到 ${discovered} 个文件`;
+    return `${detail}${directoryIssueSuffix}`;
   }
   const success = Number(counts.success) || 0;
   const failed = Number(counts.failed) || 0;
@@ -205,6 +216,10 @@ export function jobDetail(job: QueueJob): string {
     return cancelled ? `已完成 ${success} 个 · ${cancelled} 个可继续` : `已完成 ${success} 个`;
   }
   if (job.status === "failed") {
+    if (directoryIssues) {
+      const fileDetail = total ? `文件已完成 ${success} / ${total}` : "文件查找未完整";
+      return `${fileDetail}${directoryIssueSuffix}`;
+    }
     return failed ? `已完成 ${success} 个 · ${failed} 个未完成` : "未能开始，请打开 POPO 后重试";
   }
   if (job.status === "complete") {
@@ -213,7 +228,7 @@ export function jobDetail(job: QueueJob): string {
   }
   if (!total) return "正在准备文件";
   const paused = ["paused", "draining_paused"].includes(job.status) ? "已暂停 · " : "";
-  return `${paused}已完成 ${success} / ${total}`;
+  return `${paused}文件已完成 ${success} / ${total}${directoryIssueSuffix}`;
 }
 
 export function jobProgress(job: QueueJob): number | null {
@@ -291,7 +306,7 @@ export function folderButtonDisplay(
   const failed = countValue(counts.failed);
   const scanFailures = countValue(counts.scanFailures);
   const unverifiedDirectories = countValue(counts.unverifiedDirectories);
-  const scanIssueCount = scanFailures + unverifiedDirectories;
+  const scanIssueCount = Math.max(scanFailures, unverifiedDirectories);
   const warningSegment = scanIssueCount > 0;
   const handedOff = countValue(counts.handedOff);
 
@@ -376,7 +391,9 @@ export function folderButtonDisplay(
     return {
       visualState: "downloading",
       primary: job.status === "draining" ? "正在停止" : "下载中",
-      secondary: total ? `${success} / ${total}` : "",
+      secondary: total
+        ? `文件 ${success} / ${total}${scanIssueCount ? ` · 遗漏 ${scanIssueCount} 个目录` : ""}`
+        : scanIssueCount ? `遗漏 ${scanIssueCount} 个目录` : "",
       progress: jobProgress(job),
       indeterminate: jobProgress(job) == null,
       warningSegment
@@ -386,7 +403,9 @@ export function folderButtonDisplay(
     return {
       visualState: "paused",
       primary: "已暂停",
-      secondary: total ? `${success} / ${total}` : "",
+      secondary: total
+        ? `文件 ${success} / ${total}${scanIssueCount ? ` · 遗漏 ${scanIssueCount} 个目录` : ""}`
+        : scanIssueCount ? `遗漏 ${scanIssueCount} 个目录` : "",
       progress: jobProgress(job),
       indeterminate: false,
       warningSegment
@@ -446,12 +465,12 @@ export function folderButtonDisplay(
     };
   }
 
-  if (!discovered && scanFailures > 0) {
+  if (scanIssueCount > 0) {
     return {
       visualState: "failed",
-      primary: "查找失败",
-      secondary: `遗漏 ${scanFailures} 处 · 重试`,
-      progress: 0,
+      primary: "目录未完整",
+      secondary: `${total ? `文件 ${success} / ${total} · ` : ""}遗漏 ${scanIssueCount} 个目录 · 重试`,
+      progress: total ? Math.round(success * 100 / total) : 0,
       indeterminate: false,
       warningSegment: false
     };

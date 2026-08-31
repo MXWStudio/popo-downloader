@@ -360,6 +360,43 @@ function normalizePageUrl(value) {
   }
 }
 
+function directoryPathIdentity(path) {
+  return (Array.isArray(path) ? path : []).map((part) => String(part || "")).join("\u0001");
+}
+
+function discoveredItemId(parentUrl, directoryPath, itemIndex, name) {
+  return [
+    normalizePageUrl(parentUrl),
+    directoryPathIdentity(directoryPath),
+    String(itemIndex ?? ""),
+    String(name || "")
+  ].join("\u0000");
+}
+
+function discoveredItemRetryKey(parentUrl, directoryPath, name) {
+  return [
+    normalizePageUrl(parentUrl),
+    directoryPathIdentity(directoryPath),
+    String(name || "")
+  ].join("\u0000");
+}
+
+function storedItemRetryKey(item) {
+  if (item?.retryKey) return item.retryKey;
+  if (Array.isArray(item?.directoryPath)) {
+    return discoveredItemRetryKey(item.parentUrl, item.directoryPath, item.name);
+  }
+  return `${item?.parentUrl || ""}\u0000${item?.name || ""}`;
+}
+
+function normalizeDirectoryRoute(route) {
+  return (Array.isArray(route) ? route : []).flatMap((step) => {
+    const name = String(step?.name || "").trim();
+    if (!name) return [];
+    return [{ name, itemIndex: String(step?.itemIndex ?? "") }];
+  });
+}
+
 function normalizeFolderReceipts(receipts) {
   const byKey = new Map();
   for (const source of Array.isArray(receipts) ? receipts : []) {
@@ -988,10 +1025,10 @@ function syncActiveJobSummary(state) {
       .map((item) => ({ name: item.name, stage: item.failureStage, error: item.error }));
     job.failureRetryKeys = [...new Set((state.items || [])
       .filter((item) => item.status === "failed")
-      .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+      .map(storedItemRetryKey))];
     job.cancelledRetryKeys = [...new Set((state.items || [])
       .filter((item) => item.status === "cancelled")
-      .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+      .map(storedItemRetryKey))];
   }
   if (Number.isInteger(state.rootProjectCount) && state.rootProjectCount >= 0) {
     job.projectCount = state.rootProjectCount;
@@ -2149,20 +2186,34 @@ async function sendToWork(state, message, timeoutMs, label) {
 }
 
 async function getWorkUrl(state) {
-  if (state.triggerMode === "folder_button") {
-    const response = await sendToWork(state, { type: "PING" }, 5000, "读取隐藏工作区地址");
-    return response?.url || state.workerReadyUrl;
-  }
-  return (await getTab(state.workTabId))?.url || "";
+  const context = await getWorkDirectoryContext(state);
+  return context.url;
 }
 
-async function waitForWorkUrlChange(state, beforeUrl, timeoutMs) {
+async function getWorkDirectoryContext(state) {
+  if (state.triggerMode === "folder_button") {
+    const response = await sendToWork(state, { type: "PING" }, 5000, "读取隐藏工作区地址");
+    return {
+      url: response?.url || state.workerReadyUrl,
+      directoryName: String(response?.directoryName || "").trim(),
+      contextKey: String(response?.contextKey || response?.url || state.workerReadyUrl || "")
+    };
+  }
+  const url = (await getTab(state.workTabId))?.url || "";
+  return { url, directoryName: "", contextKey: url };
+}
+
+async function waitForWorkDirectoryChange(state, beforeContext, expectedName, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let workerInterruption = null;
   while (Date.now() < deadline) {
     try {
-      const url = await getWorkUrl(state);
-      if (url && url !== beforeUrl && /\/pageDetail\/[a-z0-9]+/i.test(url)) return url;
+      const context = await getWorkDirectoryContext(state);
+      const urlChanged = context.url && context.url !== beforeContext.url &&
+        /\/pageDetail\/[a-z0-9]+/i.test(context.url);
+      const sameUrlDirectoryChanged = context.directoryName === expectedName &&
+        context.contextKey && context.contextKey !== beforeContext.contextKey;
+      if (urlChanged || sameUrlDirectoryChanged) return context;
     } catch (error) {
       if (isWorkerUnavailableError(error)) workerInterruption = error;
       // The content script is briefly unavailable while the frame navigates.
@@ -2170,7 +2221,49 @@ async function waitForWorkUrlChange(state, beforeUrl, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 180));
   }
   if (workerInterruption) throw workerInterruption;
-  throw new Error("点击后页面地址未变化");
+  throw new Error(`点击后没有进入目标文件夹：${expectedName}`);
+}
+
+async function waitForWorkUrlChange(state, beforeUrl, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let workerInterruption = null;
+  while (Date.now() < deadline) {
+    try {
+      const current = await getWorkUrl(state);
+      if (current && current !== beforeUrl && /\/pageDetail\/[a-z0-9]+/i.test(current)) return current;
+    } catch (error) {
+      if (isWorkerUnavailableError(error)) workerInterruption = error;
+      // The content script is briefly unavailable while a file preview opens.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+  if (workerInterruption) throw workerInterruption;
+  throw new Error("点击后页面地址没有变化");
+}
+
+async function openDirectoryStep(state, step, timeoutMs) {
+  await sendToWork(state, { type: "CLEAN_STATE" }, 5000, "清理页面状态");
+  const beforeContext = await getWorkDirectoryContext(state);
+  const openResult = await sendToWork(state, {
+    type: "OPEN_ITEM",
+    name: step.name,
+    itemIndex: step.itemIndex,
+    expectedType: "folder",
+    timeoutMs: state.settings.timeouts.itemLookup
+  }, state.settings.timeouts.itemLookup + 3000, "定位子目录");
+  if (!openResult.clicked) {
+    throw new Error(openResult.reason === "not_found" ? "未找到文件夹" : "文件夹行已失效");
+  }
+  return waitForWorkDirectoryChange(state, beforeContext, step.name, timeoutMs);
+}
+
+async function navigateDirectoryRoute(state, rootUrl, route, timeoutMs) {
+  await loadWorkUrl(state, rootUrl, state.settings.timeouts.directoryLoad, true);
+  let context = await getWorkDirectoryContext(state);
+  for (const step of normalizeDirectoryRoute(route)) {
+    context = await openDirectoryStep(state, step, timeoutMs);
+  }
+  return context;
 }
 
 function schedulePump(delayMs = 500) {
@@ -2222,14 +2315,18 @@ function prepareJobForExecution(state, job, reuseWorker) {
   if (job.scope === "page") {
     state.scanQueue = [{
       url: job.parentUrl,
-      path: [job.folderName]
+      path: [job.folderName],
+      rootUrl: job.parentUrl,
+      route: []
     }];
     state.resolveQueue = [];
   } else {
     state.resolveQueue = [{
       key: job.key,
+      rootUrl: job.parentUrl,
       parentUrl: job.parentUrl,
       parentPath: [],
+      parentRoute: [],
       name: job.folderName,
       itemIndex: job.folderItemIndex
     }];
@@ -2453,7 +2550,16 @@ async function processScanStep(state) {
         type: "FOLDER_TASK_STATUS",
         message: `正在读取：${entry.path.join("/") || state.selectedFolderName}`
       });
-      await loadWorkUrl(state, entry.url, settings.timeouts.directoryLoad, true);
+      if (entry.rootUrl || Array.isArray(entry.route)) {
+        await navigateDirectoryRoute(
+          state,
+          entry.rootUrl || state.rootUrl || entry.url,
+          entry.route || [],
+          settings.timeouts.fileOpen
+        );
+      } else {
+        await loadWorkUrl(state, entry.url, settings.timeouts.directoryLoad, true);
+      }
       const result = await sendToWork(state, {
         type: "SCAN_DIRECTORY",
         timeoutMs: settings.timeouts.scanList
@@ -2508,12 +2614,19 @@ async function processScanStep(state) {
           }
           state.scannedFolderCount += 1;
           if (settings.recursive) {
-            const resolveKey = `${entry.url}\u0000${scanned.itemIndex}\u0000${scanned.name}`;
+            const resolveKey = discoveredItemId(
+              entry.url,
+              directoryPath,
+              scanned.itemIndex,
+              scanned.name
+            );
             if (!state.resolveQueue.some((candidate) => candidate.key === resolveKey)) {
               state.resolveQueue.push({
                 key: resolveKey,
+                rootUrl: entry.rootUrl || state.rootUrl || entry.url,
                 parentUrl: entry.url,
                 parentPath: directoryPath,
+                parentRoute: normalizeDirectoryRoute(entry.route),
                 name: scanned.name,
                 itemIndex: scanned.itemIndex
               });
@@ -2521,12 +2634,15 @@ async function processScanStep(state) {
           }
           continue;
         }
-        const key = `${entry.url}\u0000${scanned.itemIndex}\u0000${scanned.name}`;
+        const key = discoveredItemId(entry.url, directoryPath, scanned.itemIndex, scanned.name);
         if (state.items.some((item) => item.id === key)) continue;
         const systemMetadata = isSystemMetadataFile(scanned.name);
         const currentJob = activeJob(state);
         const retryKeys = currentJob?.retryKeys;
-        const retrySelected = !retryKeys?.length || retryKeys.includes(`${entry.url}\u0000${scanned.name}`);
+        const retryKey = discoveredItemRetryKey(entry.url, directoryPath, scanned.name);
+        const legacyRetryKey = `${entry.url}\u0000${scanned.name}`;
+        const retrySelected = !retryKeys?.length ||
+          retryKeys.includes(retryKey) || retryKeys.includes(legacyRetryKey);
         const relativeTargetKey = normalizeGopeedTargetKey(buildDownloadFilename({
           name: scanned.name,
           directoryPath
@@ -2541,6 +2657,9 @@ async function processScanStep(state) {
           itemIndex: scanned.itemIndex,
           parentUrl: entry.url,
           directoryPath,
+          rootUrl: entry.rootUrl || state.rootUrl || entry.url,
+          directoryRoute: normalizeDirectoryRoute(entry.route),
+          retryKey,
           selected,
           status: selected ? "pending" : "skipped",
           stage: "已扫描",
@@ -2642,21 +2761,28 @@ async function processScanStep(state) {
         type: "FOLDER_TASK_STATUS",
         message: `正在进入：${[...folder.parentPath, folder.name].join("/")}`
       });
-      await loadWorkUrl(state, folder.parentUrl, settings.timeouts.directoryLoad, true);
-      await sendToWork(state, { type: "CLEAN_STATE" }, 5000, "清理页面状态");
-      const beforeUrl = await getWorkUrl(state);
-      const openResult = await sendToWork(state, {
-        type: "OPEN_ITEM",
-        name: folder.name,
-        itemIndex: folder.itemIndex,
-        expectedType: "folder",
-        timeoutMs: settings.timeouts.itemLookup
-      }, settings.timeouts.itemLookup + 3000, "定位子目录");
-      if (!openResult.clicked) throw new Error(openResult.reason === "not_found" ? "未找到文件夹" : "文件夹行已失效");
-      const childUrl = await waitForWorkUrlChange(state, beforeUrl, settings.timeouts.fileOpen);
+      const rootUrl = folder.rootUrl || state.rootUrl || folder.parentUrl;
+      const parentRoute = normalizeDirectoryRoute(folder.parentRoute);
+      await navigateDirectoryRoute(
+        state,
+        rootUrl,
+        parentRoute,
+        settings.timeouts.fileOpen
+      );
+      const childContext = await openDirectoryStep(
+        state,
+        { name: folder.name, itemIndex: folder.itemIndex },
+        settings.timeouts.fileOpen
+      );
+      const childRoute = [
+        ...parentRoute,
+        { name: folder.name, itemIndex: String(folder.itemIndex ?? "") }
+      ];
       state.scanQueue.push({
-        url: childUrl,
-        path: [...folder.parentPath, folder.name]
+        url: childContext.url,
+        path: [...folder.parentPath, folder.name],
+        rootUrl,
+        route: childRoute
       });
       state.resolveQueue.shift();
       updatePersistentWorkflow(state, {
@@ -3915,7 +4041,16 @@ async function processDownloadStep(state, { duringScan = false, skipTransferSync
       type: "FOLDER_TASK_STATUS",
       message: `正在准备 ${state.items.filter((entry) => entry.status === "success").length + 1} / ${state.items.filter((entry) => entry.selected).length}：${item.name}`
     });
-    await loadWorkUrl(state, item.parentUrl, state.settings.timeouts.directoryLoad, true);
+    if (item.rootUrl || Array.isArray(item.directoryRoute)) {
+      await navigateDirectoryRoute(
+        state,
+        item.rootUrl || state.rootUrl || item.parentUrl,
+        item.directoryRoute || [],
+        state.settings.timeouts.fileOpen
+      );
+    } else {
+      await loadWorkUrl(state, item.parentUrl, state.settings.timeouts.directoryLoad, true);
+    }
     await sendToWork(state, { type: "CLEAN_STATE" }, 5000, "清理上一次页面状态");
 
     item.stage = "定位文件";
@@ -4749,15 +4884,30 @@ async function retryFailed() {
   const { state } = await getStored({ loadItems: false });
   const job = [...(state.jobs || [])]
     .reverse()
-    .find((candidate) => (candidate.counts?.failed || 0) > 0 && candidate.failureRetryKeys?.length);
-  if (!job) throw new Error("没有失败文件可重试");
+    .find((candidate) => failedFileRetryKeys(candidate).length || directoryIssueCount(candidate) > 0);
+  if (!job) throw new Error("没有未完成文件或遗漏目录可重试");
   return retryJob(job.id);
+}
+
+function failedFileRetryKeys(job) {
+  return Array.isArray(job?.failureRetryKeys) ? job.failureRetryKeys.filter(Boolean) : [];
+}
+
+function directoryIssueCount(job) {
+  return Math.max(
+    Math.max(0, Number(job?.counts?.scanFailures) || 0),
+    Math.max(0, Number(job?.counts?.unverifiedDirectories) || 0)
+  );
 }
 
 async function retryJob(jobId) {
   const { state } = await getStored();
   const source = (state.jobs || []).find((candidate) => candidate.id === jobId);
-  if (!source?.failureRetryKeys?.length) throw new Error("这个任务没有可重试的失败文件");
+  const fileRetryKeys = failedFileRetryKeys(source);
+  const missingDirectories = directoryIssueCount(source);
+  if (!fileRetryKeys.length && !missingDirectories) {
+    throw new Error("这个任务没有可重试的失败文件或遗漏目录");
+  }
   const existing = (state.jobs || []).find(
     (candidate) => candidate.retryOfJobId === source.id && !isJobTerminal(candidate.status)
   );
@@ -4767,7 +4917,7 @@ async function retryJob(jobId) {
     key: source.key,
     sourceTabId: source.sourceTabId,
     folderName: source.folderName,
-    displayName: `${source.folderName}（重试失败项）`,
+    displayName: `${source.folderName}（重试未完成项）`,
     folderItemIndex: source.folderItemIndex,
     parentUrl: source.parentUrl,
     ...(source.batchId ? {
@@ -4776,14 +4926,16 @@ async function retryJob(jobId) {
       batchPaused: Boolean(source.batchPaused)
     } : {}),
     retryOfJobId: source.id,
-    retryKeys: source.failureRetryKeys,
+    retryKeys: missingDirectories ? [] : fileRetryKeys,
     status: "queued",
     cancelRequested: false,
     createdAt: new Date().toISOString(),
     startedAt: "",
     completedAt: "",
     counts: summarizeItems([], 0, 0),
-    lastMessage: `等待重新扫描并重试 ${source.failureRetryKeys.length} 个失败文件`
+    lastMessage: missingDirectories
+      ? `等待重新扫描整个文件夹，补齐 ${missingDirectories} 个遗漏目录`
+      : `等待重新扫描并重试 ${fileRetryKeys.length} 个失败文件`
   };
   state.jobs.push(job);
   if (!state.activeJobId) prepareJobForExecution(state, job, false);
@@ -4805,7 +4957,7 @@ function cancelledRetryKeysForJob(state, source) {
   if (latestCancelled?.id !== source?.id || state._itemsLoaded === false || state.activeJobId) return [];
   return [...new Set((state.items || [])
     .filter((item) => item.status === "cancelled")
-    .map((item) => `${item.parentUrl}\u0000${item.name}`))];
+    .map(storedItemRetryKey))];
 }
 
 async function restoreCancelledJob(jobId, preferredSourceTabId = null) {

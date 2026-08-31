@@ -687,11 +687,16 @@
 
   function queueJobDetail(job) {
     const counts = job.counts || {};
+    const directoryIssues = Math.max(
+      Number(counts.scanFailures) || 0,
+      Number(counts.unverifiedDirectories) || 0
+    );
+    const directoryIssueSuffix = directoryIssues ? ` · 遗漏 ${directoryIssues} 个目录` : "";
     if (job.status === "queued") {
       return job.queuePosition > 1 ? `前面还有 ${job.queuePosition - 1} 个任务` : "等待开始";
     }
     if (["waiting_worker", "scanning"].includes(job.status)) {
-      return `已找到 ${counts.discoveredFiles || 0} 个文件`;
+      return `已找到 ${counts.discoveredFiles || 0} 个文件${directoryIssueSuffix}`;
     }
     const success = Number(counts.success) || 0;
     const failed = Number(counts.failed) || 0;
@@ -701,11 +706,15 @@
       return cancelled ? `已完成 ${success} 个 · ${cancelled} 个可继续` : `已完成 ${success} 个`;
     }
     if (job.status === "failed") {
+      if (directoryIssues) {
+        const fileDetail = total ? `文件已完成 ${success} / ${total}` : "文件查找未完整";
+        return `${fileDetail}${directoryIssueSuffix}`;
+      }
       return failed ? `已完成 ${success} 个 · ${failed} 个未完成` : "未能开始，请稍后重试";
     }
     if (!total) return "正在准备文件";
     const paused = ["paused", "draining_paused"].includes(job.status) ? "已暂停 · " : "";
-    return `${paused}已完成 ${success} / ${total}`;
+    return `${paused}文件已完成 ${success} / ${total}${directoryIssueSuffix}`;
   }
 
   function queueUserFacingError(error) {
@@ -1107,6 +1116,22 @@
     return candidates[candidates.length - 1] || "POPO目录";
   }
 
+  function currentDirectoryContext() {
+    const scroller = currentDirectoryScroller();
+    const entries = renderedEntries(scroller).map(({ item }) => (
+      `${item.type}:${item.itemIndex}:${item.name}`
+    ));
+    const breadcrumb = Array.from(document.querySelectorAll(
+      '[class*="titleInput"], [class*="breadcrumb"]'
+    )).map((element) => normalizeText(element.textContent)).filter(Boolean).join(" > ");
+    const directoryName = currentDirectoryName();
+    return {
+      url: location.href,
+      directoryName,
+      contextKey: [location.href, directoryName, breadcrumb, entries.join("|")].join("\u0000")
+    };
+  }
+
   async function waitForDirectory(timeoutMs) {
     return waitUntil(() => {
       if (!/\/pageDetail\/[a-z0-9]+/i.test(location.href)) return null;
@@ -1505,8 +1530,10 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       switch (message.type) {
-        case "PING":
-          return { ok: true, url: location.href, result: { url: location.href } };
+        case "PING": {
+          const context = currentDirectoryContext();
+          return { ok: true, url: context.url, result: context };
+        }
         case "SCAN_DIRECTORY":
           return {
             ok: true,

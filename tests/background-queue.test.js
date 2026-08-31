@@ -1481,8 +1481,10 @@ test("一键下载核对完整页面后把每个文件夹分别加入持久化�
     assert.deepEqual(harness.stored.popoState.jobs.map((job) => job.batchPaused), [false, false]);
     assert.deepEqual(harness.stored.popoState.resolveQueue, [{
       key: response.jobs[0].key,
+      rootUrl: base,
       parentUrl: base,
       parentPath: [],
+      parentRoute: [],
       name: "子文件夹 A",
       itemIndex: "1"
     }]);
@@ -1773,6 +1775,190 @@ test("单独文件夹首次定位失败会自动重试且不会立即判定查�
     assert.equal(openAttempts, 2);
     assert.deepEqual(harness.stored.popoState.resolveQueue, []);
     assert.deepEqual(harness.stored.popoState.scanFailures, []);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("同一 URL 的多层子目录按完整路径扫描且不会合并同名文件", async () => {
+  const rootUrl = "https://docs.popo.netease.com/team/pc/team1/pageDetail/same1";
+  const state = transferState({ mode: "scanning", jobStatus: "scanning" });
+  state.triggerMode = "folder_button";
+  state.phase = "resolving_selection";
+  state.rootUrl = rootUrl;
+  state.workerReadyUrl = rootUrl;
+  state.selectedFolderName = "河西版本";
+  state.jobs[0] = {
+    ...state.jobs[0],
+    scope: "folder",
+    folderName: "河西版本",
+    folderItemIndex: "1",
+    parentUrl: rootUrl
+  };
+  state.items = [];
+  state.activeTransfers = [];
+  state.activeItemId = null;
+  state.scanQueue = [];
+  state.resolveQueue = [{
+    key: "same-url-root",
+    rootUrl,
+    parentUrl: rootUrl,
+    parentPath: [],
+    parentRoute: [],
+    name: "河西版本",
+    itemIndex: "1"
+  }];
+  state.scanFailures = [];
+  state.settings = {
+    ...state.settings,
+    recursive: true,
+    preserveStructure: true,
+    timeouts: {
+      directoryLoad: 200,
+      itemLookup: 200,
+      fileOpen: 200,
+      scanList: 200
+    }
+  };
+
+  let route = [];
+  let sendRuntimeMessage;
+  const routeKey = () => route.join("/");
+  const directoryItems = {
+    "河西版本": [{ type: "folder", name: "25年4月", itemIndex: "2" }],
+    "河西版本/25年4月": [
+      { type: "folder", name: "A", itemIndex: "3" },
+      { type: "folder", name: "B", itemIndex: "4" }
+    ],
+    "河西版本/25年4月/A": [
+      { type: "file", name: "desktop.ini", itemIndex: "5" }
+    ],
+    "河西版本/25年4月/B": [
+      { type: "file", name: "desktop.ini", itemIndex: "5" }
+    ]
+  };
+  const harness = createHarness(
+    { popoSettings: state.settings, popoState: state },
+    {
+      async sendTabMessage(_tabId, message) {
+        if (message.type === "NAVIGATE_WORKER") {
+          route = [];
+          setTimeout(() => {
+            void sendRuntimeMessage(
+              { type: "REGISTER_WORKER_FRAME", url: rootUrl },
+              { tab: { id: 7, url: rootUrl }, url: rootUrl, frameId: 42 }
+            );
+          }, 0);
+          return { ok: true };
+        }
+        if (message.type === "CLEAN_STATE") return { ok: true, result: {} };
+        if (message.type === "PING") {
+          const directoryName = route.at(-1) || "根目录";
+          return {
+            ok: true,
+            result: { url: rootUrl, directoryName, contextKey: `${rootUrl}\u0000${routeKey()}` }
+          };
+        }
+        if (message.type === "OPEN_ITEM") {
+          route.push(message.name);
+          return { ok: true, result: { clicked: true } };
+        }
+        if (message.type === "SCAN_DIRECTORY") {
+          const items = directoryItems[routeKey()] || [];
+          return {
+            ok: true,
+            result: {
+              directoryName: route.at(-1) || "根目录",
+              url: rootUrl,
+              diagnostics: { expectedItemCount: items.length },
+              items
+            }
+          };
+        }
+        return { ok: true, result: {} };
+      }
+    }
+  );
+  sendRuntimeMessage = harness.send;
+
+  try {
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      harness.fireAlarm("popo-stable-downloader-pump");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (harness.stored.popoState?.jobs?.[0]?.status === "complete") break;
+    }
+    await waitUntil(() => harness.stored.popoState?.jobs?.[0]?.status === "complete");
+    const storedItems = Object.entries(harness.stored)
+      .filter(([key]) => key.startsWith("popoItems:job-gopeed-control:"))
+      .flatMap(([, items]) => items);
+    assert.equal(storedItems.length, 2);
+    assert.deepEqual(
+      storedItems.map((item) => item.directoryPath.join("/")).sort(),
+      ["河西版本/25年4月/A", "河西版本/25年4月/B"]
+    );
+    assert.deepEqual(
+      storedItems.map((item) => item.directoryRoute.map((step) => step.name).join("/")).sort(),
+      ["河西版本/25年4月/A", "河西版本/25年4月/B"]
+    );
+    assert.equal(new Set(storedItems.map((item) => item.id)).size, 2);
+    assert.equal(harness.stored.popoState.jobs[0].counts.scanFailures, 0);
+    assert.equal(harness.stored.popoState.jobs[0].counts.unverifiedDirectories, 0);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("遗漏目录可以重扫整个文件夹而不要求先有失败文件", async () => {
+  const rootUrl = "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1";
+  const now = new Date().toISOString();
+  const state = {
+    version: 4,
+    runToken: "run-directory-retry",
+    jobs: [{
+      id: "job-directory-incomplete",
+      key: "folder-directory-incomplete",
+      sourceTabId: 7,
+      folderName: "25年4月",
+      folderItemIndex: "3",
+      parentUrl: rootUrl,
+      status: "failed",
+      createdAt: now,
+      completedAt: now,
+      counts: {
+        files: 3,
+        success: 3,
+        failed: 0,
+        scanFailures: 1,
+        unverifiedDirectories: 1
+      },
+      failureRetryKeys: []
+    }],
+    activeJobId: null,
+    mode: "idle",
+    phase: "idle",
+    settings: { concurrency: 1, gopeedConnections: 1 },
+    items: [],
+    activeTransfers: [],
+    scanQueue: [],
+    resolveQueue: [],
+    scanFailures: [],
+    logs: []
+  };
+  const harness = createHarness({ popoSettings: state.settings, popoState: state });
+  try {
+    const response = await harness.send({
+      type: "RETRY_JOB",
+      jobId: "job-directory-incomplete"
+    });
+    assert.equal(response.ok, true);
+    const retry = harness.stored.popoState.jobs.find(
+      (job) => job.retryOfJobId === "job-directory-incomplete"
+    );
+    assert.ok(retry);
+    assert.deepEqual(retry.retryKeys, []);
+    assert.equal(retry.status, "waiting_worker");
+    assert.equal(retry.displayName, "25年4月（重试未完成项）");
+    assert.equal(harness.stored.popoState.resolveQueue[0].name, "25年4月");
   } finally {
     harness.cleanup();
   }
