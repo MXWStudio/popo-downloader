@@ -73,6 +73,13 @@ interface DiagnosticStatusResponse {
   diagnosticStatus: DiagnosticStatus;
 }
 
+interface DevSyncMarker {
+  schemaVersion?: number;
+  channel?: string;
+  syncedAtUtc?: string;
+  label?: string;
+}
+
 async function callExtension<T extends object = Record<string, never>>(
   message: Record<string, unknown>
 ): Promise<T> {
@@ -109,6 +116,42 @@ function usePopupPresence(): void {
       }
     };
   }, []);
+}
+
+function useDevSyncBatch(versionName: string): string {
+  const [label, setLabel] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!/-dev$/i.test(versionName)) {
+      setLabel("");
+      return () => { cancelled = true; };
+    }
+    void fetch(chrome.runtime.getURL("dev-sync.json"), { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Dev sync marker was not found");
+        return await response.json() as DevSyncMarker;
+      })
+      .then((marker) => {
+        const markerLabel = String(marker.label || "").trim();
+        const syncedAt = Date.parse(String(marker.syncedAtUtc || ""));
+        if (
+          marker.schemaVersion === 1 &&
+          marker.channel === "dev" &&
+          Number.isFinite(syncedAt) &&
+          /^DEV · \d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(markerLabel) &&
+          !cancelled
+        ) {
+          setLabel(markerLabel);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLabel("");
+      });
+    return () => { cancelled = true; };
+  }, [versionName]);
+
+  return label;
 }
 
 function usePopupState() {
@@ -729,8 +772,10 @@ function PopupApp() {
     networkHealth.activeTasks > 0 &&
     (networkHealth.highProbabilityWindow || ["slow", "severe"].includes(networkHealth.status))
   );
-  const version = chrome.runtime.getManifest().version_name ||
-    chrome.runtime.getManifest().version;
+  const manifest = chrome.runtime.getManifest();
+  const versionName = manifest.version_name || "";
+  const version = versionName || manifest.version;
+  const devSyncBatch = useDevSyncBatch(versionName);
 
   const showError = useCallback((caught: unknown) => {
     console.warn("扩展操作失败", caught);
@@ -829,7 +874,8 @@ function PopupApp() {
         {error?.message || ""}
       </p>
       <footer id="versionInfo" title={updateStatus?.message || ""}>
-        版本 {version}{updateStatusLabel(updateStatus)}
+        <span>版本 {version}{updateStatusLabel(updateStatus)}</span>
+        {devSyncBatch && <span id="devSyncBatch">{devSyncBatch}</span>}
       </footer>
     </main>
   );
