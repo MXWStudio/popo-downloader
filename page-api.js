@@ -40,14 +40,24 @@
 
   function reportObservedUrl(value) {
     const candidate = String(value || "").trim();
-    if (!/^https?:\/\//i.test(candidate)) return;
-    const existingIndex = observedUrls.indexOf(candidate);
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      return;
+    }
+    if (parsed.protocol !== "https:" ||
+        !parsed.hostname.toLowerCase().endsWith(".s3v2.nie.netease.com") ||
+        parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) return;
+    parsed.hash = "";
+    const allowedUrl = parsed.toString();
+    const existingIndex = observedUrls.indexOf(allowedUrl);
     if (existingIndex >= 0) observedUrls.splice(existingIndex, 1);
-    observedUrls.push(candidate);
+    observedUrls.push(allowedUrl);
     if (observedUrls.length > MAX_OBSERVED_URLS) {
       observedUrls.splice(0, observedUrls.length - MAX_OBSERVED_URLS);
     }
-    window.dispatchEvent(new CustomEvent(OBSERVED_DOWNLOAD_URL_EVENT, { detail: candidate }));
+    window.dispatchEvent(new CustomEvent(OBSERVED_DOWNLOAD_URL_EVENT, { detail: allowedUrl }));
   }
 
   window.addEventListener(REQUEST_OBSERVED_DOWNLOAD_URLS_EVENT, () => {

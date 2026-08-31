@@ -239,10 +239,26 @@
     return segments.join("/");
   }
 
+  function normalizeAllowedDownloadUrl(value) {
+    const text = String(value || "").trim();
+    if (!/^https:\/\//i.test(text)) return "";
+    try {
+      const url = new URL(text);
+      const hostname = url.hostname.toLowerCase();
+      if (url.protocol !== "https:" || !hostname.endsWith(".s3v2.nie.netease.com") ||
+          url.username || url.password ||
+          (url.port && url.port !== "443")) return "";
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return "";
+    }
+  }
+
   function findFirstHttpUrl(value, depth) {
     if (depth > 8 || value == null) return "";
     if (typeof value === "string") {
-      return /^https?:\/\//i.test(value) ? value : "";
+      return normalizeAllowedDownloadUrl(value);
     }
     if (Array.isArray(value)) {
       for (const entry of value) {
@@ -267,24 +283,12 @@
     return "";
   }
 
-  function normalizeObservedHttpUrl(value) {
-    const text = String(value || "").trim();
-    if (!/^https?:\/\//i.test(text)) return "";
-    try {
-      const url = new URL(text);
-      url.hash = "";
-      return url.toString();
-    } catch {
-      return "";
-    }
-  }
-
   function selectObservedDownloadUrl(observedUrls, options = {}) {
     const pageId = String(options.pageId || "").trim().toLowerCase();
     const preferredFilename = normalizePreviewTitle(options.filename || "");
     const candidates = [];
     for (const [index, raw] of (Array.isArray(observedUrls) ? observedUrls : []).entries()) {
-      const normalized = normalizeObservedHttpUrl(raw);
+      const normalized = normalizeAllowedDownloadUrl(raw);
       if (!normalized) continue;
       let url;
       try {
@@ -628,6 +632,7 @@
     makeCsv,
     matchesFilters,
     normalizeFormats,
+    normalizeAllowedDownloadUrl,
     normalizePreviewTitle,
     previewTitleMatchesFile,
     resolveDownloadFilename,

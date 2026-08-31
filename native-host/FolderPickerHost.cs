@@ -1024,15 +1024,8 @@ internal static class FolderPickerHost
         processId = 0;
         bundled = false;
         int bundledProcessId = FindBundledGopeedProcess(expectedPath);
-        List<int> processIds;
-        if (bundledProcessId > 0)
-        {
-            processIds = new List<int> { bundledProcessId };
-        }
-        else
-        {
-            processIds = FindGopeedProcessIds();
-        }
+        if (bundledProcessId <= 0) return false;
+        List<int> processIds = new List<int> { bundledProcessId };
         foreach (int candidateProcessId in processIds)
         {
             foreach (int candidatePort in FindListeningPorts(candidateProcessId))
@@ -1137,6 +1130,12 @@ internal static class FolderPickerHost
                 int colon = localAddress.LastIndexOf(':');
                 int port;
                 if (colon < 0 || !Int32.TryParse(localAddress.Substring(colon + 1), out port))
+                {
+                    continue;
+                }
+                string listenerAddress = localAddress.Substring(0, colon).Trim('[', ']');
+                if (!String.Equals(listenerAddress, "127.0.0.1", StringComparison.Ordinal) &&
+                    !String.Equals(listenerAddress, "::1", StringComparison.Ordinal))
                 {
                     continue;
                 }

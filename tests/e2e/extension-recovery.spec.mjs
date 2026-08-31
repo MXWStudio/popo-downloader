@@ -67,9 +67,8 @@ async function closeExtensionContext() {
   const activeContext = context;
   context = undefined;
   if (!activeContext) return;
-  await Promise.allSettled(
-    activeContext.pages().map((page) => page.close({ runBeforeUnload: false }))
-  );
+  // Closing the persistent context already closes every owned page. Explicit
+  // per-page closes can deadlock Chromium teardown on Windows extension pages.
   await activeContext.close().catch(() => {});
 }
 

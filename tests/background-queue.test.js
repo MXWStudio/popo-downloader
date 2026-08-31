@@ -49,12 +49,14 @@ function createHarness(initial = {}, options = {}) {
   const backgroundPath = require.resolve("../background.js");
   delete require.cache[backgroundPath];
   const previousFetch = Object.getOwnPropertyDescriptor(global, "fetch");
+  const previousSetTimeout = global.setTimeout;
   const stored = structuredClone(initial);
   const deletedGopeedTasks = [];
   const pausedGopeedTasks = [];
   const continuedGopeedTasks = [];
   const sentTabMessages = [];
   const nativeMessages = [];
+  let runtimeReloadCount = 0;
   const actionState = {};
   const storageAccessState = {};
 
@@ -100,6 +102,13 @@ function createHarness(initial = {}, options = {}) {
       value: options.fetch
     });
   }
+  if (Number.isFinite(options.updatePollDelayMs)) {
+    global.setTimeout = (callback, delay, ...args) => previousSetTimeout(
+      callback,
+      delay === 2000 ? options.updatePollDelayMs : delay,
+      ...args
+    );
+  }
   global.chrome = {
     action: {
       async setBadgeText({ text }) { actionState.text = text; },
@@ -114,6 +123,10 @@ function createHarness(initial = {}, options = {}) {
       ...(options.runtimeManifest ? {
         getManifest() { return structuredClone(options.runtimeManifest); }
       } : {}),
+      reload() {
+        runtimeReloadCount += 1;
+        if (options.onRuntimeReload) options.onRuntimeReload(runtimeReloadCount);
+      },
       async sendNativeMessage(host, message) {
         nativeMessages.push({ host, message: structuredClone(message) });
         if (options.sendNativeMessage) return options.sendNativeMessage(host, message);
@@ -152,7 +165,11 @@ function createHarness(initial = {}, options = {}) {
 
   require(backgroundPath);
   const listener = global.chrome.runtime.onMessage.listeners[0];
-  const send = (message, sender = { tab: { id: 7 }, frameId: 0 }) => new Promise((resolve) => {
+  const send = (message, sender = {
+    tab: { id: 7, url: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1" },
+    url: "https://docs.popo.netease.com/team/pc/team1/pageDetail/root1",
+    frameId: 0
+  }) => new Promise((resolve) => {
     assert.equal(listener(message, sender, resolve), true);
   });
   const cleanup = () => {
@@ -164,6 +181,7 @@ function createHarness(initial = {}, options = {}) {
     delete global.PopoRuntime;
     if (previousFetch) Object.defineProperty(global, "fetch", previousFetch);
     else delete global.fetch;
+    global.setTimeout = previousSetTimeout;
     delete require.cache[backgroundPath];
   };
   const fireAlarm = (name) => {
@@ -180,7 +198,8 @@ function createHarness(initial = {}, options = {}) {
     send,
     sentTabMessages,
     storageAccessState,
-    stored
+    stored,
+    get runtimeReloadCount() { return runtimeReloadCount; }
   };
 }
 
@@ -489,6 +508,238 @@ test("automatic update reports a managed-install path mismatch instead of claimi
     assert.equal(harness.stored.popoUpdateStatus.currentVersion, "0.7.4");
     assert.equal(harness.stored.popoUpdateStatus.targetVersion, "0.7.2");
     assert.match(harness.stored.popoUpdateStatus.message, /运行版本与绿色安装版本不一致/);
+    assert.match(harness.stored.popoUpdateStatus.message, /不会自动降级/);
+    assert.equal(harness.runtimeReloadCount, 0);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("successful automatic installation persists its handoff before reloading exactly once", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.7", version_name: "0.7.7" },
+      updatePollDelayMs: 0,
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") throw new Error("shadow agent unavailable");
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: true,
+            installedVersion: "0.7.7",
+            runtimeMatchesInstalled: true,
+            version: "0.7.8"
+          };
+        }
+        if (message.action === "apply_update") return { ok: true, started: true };
+        if (message.action === "update_status") {
+          return {
+            ok: true,
+            state: "succeeded",
+            currentVersion: "0.7.7",
+            targetVersion: "0.7.8",
+            transactionId: "update-078",
+            message: "installed"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.runtimeReloadCount === 1);
+    assert.equal(harness.stored.popoUpdateReloadState.targetVersion, "0.7.8");
+    assert.equal(harness.stored.popoUpdateReloadState.reloadRequired, true);
+    assert.equal(harness.stored.popoUpdateReloadState.reloadAttemptCount, 1);
+    assert.ok(Number.isFinite(Date.parse(harness.stored.popoUpdateReloadState.lastReloadRequestedAt)));
+    assert.deepEqual(
+      harness.nativeMessages.map(({ message }) => message.action),
+      ["agent_connection", "check_update", "apply_update", "update_status"]
+    );
+    assert.deepEqual(
+      harness.stored.popoUpdateHandoffLog.map(({ event }) => event),
+      ["UPDATE_INSTALL_SUCCEEDED", "UPDATE_RELOAD_REQUIRED", "UPDATE_RELOAD_REQUESTED"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("a new service worker recovers a succeeded install that the old worker did not observe", async () => {
+  let updateStatusReads = 0;
+  const harness = createHarness(
+    {
+      popoUpdateReloadState: {
+        targetVersion: "0.7.8",
+        reloadRequired: false,
+        reloadAttemptCount: 0,
+        lastReloadRequestedAt: ""
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.7", version_name: "0.7.7" },
+      updatePollDelayMs: 0,
+      async sendNativeMessage(_host, message) {
+        assert.equal(message.action, "update_status");
+        updateStatusReads += 1;
+        if (updateStatusReads === 1) {
+          return {
+            ok: true,
+            state: "installing",
+            currentVersion: "0.7.7",
+            targetVersion: "0.7.8",
+            transactionId: "update-recovered",
+            message: "installing"
+          };
+        }
+        return {
+          ok: true,
+          state: "succeeded",
+          currentVersion: "0.7.7",
+          targetVersion: "0.7.8",
+          transactionId: "update-recovered",
+          message: "installed"
+        };
+      }
+    }
+  );
+  try {
+    await waitUntil(() => harness.runtimeReloadCount === 1);
+    assert.equal(updateStatusReads, 2);
+    assert.equal(harness.stored.popoUpdateStatus.state, "succeeded");
+    assert.equal(harness.stored.popoUpdateReloadState.reloadAttemptCount, 1);
+    assert.deepEqual(
+      harness.stored.popoUpdateHandoffLog.map(({ event }) => event),
+      ["UPDATE_INSTALL_SUCCEEDED", "UPDATE_RELOAD_REQUIRED", "UPDATE_RELOAD_REQUESTED"]
+    );
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("an installed version newer than the runtime reloads once then remains path_mismatch", async () => {
+  const harness = createHarness(
+    {
+      popoSettings: {},
+      popoState: {
+        version: 4,
+        jobs: [],
+        activeJobId: null,
+        activeTransfers: [],
+        mode: "idle",
+        phase: "idle",
+        settings: {}
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.7", version_name: "0.7.7" },
+      async sendNativeMessage(_host, message) {
+        if (message.action === "agent_connection") throw new Error("shadow agent unavailable");
+        if (message.action === "check_update") {
+          return {
+            ok: true,
+            available: false,
+            installedVersion: "0.7.8",
+            runtimeMatchesInstalled: false,
+            version: "0.7.8"
+          };
+        }
+        throw new Error("unexpected native action " + message.action);
+      }
+    }
+  );
+  try {
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.runtimeReloadCount === 1);
+    assert.equal(harness.stored.popoUpdateReloadState.reloadAttemptCount, 1);
+    harness.fireAlarm("popo-stable-downloader-update");
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "path_mismatch");
+    assert.equal(harness.runtimeReloadCount, 1);
+    assert.match(harness.stored.popoUpdateStatus.message, /自动重载已尝试一次/);
+    assert.ok(harness.stored.popoUpdateHandoffLog.some(
+      ({ event }) => event === "UPDATE_RELOAD_GUARD_EXHAUSTED"
+    ));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("matching installed and runtime versions clear reloadRequired without another reload", async () => {
+  const harness = createHarness({
+    popoUpdateReloadState: {
+      targetVersion: "0.7.8",
+      reloadRequired: true,
+      reloadAttemptCount: 1,
+      lastReloadRequestedAt: "2026-08-28T06:00:00.000Z"
+    }
+  }, {
+    runtimeManifest: { version: "0.7.8", version_name: "0.7.8" }
+  });
+  try {
+    await waitUntil(() => harness.stored.popoUpdateReloadState?.reloadRequired === false);
+    assert.equal(harness.runtimeReloadCount, 0);
+    assert.equal(harness.stored.popoUpdateReloadState.reloadAttemptCount, 1);
+    assert.equal(harness.stored.popoUpdateHandoffLog.at(-1).event, "UPDATE_RUNTIME_CONFIRMED");
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("a recovered handoff never reloads a runtime newer than its installed target", async () => {
+  const harness = createHarness({
+    popoUpdateReloadState: {
+      targetVersion: "0.7.8",
+      reloadRequired: true,
+      reloadAttemptCount: 0,
+      lastReloadRequestedAt: ""
+    }
+  }, {
+    runtimeManifest: { version: "0.7.9", version_name: "0.7.9" }
+  });
+  try {
+    await waitUntil(() => harness.stored.popoUpdateStatus?.state === "path_mismatch");
+    assert.equal(harness.runtimeReloadCount, 0);
+    assert.match(harness.stored.popoUpdateStatus.message, /不会自动降级或重载/);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("native messaging failure cannot turn a pending handoff into install success", async () => {
+  const harness = createHarness(
+    {
+      popoUpdateReloadState: {
+        targetVersion: "0.7.8",
+        reloadRequired: false,
+        reloadAttemptCount: 0,
+        lastReloadRequestedAt: ""
+      }
+    },
+    {
+      runtimeManifest: { version: "0.7.7", version_name: "0.7.7" },
+      async sendNativeMessage() {
+        throw new Error("native host unavailable");
+      }
+    }
+  );
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(harness.runtimeReloadCount, 0);
+    assert.equal(harness.stored.popoUpdateReloadState.reloadRequired, false);
+    assert.notEqual(harness.stored.popoUpdateStatus?.state, "succeeded");
   } finally {
     harness.cleanup();
   }
@@ -633,7 +884,7 @@ test("update diagnostics expose only a bounded redacted shadow snapshot", async 
   });
   const harness = createHarness({
     popoUpdateStatus: {
-      state: "up_to_date",
+      state: "path_mismatch",
       currentVersion: "0.7.2",
       targetVersion: "D:\\private\\legacy-version.txt",
       message: "legacy message must not be exported",
@@ -662,7 +913,21 @@ test("update diagnostics expose only a bounded redacted shadow snapshot", async 
       checkedAt: "2026-08-14T02:00:00.000Z",
       privatePath: "D:\\private\\package.zip"
     },
-    popoAgentShadowComparisonHistory: history
+    popoAgentShadowComparisonHistory: history,
+    popoUpdateReloadState: {
+      targetVersion: "D:\\private\\target-version.txt",
+      reloadRequired: true,
+      reloadAttemptCount: 99,
+      lastReloadRequestedAt: "D:\\private\\reload-time.txt"
+    },
+    popoUpdateHandoffLog: [{
+      event: "UPDATE_RELOAD_REQUESTED",
+      currentVersion: "0.7.2",
+      targetVersion: "0.7.8",
+      transactionId: "C:\\private\\transaction.txt",
+      at: "2026-08-14T01:02:00.000Z",
+      secret: "handoff-secret-token"
+    }]
   }, {
     runtimeManifest: { version: "0.7.2", version_name: "0.7.2" }
   });
@@ -690,7 +955,14 @@ test("update diagnostics expose only a bounded redacted shadow snapshot", async 
     assert.equal(response.diagnostics.agent.protocol, 2);
     assert.equal(response.diagnostics.agent.targetVersion, "");
     assert.equal(response.diagnostics.agent.errorCode, "");
+    assert.equal(response.diagnostics.legacyUpdate.state, "path_mismatch");
     assert.equal(response.diagnostics.legacyUpdate.targetVersion, "");
+    assert.equal(response.diagnostics.updateHandoff.targetVersion, "");
+    assert.equal(response.diagnostics.updateHandoff.reloadRequired, false);
+    assert.equal(response.diagnostics.updateHandoff.reloadAttemptCount, 0);
+    assert.equal(response.diagnostics.updateHandoff.lastReloadRequestedAt, "");
+    assert.equal(response.diagnostics.updateHandoff.events.length, 1);
+    assert.equal(response.diagnostics.updateHandoff.events[0].transactionId, "");
     assert.equal(response.diagnostics.summary.total, 64);
     assert.ok(response.diagnostics.summary.matched > 0);
     assert.ok(response.diagnostics.summary.mismatched > 0);
@@ -700,12 +972,16 @@ test("update diagnostics expose only a bounded redacted shadow snapshot", async 
     const exported = JSON.stringify(response.diagnostics);
     for (const sensitive of [
       "history-secret-token",
+      "handoff-secret-token",
       "agent-secret-token",
       "127.0.0.1:54321",
       "127.0.0.1:65432",
       "legacy message must not be exported",
       "private\\agent-error.log",
       "private\\package.zip",
+      "private\\transaction.txt",
+      "private\\target-version.txt",
+      "private\\reload-time.txt",
       "secret.example/version",
       "private\\version.txt",
       "private-state",
@@ -1464,7 +1740,7 @@ test("单独文件夹首次定位失败会自动重试且不会立即判定查�
           setTimeout(() => {
             void sendRuntimeMessage(
               { type: "REGISTER_WORKER_FRAME", url: message.url },
-              { tab: { id: 7 }, frameId: 42 }
+              { tab: { id: 7, url: message.url }, url: message.url, frameId: 42 }
             );
           }, 0);
           return { ok: true };
@@ -3015,7 +3291,11 @@ test("原 POPO 标签页关闭后可在其他团队空间的 POPO 标签页恢�
   try {
     const response = await harness.send(
       { type: "SOURCE_PAGE_READY", url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1" },
-      { tab: { id: 9 }, frameId: 0 }
+      {
+        tab: { id: 9, url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1" },
+        url: "https://docs.popo.netease.com/team/pc/team2/pageDetail/another1",
+        frameId: 0
+      }
     );
     assert.equal(response.ok, true);
     assert.equal(response.needsWorker, true);

@@ -25,7 +25,8 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), 
 
 test("stable release automation validates and publishes in a safe order", () => {
   assert.match(workflow, /tags:\s*\r?\n\s+- "v\*\.\*\.\*"/);
-  assert.match(workflow, /permissions:\s*\r?\n\s+contents: write/);
+  assert.match(workflow, /permissions:\s*\r?\n\s+contents: read/);
+  assert.match(workflow, /publish:\s*\r?\n\s+needs: build[\s\S]*?permissions:\s*\r?\n\s+contents: write/);
   assert.match(workflow, /concurrency:\s*\r?\n\s+group: stable-release/);
   assert.match(workflow, /Prevent stable channel downgrade/);
   assert.match(workflow, /assert-release-version\.ps1/);
@@ -48,6 +49,19 @@ test("stable release automation validates and publishes in a safe order", () => 
   assert.match(workflow, /Restore trusted release automation after signing/);
   assert.match(workflow, /git -C release-source reset --hard HEAD/);
   assert.match(workflow, /git -C release-source clean -ffdx -e node_modules\//);
+  assert.match(workflow, /Transfer verified candidate to the Publish Runner/);
+  assert.match(workflow, /Receive verified release candidate/);
+  assert.match(workflow, /Reverify candidate before publishing/);
+
+  const buildJob = workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  publish:"));
+  const publishJob = workflow.slice(workflow.indexOf("  publish:"));
+  assert.match(buildJob, /npm --prefix release-source run check:full/);
+  assert.match(buildJob, /POPO_RELEASE_SIGNING_KEY_BASE64/);
+  assert.doesNotMatch(buildJob, /TENCENT_COS_SECRET_ID|TENCENT_COS_SECRET_KEY/);
+  assert.doesNotMatch(publishJob, /npm --prefix release-source run check:full/);
+  assert.doesNotMatch(publishJob, /POPO_RELEASE_SIGNING_KEY_BASE64/);
+  assert.match(publishJob, /TENCENT_COS_SECRET_ID/);
+  assert.match(publishJob, /contents: write/);
 
   const uploadPackage = workflow.indexOf("Upload or reuse immutable package in Tencent COS");
   const verifyPackage = workflow.indexOf("Read back and verify the COS package");
