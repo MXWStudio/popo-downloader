@@ -77,6 +77,38 @@ test("Dev Extension source synchronizes successfully and preserves the fixed Dev
     assert.equal(extensionId(manifest.key), "folfhehnopknchpoaajfpboibbhnlanf");
     assert.notEqual(extensionId(sourceManifest.key), extensionId(manifest.key));
     assert.equal(summary.IdentitiesDiffer, true);
+    const marker = JSON.parse(fs.readFileSync(path.join(fixture.target, "dev-sync.json"), "utf8"));
+    assert.equal(marker.schemaVersion, 1);
+    assert.equal(marker.channel, "dev");
+    assert.match(marker.label, /^DEV · \d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.equal(Number.isNaN(Date.parse(marker.syncedAtUtc)), false);
+    assert.equal(summary.SyncBatchTime, marker.label.slice("DEV · ".length));
+    assert.equal(summary.SyncedAtUtc, marker.syncedAtUtc);
+    assert.equal(fs.readFileSync(path.join(fixture.stable, "stable.marker"), "utf8"), "unchanged");
+  } finally {
+    fs.rmSync(fixture.sandbox, { recursive: true, force: true });
+  }
+});
+
+test("successful Dev sync advances the visible batch while a failed sync preserves it", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("PowerShell Dev Extension synchronization is Windows-only");
+    return;
+  }
+  const fixture = createFixture();
+  try {
+    assert.equal(invokeFixtureSync(fixture).status, 0);
+    const markerPath = path.join(fixture.target, "dev-sync.json");
+    const first = fs.readFileSync(markerPath, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    assert.equal(invokeFixtureSync(fixture).status, 0);
+    const second = fs.readFileSync(markerPath, "utf8");
+    assert.notEqual(second, first);
+
+    fs.rmSync(path.join(fixture.repo, "background.js"));
+    const failed = invokeFixtureSync(fixture);
+    assert.notEqual(failed.status, 0);
+    assert.equal(fs.readFileSync(markerPath, "utf8"), second);
     assert.equal(fs.readFileSync(path.join(fixture.stable, "stable.marker"), "utf8"), "unchanged");
   } finally {
     fs.rmSync(fixture.sandbox, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import { chromium, expect, test } from "@playwright/test";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -155,6 +155,36 @@ test.afterEach(async () => {
 
 test.afterAll(async () => {
   await rm(sandboxRoot, { recursive: true, force: true });
+});
+
+test("Dev popup shows the successful sync batch while Stable stays unmarked", async () => {
+  const manifestPath = join(extensionDir, "manifest.json");
+  const markerPath = join(extensionDir, "dev-sync.json");
+  const originalManifest = await readFile(manifestPath, "utf8");
+  const batch = "DEV · 08-31 10:44:57";
+  await writeFile(markerPath, JSON.stringify({
+    schemaVersion: 1,
+    channel: "dev",
+    syncedAtUtc: "2026-08-31T02:44:57.000Z",
+    label: batch
+  }), "utf8");
+  try {
+    let session = await launchExtension();
+    let popup = await openPopup(session.extensionId);
+    await expect(popup.locator("#devSyncBatch")).toHaveCount(0);
+    await closeExtensionContext();
+
+    const devManifest = JSON.parse(originalManifest);
+    devManifest.version_name = `${devManifest.version}-dev`;
+    await writeFile(manifestPath, JSON.stringify(devManifest), "utf8");
+    session = await launchExtension();
+    popup = await openPopup(session.extensionId);
+    await expect(popup.locator("#devSyncBatch")).toHaveText(batch);
+  } finally {
+    await closeExtensionContext();
+    await writeFile(manifestPath, originalManifest, "utf8");
+    await rm(markerPath, { force: true });
+  }
 });
 
 test("single React page root renders project count and recycled folder-row portals", async () => {

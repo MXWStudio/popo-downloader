@@ -697,12 +697,27 @@ button.danger { color: var(--red); }
 }
 
 footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex-wrap: wrap;
   margin-top: 10px;
   padding-top: 9px;
   border-top: 1px solid var(--line);
   color: var(--footer-copy);
   font-size: 9px;
   text-align: center;
+}
+
+#devSyncBatch {
+  padding: 1px 5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--blue);
+  background: var(--surface-soft);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .2px;
 }
 
 @keyframes popup-surface-flow {

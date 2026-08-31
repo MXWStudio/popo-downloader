@@ -105,6 +105,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Dev Extension synchronization failed.' }
     $syncResult = $syncOutput | Select-Object -Last 1 | ConvertFrom-Json
     Write-Output 'POPO_DEV_SYNC=PASS'
+    Write-Output "POPO_DEV_SYNC_BATCH_TIME=$([string]$syncResult.SyncBatchTime)"
   }
   else {
     Write-Output 'POPO_DEV_SYNC=NOT_REQUESTED'
@@ -118,6 +119,8 @@ try {
     DevTargetDirectory = if ($syncResult) { [string]$syncResult.TargetDirectory } else { '' }
     DevExtensionId = if ($syncResult) { [string]$syncResult.DevExtensionId } else { '' }
     VersionName = if ($syncResult) { [string]$syncResult.VersionName } else { '' }
+    DevSyncBatchTime = if ($syncResult) { [string]$syncResult.SyncBatchTime } else { '' }
+    DevSyncedAtUtc = if ($syncResult) { [string]$syncResult.SyncedAtUtc } else { '' }
   } | ConvertTo-Json -Compress
 }
 finally {

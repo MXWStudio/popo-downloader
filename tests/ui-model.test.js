@@ -19,9 +19,9 @@ test("共享 React 界面模型统一任务摘要、详情和进度", () => {
   };
 
   assert.equal(uiModel.summarizeLiveJobs([running, queued]), "1 个进行中 · 1 个排队");
-  assert.equal(uiModel.jobDetail(running), "已完成 4 / 10");
+  assert.equal(uiModel.jobDetail(running), "文件已完成 4 / 10");
   assert.equal(uiModel.jobProgress(running), 40);
-  assert.equal(uiModel.folderButtonDisplay(running).secondary, "4 / 10");
+  assert.equal(uiModel.folderButtonDisplay(running).secondary, "文件 4 / 10");
   assert.equal(uiModel.jobDetail(queued), "排队第 2");
   assert.equal(uiModel.jobProgress(queued), null);
 });
@@ -33,8 +33,8 @@ test("网页行内和任务详情只把成功下载计入完成数量", () => {
     counts: { files: 11, success: 1, failed: 3, cancelled: 4 }
   };
 
-  assert.equal(uiModel.jobDetail(paused), "已暂停 · 已完成 1 / 11");
-  assert.equal(uiModel.folderButtonDisplay(paused).secondary, "1 / 11");
+  assert.equal(uiModel.jobDetail(paused), "已暂停 · 文件已完成 1 / 11");
+  assert.equal(uiModel.folderButtonDisplay(paused).secondary, "文件 1 / 11");
   assert.equal(uiModel.jobProgress(paused), 9);
 
   const finishedWithFailure = {
@@ -144,6 +144,33 @@ test("网页行按钮用真实数量区分查找、空结果、遗漏和失败",
       warningSegment: false
     }
   );
+
+  const incompleteDirectory = {
+    id: "incomplete-directory",
+    status: "failed",
+    failureRetryKeys: [],
+    counts: {
+      files: 3,
+      discoveredFiles: 3,
+      success: 3,
+      failed: 0,
+      scanFailures: 1,
+      unverifiedDirectories: 1
+    }
+  };
+  assert.equal(
+    uiModel.jobDetail(incompleteDirectory),
+    "文件已完成 3 / 3 · 遗漏 1 个目录"
+  );
+  assert.equal(uiModel.failedRetryCount(incompleteDirectory), 1);
+  assert.deepEqual(uiModel.folderButtonDisplay(incompleteDirectory), {
+    visualState: "failed",
+    primary: "目录未完整",
+    secondary: "文件 3 / 3 · 遗漏 1 个目录 · 重试",
+    progress: 100,
+    indeterminate: false,
+    warningSegment: false
+  });
 });
 
 test("一键下载批次在页面顶部和文件夹行共享暂停状态", () => {

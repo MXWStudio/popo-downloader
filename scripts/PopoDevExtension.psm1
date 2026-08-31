@@ -167,6 +167,53 @@ function Assert-PopoDevManifest {
   }
 }
 
+function Write-PopoDevSyncMarker {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory = $true)][string]$DestinationPath,
+    [DateTimeOffset]$CompletedAt = [DateTimeOffset]::Now
+  )
+
+  $middleDot = '"\u00b7"' | ConvertFrom-Json
+  $marker = [ordered]@{
+    schemaVersion = 1
+    channel = 'dev'
+    syncedAtUtc = $CompletedAt.ToUniversalTime().ToString('o')
+    label = "DEV $middleDot $($CompletedAt.ToString('MM-dd HH:mm:ss'))"
+  }
+  [System.IO.File]::WriteAllText(
+    $DestinationPath,
+    ($marker | ConvertTo-Json -Compress),
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+}
+
+function Assert-PopoDevSyncMarker {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)][string]$MarkerPath)
+
+  if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
+    throw "Dev synchronization marker was not found: $MarkerPath"
+  }
+  $marker = [System.IO.File]::ReadAllText($MarkerPath) | ConvertFrom-Json
+  $middleDot = [char]0x00B7
+  if ([int]$marker.schemaVersion -ne 1 -or [string]$marker.channel -ne 'dev') {
+    throw 'Dev synchronization marker has an invalid schema or channel.'
+  }
+  if ([string]$marker.label -notmatch "^DEV $middleDot [0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$") {
+    throw "Dev synchronization marker has an invalid label: $([string]$marker.label)"
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse([string]$marker.syncedAtUtc, [ref]$parsed)) {
+    throw 'Dev synchronization marker has an invalid timestamp.'
+  }
+
+  [pscustomobject]@{
+    Label = [string]$marker.label
+    SyncedAtUtc = $parsed.ToUniversalTime().ToString('o')
+  }
+}
+
 function Copy-PopoExtensionSource {
   [CmdletBinding()]
   param(
@@ -233,6 +280,9 @@ function Invoke-PopoDevExtensionSync {
     Move-Item -LiteralPath $staging -Destination $target
     $swapped = $true
     $validation = Assert-PopoDevManifest -SourceManifestPath (Join-Path $repo 'manifest.json') -DevManifestPath (Join-Path $target 'manifest.json')
+    $syncMarkerPath = Join-Path $target 'dev-sync.json'
+    Write-PopoDevSyncMarker -DestinationPath $syncMarkerPath
+    $syncMarker = Assert-PopoDevSyncMarker -MarkerPath $syncMarkerPath
     if (Test-Path -LiteralPath $backup) {
       Remove-Item -LiteralPath $backup -Recurse -Force
     }
@@ -244,10 +294,12 @@ function Invoke-PopoDevExtensionSync {
       DevExtensionId = $validation.DevExtensionId
       SourceExtensionId = $validation.SourceExtensionId
       IdentitiesDiffer = $validation.IdentitiesDiffer
+      SyncBatchTime = $syncMarker.Label.Substring(6)
+      SyncedAtUtc = $syncMarker.SyncedAtUtc
     }
   } catch {
     $failure = $_
-    if ($swapped -and (Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $backup)) {
+    if ($swapped -and (Test-Path -LiteralPath $target)) {
       Remove-Item -LiteralPath $target -Recurse -Force
     }
     if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $target)) {
@@ -267,6 +319,8 @@ Export-ModuleMember -Function @(
   'Assert-PopoDevSyncTarget',
   'Write-PopoDevManifest',
   'Assert-PopoDevManifest',
+  'Write-PopoDevSyncMarker',
+  'Assert-PopoDevSyncMarker',
   'Copy-PopoExtensionSource',
   'Invoke-PopoDevExtensionSync'
 )

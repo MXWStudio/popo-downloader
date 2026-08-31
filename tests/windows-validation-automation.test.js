@@ -35,6 +35,7 @@ test("remote validation uses an isolated Git snapshot and the fixed Dev sync", (
   assert.match(validator, /npm run check:full:windows/);
   assert.match(validator, /POPO_WINDOWS_TESTS=PASS/);
   assert.match(validator, /POPO_DEV_SYNC=PASS/);
+  assert.match(validator, /POPO_DEV_SYNC_BATCH_TIME=/);
   assert.match(sender, /POPO_WINDOWS_BUILD_DEV_PACKAGE/);
   assert.match(sender, /POPO_WINDOWS_INSTALL_DEV_PACKAGE/);
   assert.match(sender, /POPO_WINDOWS_SOURCE_MODE/);
@@ -59,6 +60,7 @@ test("remote validation uses an isolated Git snapshot and the fixed Dev sync", (
   assert.match(sender, /WINDOWS TESTS:/);
   assert.match(sender, /DEV PACKAGE INSTALL:/);
   assert.match(sender, /DEV SYNC:/);
+  assert.match(sender, /DEV SYNC BATCH:/);
   assert.match(sender, /DEV TARGET:/);
   assert.match(sender, /STABLE TOUCHED: NO/);
   assert.match(sender, /Reload "POPO Dev 下载助手" in chrome:\/\/extensions/);

@@ -26,6 +26,7 @@ print_summary() {
   local verify_status=FAIL
   local windows_tests=FAIL
   local dev_sync='NOT RUN'
+  local dev_sync_batch='NOT AVAILABLE'
   local dev_install='NOT REQUESTED'
   if [[ $status -eq 0 ]]; then verify_status=PASS; fi
   if [[ -n $remote_log && -f $remote_log ]] && grep -q 'POPO_WINDOWS_TESTS=PASS' "$remote_log"; then
@@ -35,6 +36,7 @@ print_summary() {
     dev_sync='NOT REQUESTED'
   elif [[ -n $remote_log && -f $remote_log ]] && grep -q 'POPO_DEV_SYNC=PASS' "$remote_log"; then
     dev_sync=PASS
+    dev_sync_batch=$(grep 'POPO_DEV_SYNC_BATCH_TIME=' "$remote_log" | tail -1 | sed 's/^.*POPO_DEV_SYNC_BATCH_TIME=//')
   elif [[ $windows_tests == PASS ]]; then
     dev_sync=FAIL
   fi
@@ -53,6 +55,11 @@ print_summary() {
   echo "WINDOWS TESTS: $windows_tests"
   echo "DEV PACKAGE INSTALL: $dev_install"
   echo "DEV SYNC: $dev_sync"
+  if [[ $dev_sync == PASS ]]; then
+    echo "DEV SYNC BATCH: DEV · $dev_sync_batch"
+  else
+    echo "DEV SYNC BATCH: $dev_sync_batch"
+  fi
   echo "DEV TARGET: $dev_target"
   echo "STABLE TOUCHED: NO"
   echo

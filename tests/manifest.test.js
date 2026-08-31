@@ -347,6 +347,23 @@ test("弹窗为每个任务显示文件进度条", () => {
   assert.match(popupCss, /\.popup-job-progress/);
 });
 
+test("Dev 弹窗只显示最近一次成功同步的可见批次", () => {
+  const popup = fs.readFileSync(path.join(__dirname, "..", "src", "popup.tsx"), "utf8");
+  const popupCss = fs.readFileSync(path.join(__dirname, "..", "popup.css"), "utf8");
+  const devSync = fs.readFileSync(
+    path.join(__dirname, "..", "scripts", "PopoDevExtension.psm1"),
+    "utf8"
+  );
+  assert.match(popup, /\/-dev\$\/i/);
+  assert.match(popup, /chrome\.runtime\.getURL\("dev-sync\.json"\)/);
+  assert.match(popup, /id="devSyncBatch"/);
+  assert.match(popup, /\^DEV · \\d\{2\}-\\d\{2\}/);
+  assert.match(popupCss, /#devSyncBatch/);
+  assert.match(devSync, /Write-PopoDevSyncMarker/);
+  assert.match(devSync, /Move-Item -LiteralPath \$staging -Destination \$target[\s\S]*Write-PopoDevSyncMarker/);
+  assert.doesNotMatch(manifest.version_name, /-dev$/i);
+});
+
 test("下载地址与页面命令都执行来源白名单检查", () => {
   const core = fs.readFileSync(path.join(__dirname, "..", "core.js"), "utf8");
   const pageApi = fs.readFileSync(path.join(__dirname, "..", "page-api.js"), "utf8");
@@ -356,4 +373,10 @@ test("下载地址与页面命令都执行来源白名单检查", () => {
   assert.match(pageApi, /endsWith\("\.s3v2\.nie\.netease\.com"\)/);
   assert.match(background, /assertTrustedRuntimeSource\(command, sender\)/);
   assert.match(background, /后台拒绝跨 POPO 团队空间的页面命令/);
+  assert.match(background, /const validatedUrl = validateDownloadUrl\(url\)/);
+  assert.ok(
+    background.indexOf("const validatedUrl = validateDownloadUrl(url)") <
+      background.indexOf("const started = await startOrReplaceGopeedTask("),
+    "final URL validation must run before creating a Gopeed task"
+  );
 });
