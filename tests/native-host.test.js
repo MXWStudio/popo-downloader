@@ -63,3 +63,14 @@ test("安装脚本把当前扩展 ID 写入允许来源并注册到当前用户"
   assert.match(installer, /HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts/);
   assert.doesNotMatch(installer, /HKEY_LOCAL_MACHINE|HKLM:/);
 });
+
+test("Gopeed 只复用随包进程和回环监听，不接受其他本机代理", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "native-host", "FolderPickerHost.cs"),
+    "utf8"
+  );
+  assert.match(source, /if \(bundledProcessId <= 0\) return false/);
+  assert.match(source, /listenerAddress, "127\.0\.0\.1"/);
+  assert.match(source, /listenerAddress, "::1"/);
+  assert.doesNotMatch(source, /else\s*\{\s*processIds = FindGopeedProcessIds\(\)/s);
+});
