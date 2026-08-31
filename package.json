@@ -24,6 +24,8 @@
     "test:agent-security:scan": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agent-security.ps1 -RunScan",
     "verify:agent-shadow-cycle": "node scripts/verify-shadow-cycle.mjs",
     "verify:windows:remote": "bash scripts/remote-windows-dev.sh",
+    "smoke:windows": "node scripts/print-windows-smoke.mjs",
+    "smoke:windows:download": "node scripts/print-windows-smoke.mjs --download-logic",
     "dev:extension:sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-dev-extension.ps1",
     "test:dev-extension:sync": "node --test tests/dev-extension-sync.test.js",
     "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev",

@@ -7,6 +7,8 @@ base_commit=${3:-}
 sync_extension=${4:-}
 source_kind=${5:-}
 origin_url=${6:-}
+build_dev_package=${7:-0}
+install_dev_package=${8:-0}
 
 if [[ ! $remote_root =~ ^/[A-Za-z]/([^/]+/)*POPODevValidation$ ]]; then
   echo "Refusing unsafe Windows validation root: $remote_root" >&2
@@ -30,6 +32,18 @@ if [[ $source_kind != origin && $source_kind != bundle ]]; then
 fi
 if [[ ! $origin_url =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]; then
   echo "Refusing unsupported origin URL: $origin_url" >&2
+  exit 1
+fi
+if [[ $build_dev_package != 0 && $build_dev_package != 1 ]]; then
+  echo "Refusing invalid Dev package flag: $build_dev_package" >&2
+  exit 1
+fi
+if [[ $install_dev_package != 0 && $install_dev_package != 1 ]]; then
+  echo "Refusing invalid Dev install flag: $install_dev_package" >&2
+  exit 1
+fi
+if [[ $install_dev_package == 1 && $build_dev_package != 1 ]]; then
+  echo "Refusing Dev install without a Dev package build." >&2
   exit 1
 fi
 
@@ -73,6 +87,12 @@ log_path="$run_root/validation.log"
 validator_args=()
 if [[ $sync_extension == 0 ]]; then
   validator_args+=("-NoSync")
+fi
+if [[ $build_dev_package == 1 ]]; then
+  validator_args+=("-BuildDevPackage")
+fi
+if [[ $install_dev_package == 1 ]]; then
+  validator_args+=("-InstallDevPackage")
 fi
 
 set +e
