@@ -7,12 +7,12 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
 }
 
 host=${POPO_WINDOWS_HOST:-edy-main}
-remote_root=${POPO_WINDOWS_REMOTE_ROOT:-/d/POPODevValidation}
+remote_root=${POPO_WINDOWS_REMOTE_ROOT:-/d/POPO/Validation/POPODevValidation}
 sync_extension=1
 build_dev_package=${POPO_WINDOWS_BUILD_DEV_PACKAGE:-0}
 install_dev_package=${POPO_WINDOWS_INSTALL_DEV_PACKAGE:-0}
 source_mode=${POPO_WINDOWS_SOURCE_MODE:-auto}
-dev_target='D:\POPODevDownloader\Extension'
+dev_target='D:\POPO\Dev\POPODevDownloader\Extension'
 base_commit=$(git -C "$repo_root" rev-parse HEAD)
 dirty_changes=NO
 if [[ -n $(git -C "$repo_root" status --porcelain --untracked-files=normal) ]]; then

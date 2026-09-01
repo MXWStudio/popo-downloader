@@ -5,12 +5,11 @@ function Get-PopoDevExtensionConfig {
   param()
 
   # Keep this module ASCII-only so Windows PowerShell 5.1 can parse it without a BOM.
-  $stableParentName = '"\u65b0\u5efa\u6587\u4ef6\u5939"' | ConvertFrom-Json
   $displayName = '"POPO Dev \u4e0b\u8f7d\u52a9\u624b"' | ConvertFrom-Json
   $description = '"\u4e0e\u6b63\u5f0f\u7248\u9694\u79bb\u7684 POPO \u5f00\u53d1\u4e0e\u9a8c\u6536\u52a9\u624b\u3002"' | ConvertFrom-Json
   [pscustomobject]@{
-    DevTargetDirectory = 'D:\POPODevDownloader\Extension'
-    StableDirectory = "E:\$stableParentName\POPOStableDownloader\Extension"
+    DevTargetDirectory = 'D:\POPO\Dev\POPODevDownloader\Extension'
+    StableDirectory = 'D:\POPO\Stable\POPOStableDownloader\Extension'
     DisplayName = $displayName
     Description = $description
     ExtensionKey = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAktkTv13QYDbQoZCW7Dnk84LsxiHEj0H2a0y7Ir8AY12pAb1hG6vfB7aQ0nyudGhxAmudVdPluPJy3zx48SHAHwu2YJDfVUIdN+LhUU6FkeN9XlHp9dtzYxyO7/oG5NS2XGBu7rPxoJS0Owme5rpj6Oks3oiFI95TaTn2DOVB7FryTbdPTvBX9czDvOxvPG45hABm0Djz/DDX5luSmCXDPCnNkERgkU4f/WTAJFble76uph6RXlyFD5PzdPETpYvngjALceH2t+FcWjf2+CZjwudPkUQRrM/Z1DF77md2ovZV8B9zQnlympk8JQCb44tY1jtvypTE9W1IHaCXjZIizwIDAQAB'

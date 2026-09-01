@@ -160,7 +160,7 @@ test("development green package is isolated from the stable release channel", ()
   assert.match(buildScript, /Copy-PopoExtensionSource[^\n]+-Channel \$Channel/);
   assert.match(devExtensionModule, /\$manifest\.key = \$config\.ExtensionKey/);
   assert.match(devExtensionModule, /\$manifest\.version_name = "\$\(\[string\]\$manifest\.version\)-dev"/);
-  assert.match(devExtensionSync, /D:\\POPODevDownloader\\Extension/);
+  assert.match(devExtensionSync, /D:\\POPO\\Dev\\POPODevDownloader\\Extension/);
   assert.equal(
     packageJson.scripts["dev:extension:sync"],
     "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-dev-extension.ps1"

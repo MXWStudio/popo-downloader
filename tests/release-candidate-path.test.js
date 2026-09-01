@@ -13,7 +13,7 @@ const source = fs.readFileSync(script, "utf8");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 
 test("candidate acceptance uses a fixed short QA root and keeps evidence identity in metadata", () => {
-  assert.match(source, /GetFullPath\('D:\\POPOQA\\078'\)/);
+  assert.match(source, /GetFullPath\('D:\\POPO\\Candidate\\078'\)/);
   assert.match(source, /\("i-\$runId"\)/);
   assert.match(source, /\("e-\$runId"\)/);
   assert.match(source, /Substring\(0, 8\)/);
@@ -27,8 +27,8 @@ test("candidate acceptance uses a fixed short QA root and keeps evidence identit
 });
 
 test("candidate acceptance rejects Stable, Dev, repo and non-QA targets", () => {
-  assert.match(source, /E:\\新建文件夹\\POPOStableDownloader/);
-  assert.match(source, /D:\\POPODevDownloader/);
+  assert.match(source, /D:\\POPO\\Stable\\POPOStableDownloader/);
+  assert.match(source, /D:\\POPO\\Dev\\POPODevDownloader/);
   assert.match(source, /\$full -eq \$repoRoot/);
   assert.ok(source.includes("StartsWith($qaRoot + '\\',"));
   assert.match(source, /Unsafe \$Purpose outside the fixed QA root/);
@@ -68,14 +68,14 @@ test("candidate path preflight passes a short root and rejects the reproduced 12
     const shortRun = spawnSync("powershell.exe", [
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
       "-PackageZip", zipPath,
-      "-InstallRootOverride", "D:\\POPOQA\\078\\i-12345678"
+      "-InstallRootOverride", "D:\\POPO\\Candidate\\078\\i-12345678"
     ], { cwd: root, encoding: "utf8", windowsHide: true, timeout: 30_000 });
     assert.equal(shortRun.status, 0, shortRun.stdout + shortRun.stderr);
     const shortResult = JSON.parse(shortRun.stdout.trim());
     assert.equal(shortResult.pathBudget.safe, true);
     assert.equal(shortResult.writesSystemRegistration, false);
 
-    const prefix = "D:\\POPOQA\\078\\B077-";
+    const prefix = "D:\\POPO\\Candidate\\078\\B077-";
     const longRoot = prefix + "b".repeat(126 - prefix.length);
     const longRun = spawnSync("powershell.exe", [
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,

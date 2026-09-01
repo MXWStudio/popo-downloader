@@ -11,9 +11,9 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\')
-$qaRoot = [System.IO.Path]::GetFullPath('D:\POPOQA\078').TrimEnd('\')
-$stableRoot = [System.IO.Path]::GetFullPath('E:\新建文件夹\POPOStableDownloader').TrimEnd('\')
-$devRoot = [System.IO.Path]::GetFullPath('D:\POPODevDownloader').TrimEnd('\')
+$qaRoot = [System.IO.Path]::GetFullPath('D:\POPO\Candidate\078').TrimEnd('\')
+$stableRoot = [System.IO.Path]::GetFullPath('D:\POPO\Stable\POPOStableDownloader').TrimEnd('\')
+$devRoot = [System.IO.Path]::GetFullPath('D:\POPO\Dev\POPODevDownloader').TrimEnd('\')
 $manifest = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'manifest.json')) | ConvertFrom-Json
 $version = [string]$manifest.version_name
 $packageName = "POPO-Stable-Downloader-$version-win-x64"

@@ -11,8 +11,8 @@ const crypto = require("node:crypto");
 const root = path.join(__dirname, "..");
 const modulePath = path.join(root, "scripts", "PopoDevExtension.psm1");
 const syncScript = path.join(root, "scripts", "sync-dev-extension.ps1");
-const fixedDevTarget = "D:\\POPODevDownloader\\Extension";
-const stableTarget = "E:\\新建文件夹\\POPOStableDownloader\\Extension";
+const fixedDevTarget = "D:\\POPO\\Dev\\POPODevDownloader\\Extension";
+const stableTarget = "D:\\POPO\\Stable\\POPOStableDownloader\\Extension";
 const sourceManifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
 
 function runPowerShell(args, options = {}) {
@@ -166,6 +166,6 @@ test("production sync wrapper rejects an unrecognized target and the repository 
 
 test("production sync wrapper keeps the fixed Dev target in source", () => {
   const source = fs.readFileSync(syncScript, "utf8");
-  assert.match(source, /D:\\POPODevDownloader\\Extension/);
-  assert.equal(fixedDevTarget, "D:\\POPODevDownloader\\Extension");
+  assert.match(source, /D:\\POPO\\Dev\\POPODevDownloader\\Extension/);
+  assert.equal(fixedDevTarget, "D:\\POPO\\Dev\\POPODevDownloader\\Extension");
 });

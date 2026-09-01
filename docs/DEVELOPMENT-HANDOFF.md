@@ -49,7 +49,7 @@ Mac 可以把当前 Git 基线、未提交的 tracked 修改和未忽略的 untr
 npm run verify:windows:remote
 ```
 
-默认通过 SSH 主机 `edy-main`，只在 `/d/POPODevValidation` 下创建临时验证工作树。已存在于 `origin` 的基线由 Windows 直接读取，只通过 SSH 流式发送当前补丁和未跟踪文件；未推送的本地提交会自动改用 Git bundle，不依赖 SCP。Windows 验证依次执行 `npm ci`、安装/确认 Playwright Chromium、`npm run check:full:windows`，其中 Node 测试串行执行以避免多个 Agent/安装器进程测试争用；成功后调用现有 `npm run dev:extension:sync`，其目标仍固定为 `D:\POPODevDownloader\Extension`。成功的临时工作树会删除；失败现场保留在远端输出所示目录用于诊断。
+默认通过 SSH 主机 `edy-main`，只在 `/d/POPO/Validation/POPODevValidation` 下创建临时验证工作树。已存在于 `origin` 的基线由 Windows 直接读取，只通过 SSH 流式发送当前补丁和未跟踪文件；未推送的本地提交会自动改用 Git bundle，不依赖 SCP。Windows 验证依次执行 `npm ci`、安装/确认 Playwright Chromium、`npm run check:full:windows`，其中 Node 测试串行执行以避免多个 Agent/安装器进程测试争用；成功后调用现有 `npm run dev:extension:sync`，其目标仍固定为 `D:\POPO\Dev\POPODevDownloader\Extension`。成功的临时工作树会删除；失败现场保留在远端输出所示目录用于诊断。
 
 只验证 Windows 自动测试、不写入 Dev Extension 目录时使用：
 

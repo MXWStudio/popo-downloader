@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$RepoRoot = '',
-  [string]$TargetDirectory = 'D:\POPODevDownloader\Extension'
+  [string]$TargetDirectory = 'D:\POPO\Dev\POPODevDownloader\Extension'
 )
 
 $ErrorActionPreference = 'Stop'

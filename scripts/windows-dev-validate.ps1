@@ -51,7 +51,7 @@ try {
     $packageRoot = Join-Path $repo "dist\POPO-Dev-Downloader-$devVersionName-win-x64"
     $setupPath = Join-Path $packageRoot 'POPO-Dev-Setup.exe'
     $sourceNativeHost = Join-Path $packageRoot 'native-host\bin\PopoFolderPickerHost.exe'
-    $devRoot = 'D:\POPODevDownloader'
+    $devRoot = 'D:\POPO\Dev\POPODevDownloader'
     if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf)) {
       throw "Dev setup executable was not found: $setupPath"
     }
