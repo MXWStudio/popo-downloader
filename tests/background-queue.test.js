@@ -50,6 +50,8 @@ function createHarness(initial = {}, options = {}) {
   delete require.cache[backgroundPath];
   const previousFetch = Object.getOwnPropertyDescriptor(global, "fetch");
   const previousSetTimeout = global.setTimeout;
+  const previousClearTimeout = global.clearTimeout;
+  const activeTimeouts = new Set();
   const stored = structuredClone(initial);
   const deletedGopeedTasks = [];
   const pausedGopeedTasks = [];
@@ -102,13 +104,22 @@ function createHarness(initial = {}, options = {}) {
       value: options.fetch
     });
   }
-  if (Number.isFinite(options.updatePollDelayMs)) {
-    global.setTimeout = (callback, delay, ...args) => previousSetTimeout(
-      callback,
-      delay === 2000 ? options.updatePollDelayMs : delay,
-      ...args
-    );
-  }
+  global.setTimeout = (callback, delay, ...args) => {
+    const effectiveDelay = Number.isFinite(options.updatePollDelayMs) && delay === 2000
+      ? options.updatePollDelayMs
+      : delay;
+    let timeout;
+    timeout = previousSetTimeout((...callbackArgs) => {
+      activeTimeouts.delete(timeout);
+      callback(...callbackArgs);
+    }, effectiveDelay, ...args);
+    activeTimeouts.add(timeout);
+    return timeout;
+  };
+  global.clearTimeout = (timeout) => {
+    activeTimeouts.delete(timeout);
+    previousClearTimeout(timeout);
+  };
   global.chrome = {
     action: {
       async setBadgeText({ text }) { actionState.text = text; },
@@ -181,7 +192,10 @@ function createHarness(initial = {}, options = {}) {
     delete global.PopoRuntime;
     if (previousFetch) Object.defineProperty(global, "fetch", previousFetch);
     else delete global.fetch;
+    for (const timeout of activeTimeouts) previousClearTimeout(timeout);
+    activeTimeouts.clear();
     global.setTimeout = previousSetTimeout;
+    global.clearTimeout = previousClearTimeout;
     delete require.cache[backgroundPath];
   };
   const fireAlarm = (name) => {
