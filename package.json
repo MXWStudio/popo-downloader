@@ -26,6 +26,7 @@
     "verify:windows:remote": "bash scripts/remote-windows-dev.sh",
     "smoke:windows": "node scripts/print-windows-smoke.mjs",
     "smoke:windows:download": "node scripts/print-windows-smoke.mjs --download-logic",
+    "smoke:filename-site": "node scripts/filename-smoke-server.mjs",
     "dev:extension:sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-dev-extension.ps1",
     "test:dev-extension:sync": "node --test tests/dev-extension-sync.test.js",
     "build:test-package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-test-package.ps1 -Channel Dev",

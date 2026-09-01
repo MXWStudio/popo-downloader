@@ -4,6 +4,7 @@ importScripts("runtime/popo-runtime.js", "core.js", "gopeed.js", "queue.js");
 
 const {
   FAILURE,
+  buildCollisionSafeDownloadFilename,
   buildDownloadFilename,
   extractTeamSpaceId,
   findFirstHttpUrl,
@@ -1591,6 +1592,30 @@ function gopeedTaskIdentityLabels(state, item) {
   });
 }
 
+function assignedDownloadFilename(state, item) {
+  const sourceName = String(item.downloadName || item.name || "");
+  if (item.relativeDownloadFilename && item.relativeDownloadFilenameSource === sourceName) {
+    return item.relativeDownloadFilename;
+  }
+  const occupiedFilenames = (state.items || [])
+    .filter((candidate) => candidate !== item && candidate.id !== item.id && candidate.selected !== false)
+    .map((candidate) => {
+      const candidateSource = String(candidate.downloadName || candidate.name || "");
+      if (candidate.relativeDownloadFilename &&
+          candidate.relativeDownloadFilenameSource === candidateSource) {
+        return candidate.relativeDownloadFilename;
+      }
+      return buildDownloadFilename(candidate, state.settings);
+    });
+  item.relativeDownloadFilename = buildCollisionSafeDownloadFilename(
+    item,
+    state.settings,
+    occupiedFilenames
+  );
+  item.relativeDownloadFilenameSource = sourceName;
+  return item.relativeDownloadFilename;
+}
+
 async function reserveDownloadOperation(state, item) {
   const jobId = activeJob(state)?.id || "";
   if (!jobId || !indexedDbTaskStoreAvailable() ||
@@ -1651,7 +1676,7 @@ async function completeDownloadOperation(state, item, status) {
 }
 
 function gopeedTaskDefinition(state, item, url) {
-  const relativeFilename = buildDownloadFilename(item, state.settings);
+  const relativeFilename = assignedDownloadFilename(state, item);
   const target = splitDownloadTarget(state.gopeedDownloadDir, relativeFilename);
   return {
     url,
@@ -1663,7 +1688,7 @@ function gopeedTaskDefinition(state, item, url) {
 }
 
 function itemDownloadTargetKey(state, item) {
-  const relativeFilename = buildDownloadFilename(item, state.settings);
+  const relativeFilename = assignedDownloadFilename(state, item);
   const target = splitDownloadTarget(state.gopeedDownloadDir, relativeFilename);
   return normalizeGopeedTargetKey(`${target.path}/${target.name}`);
 }
@@ -2643,20 +2668,22 @@ async function processScanStep(state) {
         const legacyRetryKey = `${entry.url}\u0000${scanned.name}`;
         const retrySelected = !retryKeys?.length ||
           retryKeys.includes(retryKey) || retryKeys.includes(legacyRetryKey);
-        const relativeTargetKey = normalizeGopeedTargetKey(buildDownloadFilename({
+        const candidateItem = {
+          id: key,
           name: scanned.name,
+          itemIndex: scanned.itemIndex,
+          parentUrl: entry.url,
           directoryPath
-        }, settings));
+        };
+        const relativeTargetKey = normalizeGopeedTargetKey(
+          assignedDownloadFilename(state, candidateItem)
+        );
         const alreadyInGopeed = currentJob?.restoreStrategy === "missing_from_gopeed" &&
           currentJob.existingGopeedTargetKeys?.includes(relativeTargetKey);
         // 用户选择的是整个文件夹：除系统元数据外，不按扩展名或关键词跳过文件。
         const selected = !systemMetadata && retrySelected && !alreadyInGopeed;
         state.items.push({
-          id: key,
-          name: scanned.name,
-          itemIndex: scanned.itemIndex,
-          parentUrl: entry.url,
-          directoryPath,
+          ...candidateItem,
           rootUrl: entry.rootUrl || state.rootUrl || entry.url,
           directoryRoute: normalizeDirectoryRoute(entry.route),
           retryKey,

@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   FAILURE,
+  buildCollisionSafeDownloadFilename,
   buildDownloadFilename,
   extractTeamSpaceId,
   extensionOf,
@@ -460,4 +461,63 @@ test("CSV 正确转义逗号、引号和换行", () => {
 test("路径片段不会产生空名称", () => {
   assert.equal(sanitizePathSegment("..."), "未命名");
   assert.equal(sanitizePathSegment(" name. "), "name");
+});
+
+test("Windows 保留名称在有无扩展名时都安全改名", () => {
+  for (const name of [
+    "CON",
+    "CON.txt",
+    "PRN.mp4",
+    "AUX.zip",
+    "NUL",
+    "COM1.txt",
+    "COM9",
+    "LPT1.psd",
+    "LPT9.zip"
+  ]) {
+    assert.equal(sanitizePathSegment(name), `_${name}`, name);
+  }
+});
+
+test("非法字符清理后的真实碰撞使用稳定短标识", () => {
+  const settings = { downloadRoot: "POPO", preserveStructure: true };
+  const first = {
+    id: "page-a:item-1",
+    directoryPath: ["目录"],
+    name: "A:B.mp4"
+  };
+  const second = {
+    id: "page-a:item-2",
+    directoryPath: ["目录"],
+    name: "A?B.mp4"
+  };
+  const third = {
+    id: "page-a:item-3",
+    directoryPath: ["目录"],
+    name: "A*B.mp4"
+  };
+  const firstPath = buildCollisionSafeDownloadFilename(first, settings, []);
+  const secondPath = buildCollisionSafeDownloadFilename(second, settings, [firstPath]);
+  const thirdPath = buildCollisionSafeDownloadFilename(third, settings, [firstPath, secondPath]);
+  assert.equal(firstPath, "POPO/目录/A_B.mp4");
+  assert.match(secondPath, /^POPO\/目录\/A_B~[0-9a-f]{8}\.mp4$/);
+  assert.match(thirdPath, /^POPO\/目录\/A_B~[0-9a-f]{8}\.mp4$/);
+  assert.notEqual(secondPath, firstPath);
+  assert.notEqual(thirdPath, firstPath);
+  assert.notEqual(thirdPath, secondPath);
+  assert.equal(
+    buildCollisionSafeDownloadFilename(second, settings, [firstPath]),
+    secondPath
+  );
+});
+
+test("普通中英文文件名不会发生无意义变化", () => {
+  const settings = { downloadRoot: "POPO稳定下载", preserveStructure: true };
+  for (const name of ["正常视频.mp4", "normal-file.zip", "素材2026", "设计源文件.psd"]) {
+    assert.equal(buildCollisionSafeDownloadFilename({
+      id: `item:${name}`,
+      directoryPath: ["普通目录"],
+      name
+    }, settings, []), `POPO稳定下载/普通目录/${name}`);
+  }
 });

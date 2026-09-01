@@ -224,7 +224,12 @@
       .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
       .replace(/[. ]+$/g, "")
       .trim();
-    return cleaned || "未命名";
+    const usable = cleaned || "未命名";
+    const reservedStem = usable.split(".", 1)[0].replace(/[. ]+$/g, "").toUpperCase();
+    if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(reservedStem)) {
+      return `_${usable}`;
+    }
+    return usable;
   }
 
   function buildDownloadFilename(item, settings) {
@@ -237,6 +242,60 @@
     }
     segments.push(sanitizePathSegment(item.downloadName || item.name));
     return segments.join("/");
+  }
+
+  function stableDownloadIdentity(item) {
+    const explicitIdentity = item?.id || item?.pageId || item?.itemId;
+    if (explicitIdentity) return String(explicitIdentity);
+    return [
+      String(item?.parentUrl || ""),
+      (item?.directoryPath || []).map((part) => String(part || "")).join("\u0001"),
+      String(item?.itemIndex ?? ""),
+      String(item?.name || "")
+    ].join("\u0000");
+  }
+
+  function shortStableHash(value) {
+    let hash = 0x811c9dc5;
+    const text = String(value || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  }
+
+  function windowsPathKey(value) {
+    return String(value || "").replace(/\\/g, "/").toLowerCase();
+  }
+
+  function appendFilenameSuffix(relativeFilename, suffix) {
+    const segments = String(relativeFilename || "").split("/");
+    const filename = segments.pop() || "未命名";
+    const extensionIndex = filename.lastIndexOf(".");
+    const hasExtension = extensionIndex > 0;
+    const stem = hasExtension ? filename.slice(0, extensionIndex) : filename;
+    const extension = hasExtension ? filename.slice(extensionIndex) : "";
+    segments.push(`${stem}${suffix}${extension}`);
+    return segments.join("/");
+  }
+
+  function buildCollisionSafeDownloadFilename(item, settings, occupiedFilenames) {
+    const baseFilename = buildDownloadFilename(item, settings);
+    const occupied = new Set(
+      (Array.isArray(occupiedFilenames) ? occupiedFilenames : [])
+        .map(windowsPathKey)
+        .filter(Boolean)
+    );
+    if (!occupied.has(windowsPathKey(baseFilename))) return baseFilename;
+
+    const identity = stableDownloadIdentity(item);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const hashInput = attempt ? `${identity}\u0000${attempt}` : identity;
+      const candidate = appendFilenameSuffix(baseFilename, `~${shortStableHash(hashInput)}`);
+      if (!occupied.has(windowsPathKey(candidate))) return candidate;
+    }
+    throw new Error("无法为碰撞文件生成稳定的本地路径");
   }
 
   const ALLOWED_DOWNLOAD_HOST_SUFFIXES = Object.freeze([
@@ -663,6 +722,7 @@
 
   const api = {
     FAILURE,
+    buildCollisionSafeDownloadFilename,
     buildDownloadFilename,
     extractTeamSpaceId,
     extensionOf,
